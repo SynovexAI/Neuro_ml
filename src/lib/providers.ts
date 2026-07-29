@@ -37,14 +37,37 @@ export async function fetchModels(baseUrl: string, apiKey: string): Promise<stri
 }
 
 // The provider used to serve LLM calls (first enabled one). Returns a decrypted key.
-export async function getActiveProvider(): Promise<{ baseUrl: string; apiKey: string; model: string; provider: string } | null> {
+export async function getActiveProvider(): Promise<{ id: string; baseUrl: string; apiKey: string; model: string; provider: string; label: string | null } | null> {
   const rows = await db.select().from(providers).where(eq(providers.enabled, true)).limit(1);
   const p = rows[0];
   if (!p) return null;
   return {
+    id: p.id,
     provider: p.provider,
+    label: p.label ?? null,
     baseUrl: p.baseUrl,
     apiKey: p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "",
     model: p.defaultModel || "",
   };
+}
+
+// Fetch one enabled provider by id (used when the user picks a specific provider in the UI).
+export async function getProviderById(id: string): Promise<{ id: string; baseUrl: string; apiKey: string; model: string; provider: string; label: string | null } | null> {
+  const rows = await db.select().from(providers).where(eq(providers.id, id)).limit(1);
+  const p = rows[0];
+  if (!p || !p.enabled) return null;
+  return {
+    id: p.id,
+    provider: p.provider,
+    label: p.label ?? null,
+    baseUrl: p.baseUrl,
+    apiKey: p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "",
+    model: p.defaultModel || "",
+  };
+}
+
+// All enabled providers (id + label for the UI selector, no keys).
+export async function getEnabledProviders(): Promise<{ id: string; provider: string; label: string | null; defaultModel: string }[]> {
+  const rows = await db.select().from(providers).where(eq(providers.enabled, true));
+  return rows.map((p) => ({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "" }));
 }

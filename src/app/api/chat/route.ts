@@ -1,17 +1,25 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { getActiveProvider } from "@/lib/providers";
+import { getActiveProvider, getProviderById } from "@/lib/providers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Streams plain-text tokens from the admin-configured provider (OpenAI-compatible).
+// Accepts optional `providerId` in the body to use a specific configured provider.
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const body = await req.json().catch(() => ({}));
-  const prov = await getActiveProvider();
+  let prov: Awaited<ReturnType<typeof getActiveProvider>>;
+  try {
+    prov = body.providerId
+      ? await getProviderById(String(body.providerId))
+      : await getActiveProvider();
+  } catch {
+    return NextResponse.json({ error: "Database error while loading provider config. Please retry." }, { status: 503 });
+  }
   if (!prov || !prov.baseUrl)
     return NextResponse.json({ error: "No LLM provider is configured yet. An admin must add one under Admin → Providers." }, { status: 400 });
 
@@ -46,23 +54,39 @@ export async function POST(req: Request) {
   const dec = new TextDecoder();
   const enc = new TextEncoder();
   let buf = "";
+
+  function flushLine(controller: ReadableStreamDefaultController, line: string): boolean {
+    const l = line.trim();
+    if (!l.startsWith("data:")) return false;
+    const data = l.slice(5).trim();
+    if (data === "[DONE]") { controller.close(); return true; }
+    try {
+      const j = JSON.parse(data);
+      if (j.error) {
+        const msg = (j.error as { message?: string }).message || "Provider stream error";
+        controller.error(new Error(msg));
+        return true;
+      }
+      const tok = (j as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+      if (tok) controller.enqueue(enc.encode(tok));
+    } catch { /* skip keepalive / partial */ }
+    return false;
+  }
+
   const stream = new ReadableStream({
     async pull(controller) {
       const { done, value } = await reader.read();
-      if (done) { controller.close(); return; }
+      if (done) {
+        // Flush any partial line remaining in the buffer
+        if (buf.trim()) flushLine(controller, buf);
+        controller.close();
+        return;
+      }
       buf += dec.decode(value, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       for (const line of lines) {
-        const l = line.trim();
-        if (!l.startsWith("data:")) continue;
-        const data = l.slice(5).trim();
-        if (data === "[DONE]") { controller.close(); return; }
-        try {
-          const j = JSON.parse(data);
-          const tok = j.choices?.[0]?.delta?.content;
-          if (tok) controller.enqueue(enc.encode(tok));
-        } catch { /* skip keepalive / partial */ }
+        if (flushLine(controller, line)) return;
       }
     },
     cancel() { reader.cancel().catch(() => {}); },
