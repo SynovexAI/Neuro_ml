@@ -6,22 +6,28 @@ type Msg = { role: string; content: string };
 
 async function streamChat(body: object, onToken: (full: string) => void): Promise<{ error?: string; text: string; ms: number }> {
   const t0 = performance.now();
-  const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok || !res.body) {
-    const j = await res.json().catch(() => ({ error: "Request failed" }));
-    return { error: j.error || "Request failed", text: "", ms: 0 };
+  try {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok || !res.body) {
+      const j = await res.json().catch(() => ({ error: "Request failed" }));
+      return { error: j.error || "Request failed", text: "", ms: 0 };
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value, { stream: true });
+      onToken(text);
+    }
+    return { text, ms: Math.round(performance.now() - t0) };
+  } catch (e) {
+    return { error: (e as Error).message || "Stream error", text: "", ms: 0 };
   }
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let text = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    text += dec.decode(value, { stream: true });
-    onToken(text);
-  }
-  return { text, ms: Math.round(performance.now() - t0) };
 }
+
+type ProviderOption = { id: string; provider: string; label: string | null; defaultModel: string };
 
 export default function PromptingLab() {
   const [system, setSystem] = useState("You are a concise assistant. Answer in one short paragraph.");
@@ -31,6 +37,9 @@ export default function PromptingLab() {
   const [topP, setTopP] = useState(0.95);
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [providerOptions, setProviderOptions] = useState<ProviderOption[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<string>("");
   const [provider, setProvider] = useState<string | null>(null);
   const [outA, setOutA] = useState("Press Run to stream a response…");
   const [outB, setOutB] = useState("A second variant streams here for comparison…");
@@ -43,13 +52,34 @@ export default function PromptingLab() {
   const [saved, setSaved] = useState("");
   const traceTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // On mount: load all providers + models for the default (first) provider
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => {
+      setProviderOptions(j.providers || []);
       setProvider(j.provider);
+      setSelectedProviderId(j.providerId || j.providers?.[0]?.id || "");
       setModels(j.models || []);
       setModel(j.default || j.models?.[0] || "");
     }).catch(() => {});
   }, []);
+
+  // When the user picks a different provider, fetch its model list
+  async function handleProviderChange(id: string) {
+    setSelectedProviderId(id);
+    setModel("");
+    setModels([]);
+    setModelsLoading(true);
+    try {
+      const j = await fetch(`/api/models?providerId=${encodeURIComponent(id)}`).then((r) => r.json());
+      setProvider(j.provider);
+      setModels(j.models || []);
+      setModel(j.default || j.models?.[0] || "");
+    } catch {
+      setModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  }
 
   function playTrace() {
     const steps = [
@@ -72,16 +102,19 @@ export default function PromptingLab() {
     if (!model) { setOutA("No model available. Ask an admin to configure a provider in Admin → Providers."); return; }
     setRunning(true); playTrace();
     const messages: Msg[] = [{ role: "system", content: system }, { role: "user", content: prompt }];
+    const provPayload = selectedProviderId ? { providerId: selectedProviderId } : {};
     setMetaA("streaming…"); setOutA("");
-    const a = streamChat({ messages, model, temperature: temp, maxTokens, topP }, (t) => setOutA(t));
+    const a = streamChat({ messages, model, temperature: temp, maxTokens, topP, ...provPayload }, (t) => setOutA(t));
     let b: Promise<{ error?: string; text: string; ms: number }> | null = null;
     if (compare) {
       setMetaB("streaming…"); setOutB("");
-      b = streamChat({ messages, model, temperature: Math.min(1.2, temp + 0.4), maxTokens, topP }, (t) => setOutB(t));
+      b = streamChat({ messages, model, temperature: Math.min(1.2, temp + 0.4), maxTokens, topP, ...provPayload }, (t) => setOutB(t));
     }
     const ra = await a;
-    if (ra.error) { setOutA("⚠ " + ra.error); setMetaA("error"); } else { setMetaA(`~${Math.round(ra.text.length / 4)} tok · ${ra.ms}ms`); }
-    if (b) { const rb = await b; if (rb.error) { setOutB("⚠ " + rb.error); setMetaB("error"); } else setMetaB(`~${Math.round(rb.text.length / 4)} tok · ${rb.ms}ms · temp ${Math.min(1.2, temp + 0.4).toFixed(2)}`); }
+    if (ra.error) { setOutA("⚠ " + ra.error); setMetaA("error"); }
+    else if (!ra.text) { setOutA("⚠ Model returned no content. The provider may be rate-limited, the model unavailable, or the API key invalid."); setMetaA("no output"); }
+    else { setMetaA(`~${Math.round(ra.text.length / 4)} tok · ${ra.ms}ms`); }
+    if (b) { const rb = await b; if (rb.error) { setOutB("⚠ " + rb.error); setMetaB("error"); } else if (!rb.text) { setOutB("⚠ Model returned no content."); setMetaB("no output"); } else setMetaB(`~${Math.round(rb.text.length / 4)} tok · ${rb.ms}ms · temp ${Math.min(1.2, temp + 0.4).toFixed(2)}`); }
     setRunning(false);
   }
 
@@ -141,9 +174,17 @@ for chunk in r:
             <div className="knob"><div className="kr"><span>Temperature</span><b>{temp.toFixed(2)}</b></div><input type="range" min={0} max={1.2} step={0.05} value={temp} onChange={(e) => setTemp(+e.target.value)} /></div>
             <div className="knob"><div className="kr"><span>Max tokens</span><b>{maxTokens}</b></div><input type="range" min={64} max={2048} step={64} value={maxTokens} onChange={(e) => setMaxTokens(+e.target.value)} /></div>
             <div className="knob"><div className="kr"><span>Top-p</span><b>{topP.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={topP} onChange={(e) => setTopP(+e.target.value)} /></div>
-            <label className="fld">Model {provider ? `· ${provider}` : ""}</label>
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.length === 0 && <option value="">(no models — configure a provider)</option>}
+            <label className="fld">Provider</label>
+            <select value={selectedProviderId} onChange={(e) => handleProviderChange(e.target.value)} disabled={running}>
+              {providerOptions.length === 0 && <option value="">(no providers — configure one in Admin)</option>}
+              {providerOptions.map((p) => (
+                <option key={p.id} value={p.id}>{p.label || p.provider}</option>
+              ))}
+            </select>
+            <div style={{ height: 10 }} />
+            <label className="fld">Model{modelsLoading ? " · loading…" : provider ? ` · ${provider}` : ""}</label>
+            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={modelsLoading || running}>
+              {models.length === 0 && <option value="">{modelsLoading ? "Loading models…" : "(no models — configure a provider)"}</option>}
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
           </div>

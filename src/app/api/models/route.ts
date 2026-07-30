@@ -1,19 +1,54 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { getActiveProvider, fetchModels } from "@/lib/providers";
+import { getEnabledProviders, fetchModels } from "@/lib/providers";
 
 export const dynamic = "force-dynamic";
 
-// Models available to any signed-in user, from the active provider (key stays server-side).
-export async function GET() {
+// GET  /api/models               → returns all enabled providers
+// GET  /api/models?providerId=x  → also returns models for that specific provider
+export async function GET(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const prov = await getActiveProvider();
-  if (!prov) return NextResponse.json({ provider: null, models: [], default: "" });
+
+  let allProviders: Awaited<ReturnType<typeof getEnabledProviders>>;
   try {
-    const models = await fetchModels(prov.baseUrl, prov.apiKey);
-    return NextResponse.json({ provider: prov.provider, models, default: prov.model });
+    allProviders = await getEnabledProviders();
   } catch {
-    return NextResponse.json({ provider: prov.provider, models: prov.model ? [prov.model] : [], default: prov.model });
+    return NextResponse.json({ providers: [], models: [], provider: null, default: "" });
   }
+
+  if (allProviders.length === 0) {
+    return NextResponse.json({ providers: [], models: [], provider: null, default: "" });
+  }
+
+  // If the caller requests models for a specific provider, fetch them live.
+  const { searchParams } = new URL(req.url);
+  const requestedId = searchParams.get("providerId");
+
+  // Find the target provider (requested one, or the first enabled).
+  const { db } = await import("@/lib/db");
+  const { providers: provTable } = await import("@/lib/db/schema");
+  const { eq } = await import("drizzle-orm");
+  const { decrypt } = await import("@/lib/crypto");
+
+  const targetId = requestedId ?? allProviders[0].id;
+  const rows = await db.select().from(provTable).where(eq(provTable.id, targetId)).limit(1);
+  const p = rows[0];
+  if (!p) return NextResponse.json({ providers: allProviders, models: [], provider: null, default: "" });
+
+  const apiKey = p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "";
+  let models: string[];
+  try {
+    models = await fetchModels(p.baseUrl, apiKey);
+  } catch {
+    models = p.defaultModel ? [p.defaultModel] : [];
+  }
+
+  return NextResponse.json({
+    providers: allProviders,
+    provider: p.provider,
+    providerId: p.id,
+    models,
+    default: p.defaultModel || models[0] || "",
+  });
 }

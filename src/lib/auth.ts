@@ -53,12 +53,18 @@ export async function getSessionUser(): Promise<User | null> {
   const c = await cookies();
   const token = c.get(COOKIE)?.value;
   if (!token) return null;
-  const s = await db.select().from(sessions)
-    .where(and(eq(sessions.token, token), gt(sessions.expiresAt, new Date())))
-    .limit(1);
-  if (!s.length) return null;
-  const u = await db.select().from(users).where(eq(users.id, s[0].userId)).limit(1);
-  return u[0] ?? null;
+  try {
+    const s = await db.select().from(sessions)
+      .where(and(eq(sessions.token, token), gt(sessions.expiresAt, new Date())))
+      .limit(1);
+    if (!s.length) return null;
+    const u = await db.select().from(users).where(eq(users.id, s[0].userId)).limit(1);
+    return u[0] ?? null;
+  } catch {
+    // Transient DB error (e.g. stale pool connection). Treat as unauthenticated
+    // so the user is redirected to login instead of seeing a 500 error page.
+    return null;
+  }
 }
 
 export async function userCount(): Promise<number> {
