@@ -18,6 +18,7 @@ const LABS = [
 ];
 const STUDIO = [
   { href: "/compose", label: "Compose" },
+  { href: "/projects", label: "My Projects" },
   { href: "/templates", label: "Templates" },
 ];
 
