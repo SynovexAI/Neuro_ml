@@ -1,0 +1,1015 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  parseCSV, colStats, buildMatrix, split, makeModel, predict,
+  featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
+  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots,
+  type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
+  type FoldResult, type TreeNode, type BuiltData, type Model,
+} from "@/lib/mlUtils";
+import { sampleDatasets } from "@/lib/mlDatasets";
+import Plot from "@/components/Plot";
+import {
+  buildFigure, plotlyTheme, datasetInsights,
+  SINGLE_NUM, SINGLE_CAT, COMPARE_CHARTS, type EdaSpec,
+} from "@/lib/edaCharts";
+
+type Step = "data" | "eda" | "prep" | "model" | "validation" | "train";
+type ParamSpec = { name: string; type: "num" | "sel"; def: number | string; min?: number; max?: number; step?: number; opts?: string[] };
+
+const TREE_PARAMS: ParamSpec[] = [{ name: "max_depth", type: "num", def: 5, min: 1, max: 20, step: 1 }, { name: "min_samples_split", type: "num", def: 2, min: 2, max: 40, step: 1 }];
+const FOREST_PARAMS: ParamSpec[] = [{ name: "n_estimators", type: "num", def: 25, min: 5, max: 100, step: 5 }, ...TREE_PARAMS];
+const MODELS: Record<Task, Record<string, ParamSpec[]>> = {
+  classification: {
+    LogisticRegression: [{ name: "C", type: "num", def: 1.0, min: 0.01, max: 10, step: 0.01 }, { name: "max_iter", type: "num", def: 300, min: 50, max: 1000, step: 50 }, { name: "learning_rate", type: "num", def: 0.2, min: 0.01, max: 1, step: 0.01 }],
+    KNeighborsClassifier: [{ name: "n_neighbors", type: "num", def: 5, min: 1, max: 20, step: 1 }, { name: "weights", type: "sel", def: "uniform", opts: ["uniform", "distance"] }],
+    GaussianNB: [],
+    DecisionTree: TREE_PARAMS,
+    RandomForest: FOREST_PARAMS,
+  },
+  regression: {
+    LinearRegression: [{ name: "fit_intercept", type: "sel", def: "True", opts: ["True", "False"] }],
+    Ridge: [{ name: "alpha", type: "num", def: 1.0, min: 0, max: 10, step: 0.1 }],
+    KNeighborsRegressor: [{ name: "n_neighbors", type: "num", def: 5, min: 1, max: 20, step: 1 }, { name: "weights", type: "sel", def: "uniform", opts: ["uniform", "distance"] }],
+    DecisionTree: TREE_PARAMS,
+    RandomForest: FOREST_PARAMS,
+  },
+};
+const MODEL_INFO: Record<string, { label: string; family: string; desc: string }> = {
+  LogisticRegression: { label: "Logistic Regression", family: "Linear", desc: "Learns class boundaries via gradient descent. Fast, interpretable coefficients." },
+  KNeighborsClassifier: { label: "K-Nearest Neighbors", family: "Instance", desc: "Predicts the majority label of the k closest points. No training — all work at predict time." },
+  GaussianNB: { label: "Gaussian Naive Bayes", family: "Probabilistic", desc: "Assumes each feature is an independent Gaussian per class. Very fast baseline." },
+  LinearRegression: { label: "Linear Regression", family: "Linear", desc: "Fits a line/plane by least squares via gradient descent." },
+  Ridge: { label: "Ridge Regression", family: "Linear", desc: "Linear regression with an L2 penalty to curb overfitting." },
+  KNeighborsRegressor: { label: "K-Nearest Neighbors", family: "Instance", desc: "Averages the target of the k nearest points." },
+  DecisionTree: { label: "Decision Tree", family: "Tree", desc: "Recursively splits on feature thresholds into if/else rules. Highly interpretable." },
+  RandomForest: { label: "Random Forest", family: "Ensemble", desc: "Many decision trees on bootstrapped samples, votes averaged. Robust & accurate." },
+};
+const OPS: Record<string, { methods: string[]; type: "any" | "num" | "cat"; hint: string }> = {
+  "Impute missing": { methods: ["Mean", "Median", "Most frequent", "Constant", "Min", "Max", "Forward fill", "Backward fill", "Interpolate"], type: "any", hint: "Fill gaps (nulls) so no value is missing." },
+  "Scale / normalize": { methods: ["StandardScaler", "MinMaxScaler", "RobustScaler", "MaxAbsScaler", "QuantileUniform", "None"], type: "num", hint: "Put numeric features on a comparable scale." },
+  "Encode categorical": { methods: ["One-Hot", "Ordinal", "Frequency", "Count", "Binary"], type: "cat", hint: "Turn text categories into numbers a model can use." },
+  "Handle outliers": { methods: ["IQR clip", "IQR replace", "Z-score clip", "Winsorize 5%"], type: "num", hint: "Tame extreme values that distort the model." },
+  "Transform": { methods: ["Log", "Log1p", "Sqrt", "Square", "Cube root", "Reciprocal", "Absolute"], type: "num", hint: "Reshape a distribution (e.g. reduce skew)." },
+  "Bin / discretize": { methods: ["Equal-width (5)", "Equal-freq (5)", "Equal-width (10)"], type: "num", hint: "Bucket a numeric column into ordered bins." },
+  "Drop column": { methods: ["drop"], type: "any", hint: "Remove a column from the dataset entirely." },
+};
+const METHOD_DESC: Record<string, string> = {
+  Mean: "replaces missing values with the column mean", Median: "replaces missing values with the median (robust to outliers)",
+  "Most frequent": "replaces missing values with the most common value", Constant: "replaces missing values with a constant (0 / “missing”)",
+  Min: "replaces missing values with the column minimum", Max: "replaces missing values with the column maximum",
+  "Forward fill": "carries the last valid value forward into gaps", "Backward fill": "carries the next valid value backward into gaps",
+  Interpolate: "linearly interpolates between known values",
+  StandardScaler: "centers to mean 0, scales to unit variance (z-score)", MinMaxScaler: "rescales values into the 0–1 range",
+  RobustScaler: "scales using median & IQR (robust to outliers)", MaxAbsScaler: "scales by the max absolute value into −1…1",
+  QuantileUniform: "maps values to their uniform quantile rank (0–1)", None: "leaves values unchanged",
+  "One-Hot": "creates a 0/1 column per category", Ordinal: "maps each category to an integer code",
+  Frequency: "replaces each category with its proportion", Count: "replaces each category with its count",
+  Binary: "encodes the category index in binary across bit-columns",
+  "IQR clip": "clips values to the 1.5×IQR whiskers", "IQR replace": "replaces outliers with the median",
+  "Z-score clip": "clips values beyond ±3 standard deviations", "Winsorize 5%": "clips to the 5th & 95th percentiles",
+  Log: "applies log(1+|x|)", Log1p: "applies log(1+x)", Sqrt: "applies √|x|", Square: "squares each value",
+  "Cube root": "applies the cube root", Reciprocal: "applies 1/x", Absolute: "takes the absolute value",
+  "Equal-width (5)": "buckets into 5 equal-width bins", "Equal-freq (5)": "buckets into 5 equal-frequency (quantile) bins",
+  "Equal-width (10)": "buckets into 10 equal-width bins", drop: "removes the column",
+};
+function describeStep(op: string, method: string): string {
+  const d = METHOD_DESC[method];
+  if (!d) return OPS[op]?.hint ?? op;
+  return d.charAt(0).toUpperCase() + d.slice(1) + ".";
+}
+// Always returns a string so a stray NaN/Infinity never reaches the DOM as a raw number.
+const fmtNum = (v: number): string => (Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : "—");
+// Shared Plotly layout for the small train-step line/scatter charts.
+/* eslint-disable @typescript-eslint/no-explicit-any */
+function chartLayout(t: ReturnType<typeof plotlyTheme>, title: string, xlab: string, ylab: string): Record<string, any> {
+  const axis = (lab: string) => ({ title: { text: lab, font: { size: 11, color: t.muted } }, gridcolor: t.grid, zerolinecolor: t.grid, linecolor: t.line, tickfont: { size: 10, color: t.muted } });
+  return {
+    paper_bgcolor: t.paper, plot_bgcolor: t.plot, autosize: true, showlegend: false,
+    font: { family: "ui-sans-serif, system-ui, sans-serif", color: t.muted, size: 11 },
+    margin: { l: 56, r: 20, t: 38, b: 46 },
+    title: { text: title, font: { size: 13, color: t.text }, x: 0, xanchor: "left", xref: "paper" },
+    xaxis: axis(xlab), yaxis: axis(ylab),
+    hoverlabel: { font: { family: "ui-sans-serif, system-ui, sans-serif", size: 11 }, bordercolor: t.line },
+  };
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+// Renders a fitted decision tree as an SVG diagram (nodes reveal top-down).
+function TreeDiagram({ root, featureNames, classes, task }: { root: TreeNode; featureNames: string[]; classes: string[]; task: Task }) {
+  const levelH = 68, leafW = 78;
+  const nodes: { id: number; x: number; y: number; node: TreeNode; depth: number }[] = [];
+  const edges: { fx: number; fy: number; tx: number; ty: number; label: string }[] = [];
+  let leafX = 0, nextId = 0;
+  const rec = (node: TreeNode, depth: number): { x: number; y: number } => {
+    const id = nextId++;
+    if (node.leaf) { const x = leafX * leafW + leafW / 2; leafX++; const nd = { id, x, y: depth * levelH + 24, node, depth }; nodes.push(nd); return nd; }
+    const L = rec(node.left, depth + 1), R = rec(node.right, depth + 1);
+    const x = (L.x + R.x) / 2, y = depth * levelH + 24; nodes.push({ id, x, y, node, depth });
+    edges.push({ fx: x, fy: y, tx: L.x, ty: L.y, label: "≤" }); edges.push({ fx: x, fy: y, tx: R.x, ty: R.y, label: ">" });
+    return { x, y };
+  };
+  rec(root, 0);
+  const W = Math.max(leafX * leafW, 220), H = treeDepth(root) * levelH + 24;
+  const label = (n: TreeNode) => n.leaf
+    ? (task === "regression" ? Number(n.value).toFixed(2) : (classes[n.value] ?? String(n.value)))
+    : `${(featureNames[n.feat] ?? "f" + n.feat).slice(0, 11)} ≤ ${n.thr.toFixed(2)}`;
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <svg width={W} height={H} className="tree-svg" role="img" aria-label="decision tree">
+        {edges.map((e, i) => (<line key={`e${i}`} x1={e.fx} y1={e.fy + 13} x2={e.tx} y2={e.ty - 13} className="tree-edge" />))}
+        {edges.map((e, i) => (<text key={`t${i}`} x={(e.fx + e.tx) / 2 + (e.label === "≤" ? -6 : 6)} y={(e.fy + e.ty) / 2} className="tree-elab">{e.label}</text>))}
+        {nodes.map((nd) => (
+          <g key={nd.id} className="tree-node-g" style={{ animationDelay: `${nd.depth * 0.18}s` }}>
+            <rect x={nd.x - 36} y={nd.y - 13} width={72} height={26} rx={6} className={nd.node.leaf ? "tree-leaf" : "tree-inner"} />
+            <text x={nd.x} y={nd.y + 4} className="tree-lab">{label(nd.node)}</text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// Tiny live loss sparkline drawn up to `upto` points.
+function Sparkline({ values, upto }: { values: number[]; upto: number }) {
+  if (!values.length) return null;
+  const W = 240, H = 58, n = values.length;
+  const mn = Math.min(...values), mx = Math.max(...values), sp = (mx - mn) || 1;
+  const k = Math.max(1, Math.min(upto, n));
+  const pts = values.slice(0, k).map((v, i) => `${(i / (n - 1 || 1)) * W},${H - ((v - mn) / sp) * (H - 8) - 4}`).join(" ");
+  return (<svg width="100%" viewBox={`0 0 ${W} ${H}`} className="spark" preserveAspectRatio="none"><polyline points={pts} className="spark-line" /></svg>);
+}
+
+export default function MlLab() {
+  const [step, setStep] = useState<Step>("data");
+  const [ds, setDs] = useState<Dataset | null>(null);
+  const [dsName, setDsName] = useState("");
+  const [dataTab, setDataTab] = useState<"sample" | "upload" | "db">("sample");
+  const [sampleKey, setSampleKey] = useState("churn");
+  const [dbUrl, setDbUrl] = useState("mysql://user:pass@host:3306/db");
+  const [dbQ, setDbQ] = useState("SELECT * FROM customers LIMIT 500;");
+  const [dbBusy, setDbBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  // data viewer
+  const [viewMode, setViewMode] = useState<"head" | "tail" | "range">("head");
+  const [nRows, setNRows] = useState(8);
+  const [rFrom, setRFrom] = useState(0);
+  const [rTo, setRTo] = useState(10);
+
+  const [target, setTarget] = useState("");
+  const [task, setTask] = useState<Task>("classification");
+  const [features, setFeatures] = useState<string[]>([]);
+  const [steps, setSteps] = useState<PrepStep[]>([]);
+  const [algo, setAlgo] = useState("LogisticRegression");
+  const [params, setParams] = useState<Record<string, string>>({});
+  const [testSize, setTestSize] = useState(0.2);
+  const [cvFolds, setCvFolds] = useState(5);
+
+  // validation
+  const [valSize, setValSize] = useState(0.2);
+  const [valMethod, setValMethod] = useState<"kfold" | "holdout">("kfold");
+  const [cvResult, setCvResult] = useState<FoldResult[]>([]);
+  const [cvRunning, setCvRunning] = useState(false);
+  const [cvShown, setCvShown] = useState(0);
+  const [treeViz, setTreeViz] = useState<{ root: TreeNode; depth: number; nodes: number; nTrees?: number } | null>(null);
+
+  // training playback (data → model, sample by sample)
+  const [tpPlaying, setTpPlaying] = useState(false);
+  const [tpIdx, setTpIdx] = useState(0);
+  const [tpSpeed, setTpSpeed] = useState(500);
+  // test the trained model
+  const [trained, setTrained] = useState<{ featureNames: string[]; classes: string[] | null; algo: string; task: Task } | null>(null);
+  const [testTab, setTestTab] = useState<"manual" | "sample">("manual");
+  const [testInputs, setTestInputs] = useState<Record<string, string>>({});
+  const [testOut, setTestOut] = useState<{ pred: string; actual?: string; ok?: boolean } | null>(null);
+  const modelRef = useRef<Model | null>(null);
+
+  // EDA explorer
+  const [edaMode, setEdaMode] = useState<"single" | "compare">("single");
+  const [uniCol, setUniCol] = useState("");
+  const [uniChart, setUniChart] = useState("Histogram");
+  const [bins, setBins] = useState(20);
+  const [groupBy, setGroupBy] = useState("(none)");
+  const [cmpChart, setCmpChart] = useState("Scatter");
+  const [xCol, setXCol] = useState("");
+  const [yCol, setYCol] = useState("");
+  const [colorCol, setColorCol] = useState("(none)");
+  const [multiCols, setMultiCols] = useState<string[]>([]);
+  const [trend, setTrend] = useState(true);
+
+  // preprocessing player
+  const [snaps, setSnaps] = useState<Snapshot[]>([]);
+  const [ppIdx, setPpIdx] = useState(0);
+  const [ppPlaying, setPpPlaying] = useState(false);
+  const [ppSpeed, setPpSpeed] = useState(1500);
+  const [processedCols, setProcessedCols] = useState<number>(0);
+
+  const [result, setResult] = useState<{ metrics: ClsMetrics | RegMetrics; importance: { name: string; w: number }[] | null; cv: number[]; predActual?: [number, number][]; loss?: number[]; ms: number } | null>(null);
+  const [training, setTraining] = useState(false);
+  const [flowStep, setFlowStep] = useState(-1);
+  const [showCode, setShowCode] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  const fileRef = useRef<HTMLInputElement>(null);
+  const flowTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const desc = useMemo(() => (ds ? describe(ds) : []), [ds]);
+  const insights = useMemo(() => (ds ? datasetInsights(ds, target) : []), [ds, target]);
+  const edaFig = useMemo(() => {
+    if (!ds) return null;
+    const spec: EdaSpec = edaMode === "single"
+      ? { mode: "single", uniCol, uniChart, bins, groupBy }
+      : { mode: "compare", cmpChart, x: xCol, y: yCol, color: colorCol, cols: multiCols, trend };
+    return buildFigure(ds, spec, plotlyTheme());
+  }, [ds, edaMode, uniCol, uniChart, bins, groupBy, cmpChart, xCol, yCol, colorCol, multiCols, trend]);
+
+  // Preprocessed numeric matrix — what actually goes into the model. Shown in the
+  // Model & Validation steps and reused for cross-validation.
+  const built = useMemo<BuiltData | null>(() => {
+    if (!ds || !target || !features.length) return null;
+    try { return buildMatrix(ds, features, target, task, steps); } catch { return null; }
+  }, [ds, target, features, task, steps]);
+  const modelKind = ["LogisticRegression", "LinearRegression", "Ridge"].includes(algo) ? "gd"
+    : algo === "DecisionTree" ? "tree" : algo === "RandomForest" ? "forest"
+    : algo === "GaussianNB" ? "gnb" : "knn";
+
+  // ── load ──
+  function loadCSV(text: string, name: string, tgt?: string, tk?: Task) {
+    const parsed = parseCSV(text);
+    if (parsed.columns.length < 2 || parsed.nrows < 4) { setMsg("Need at least 2 columns and a few rows."); return; }
+    setDs(parsed); setDsName(name); setMsg(""); setResult(null); setSnaps([]);
+    const t = tgt && parsed.columns.some((c) => c.name === tgt) ? tgt : parsed.columns[parsed.columns.length - 1].name;
+    const tcol = parsed.columns.find((c) => c.name === t)!;
+    const theTask: Task = tk ?? (tcol.type === "cat" ? "classification" : "regression");
+    setTarget(t); setTask(theTask);
+    setFeatures(parsed.columns.filter((c) => c.name !== t).map((c) => c.name));
+    const nums = parsed.columns.filter((c) => c.type === "num" && c.name !== t).map((c) => c.name);
+    const cats = parsed.columns.filter((c) => c.type === "cat" && c.name !== t).map((c) => c.name);
+    const def: PrepStep[] = [];
+    if (nums.length) { def.push({ op: "Impute missing", cols: nums, method: "Mean" }); def.push({ op: "Scale / normalize", cols: nums, method: "StandardScaler" }); }
+    if (cats.length) { def.push({ op: "Impute missing", cols: cats, method: "Most frequent" }); def.push({ op: "Encode categorical", cols: cats, method: "One-Hot" }); }
+    setSteps(def);
+    const a = Object.keys(MODELS[theTask])[0]; setAlgo(a); setParamsFor(theTask, a);
+    // EDA defaults
+    const first = parsed.columns[0];
+    setEdaMode("single"); setUniCol(first.name); setUniChart(first.type === "num" ? "Histogram" : "Bar (counts)");
+    setGroupBy("(none)"); setColorCol("(none)"); setBins(20); setCmpChart("Scatter");
+    const nc = parsed.columns.filter((c) => c.type === "num");
+    setXCol(nc[0]?.name || first.name); setYCol(nc[1]?.name || nc[0]?.name || first.name);
+    setMultiCols(nc.slice(0, 4).map((c) => c.name));
+    setRFrom(0); setRTo(Math.min(10, parsed.nrows));
+  }
+  function setParamsFor(tk: Task, a: string) { const p: Record<string, string> = {}; MODELS[tk][a].forEach((s) => { p[s.name] = String(s.def); }); setParams(p); }
+  useEffect(() => { loadCSV(sampleDatasets().find((d) => d.key === "churn")!.csv, "churn sample", "churn", "classification"); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Load a saved build when opened from My Projects (?project=<id>). Only the
+  // config is stored (not raw data), so we re-seed a sample by name and re-apply.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("project");
+    if (!id) return;
+    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => {
+      const c = project?.config; if (!c) return;
+      const s = sampleDatasets().find((d) => d.label === c.dsName || d.key === c.dsName);
+      if (!s) { setMsg(`Loaded settings for "${project.name}" (${c.algo} · target "${c.target}"). This build used custom-uploaded data — re-load your file in step 1 to run it.`); return; }
+      loadCSV(s.csv, s.label, c.target, c.task);
+      if (Array.isArray(c.features)) setFeatures(c.features);
+      if (Array.isArray(c.steps)) setSteps(c.steps);
+      if (c.algo) setAlgo(c.algo);
+      if (c.params) setParams(c.params);
+      if (c.testSize != null) setTestSize(c.testSize);
+      if (c.cvFolds != null) setCvFolds(c.cvFolds);
+    }).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  function loadSample() { const s = sampleDatasets().find((d) => d.key === sampleKey)!; loadCSV(s.csv, s.label, s.target, s.task); }
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) { const f = e.target.files?.[0]; if (!f) return; const r = new FileReader(); r.onload = () => loadCSV(String(r.result || ""), f.name); r.readAsText(f); e.target.value = ""; }
+  async function runDbQuery() { setDbBusy(true); setMsg(""); try { const r = await fetch("/api/ml/query", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: dbUrl, query: dbQ }) }); const j = await r.json(); if (!r.ok) throw new Error(j.error || "query failed"); loadCSV(j.csv, "db query result"); } catch (e) { setMsg((e as Error).message); } finally { setDbBusy(false); } }
+
+  // rows to display
+  const viewRows = useMemo(() => {
+    if (!ds) return [] as number[];
+    if (viewMode === "head") return Array.from({ length: Math.min(nRows, ds.nrows) }, (_, i) => i);
+    if (viewMode === "tail") return Array.from({ length: Math.min(nRows, ds.nrows) }, (_, i) => ds.nrows - Math.min(nRows, ds.nrows) + i);
+    const a = Math.max(0, Math.min(rFrom, ds.nrows - 1)), b = Math.max(a + 1, Math.min(rTo, ds.nrows));
+    return Array.from({ length: b - a }, (_, i) => a + i);
+  }, [ds, viewMode, nRows, rFrom, rTo]);
+
+  // ── EDA chart selection helpers ──
+  function pickUniCol(name: string) {
+    const c = ds?.columns.find((x) => x.name === name); if (!c) return;
+    setUniCol(name); setUniChart(c.type === "num" ? "Histogram" : "Bar (counts)"); setGroupBy("(none)");
+  }
+  function pickCmpChart(v: string) {
+    if (!ds) { setCmpChart(v); return; }
+    const nums = ds.columns.filter((c) => c.type === "num").map((c) => c.name);
+    const cats = ds.columns.filter((c) => c.type === "cat").map((c) => c.name);
+    setCmpChart(v);
+    if (["Box by group", "Violin by group"].includes(v)) { setYCol(nums[0] || ""); setXCol(cats[0] || ""); }
+    else if (["Grouped bar", "Stacked bar"].includes(v)) { setXCol(cats[0] || ""); setYCol("(count)"); setColorCol("(none)"); }
+    else if (["Scatter", "Line", "2D density"].includes(v)) { setXCol(nums[0] || ""); setYCol(nums[1] || nums[0] || ""); }
+  }
+
+  // ── preprocessing ──
+  const [prepOp, setPrepOp] = useState("Impute missing");
+  const [prepMethod, setPrepMethod] = useState("Mean");
+  const [prepCols, setPrepCols] = useState<string[]>([]);
+  const opSpec = OPS[prepOp];
+  const eligibleCols = ds ? ds.columns.filter((c) => c.name !== target && (opSpec.type === "any" || c.type === opSpec.type)).map((c) => c.name) : [];
+  function addStep() { if (!prepCols.length) return; setSteps((s) => [...s, { op: prepOp, cols: prepCols, method: prepMethod }]); setPrepCols([]); }
+  function runPreprocessing() {
+    if (!ds) return;
+    const { snapshots, finalColumns } = applyStepsSnapshots(ds, steps.filter((s) => !s.cols.includes(target)), 6);
+    setSnaps(snapshots); setProcessedCols(finalColumns.length); setPpIdx(0); setPpPlaying(snapshots.length > 1);
+  }
+  // Step-by-step player: advance one snapshot every `ppSpeed` ms while playing.
+  useEffect(() => {
+    if (!ppPlaying || snaps.length === 0) return;
+    if (ppIdx >= snaps.length - 1) { setPpPlaying(false); return; }
+    const t = setTimeout(() => setPpIdx((i) => Math.min(i + 1, snaps.length - 1)), ppSpeed);
+    return () => clearTimeout(t);
+  }, [ppPlaying, ppIdx, ppSpeed, snaps.length]);
+  useEffect(() => () => { if (flowTimer.current) clearInterval(flowTimer.current); }, []);
+
+  // ── validation: run k-fold cross-validation, then reveal each fold in turn ──
+  function runCrossVal() {
+    if (!built) { setMsg("Pick a target & at least one feature first (Model step)."); return; }
+    setMsg(""); setCvRunning(true); setCvResult([]); setCvShown(0);
+    setTimeout(() => {
+      try {
+        const cfg: TrainConfig = { task, algo, params, testSize, cvFolds };
+        const res = crossValDetailed(cfg, built.X, built.y, built.classes?.length || 0);
+        setCvResult(res); setCvRunning(false);
+        let i = 0; const iv = setInterval(() => { i++; setCvShown(i); if (i >= res.length) clearInterval(iv); }, 480);
+      } catch (e) { setMsg("Cross-validation error: " + (e as Error).message); setCvRunning(false); }
+    }, 60);
+  }
+  const cvAllScores = cvResult.map((f) => f.score);
+
+  // ── train ──
+  function buildCode(): string {
+    const num = ds ? ds.columns.filter((c) => c.type === "num" && features.includes(c.name) && c.name !== target).map((c) => c.name) : [];
+    const cat = ds ? ds.columns.filter((c) => c.type === "cat" && features.includes(c.name) && c.name !== target).map((c) => c.name) : [];
+    const scaleM = steps.find((s) => s.op === "Scale / normalize")?.method || "StandardScaler";
+    const scaleMap: Record<string, string> = { StandardScaler: "StandardScaler()", MinMaxScaler: "MinMaxScaler()", RobustScaler: "RobustScaler()", MaxAbsScaler: "MaxAbsScaler()", QuantileUniform: "QuantileTransformer(output_distribution='uniform')", None: "'passthrough'" };
+    const scaler = scaleMap[scaleM] || "StandardScaler()";
+    const encM = steps.find((s) => s.op === "Encode categorical")?.method;
+    const encoder = encM === "Ordinal" ? "OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)" : "OneHotEncoder(handle_unknown='ignore')";
+    const impM = ({ Mean: "mean", Median: "median", "Most frequent": "most_frequent", Constant: "constant", Min: "median", Max: "median", "Forward fill": "median", "Backward fill": "median", Interpolate: "median" } as Record<string, string>)[steps.find((s) => s.op === "Impute missing" && ds?.columns.find((c) => c.name === s.cols[0])?.type === "num")?.method || "Mean"] || "mean";
+    const advanced = steps.filter((s) => ["Handle outliers", "Transform", "Bin / discretize"].includes(s.op));
+    const sk: Record<string, { imp: string; cls: string }> = {
+      LogisticRegression: { imp: "from sklearn.linear_model import LogisticRegression", cls: "LogisticRegression" },
+      KNeighborsClassifier: { imp: "from sklearn.neighbors import KNeighborsClassifier", cls: "KNeighborsClassifier" },
+      GaussianNB: { imp: "from sklearn.naive_bayes import GaussianNB", cls: "GaussianNB" },
+      LinearRegression: { imp: "from sklearn.linear_model import LinearRegression", cls: "LinearRegression" },
+      Ridge: { imp: "from sklearn.linear_model import Ridge", cls: "Ridge" },
+      KNeighborsRegressor: { imp: "from sklearn.neighbors import KNeighborsRegressor", cls: "KNeighborsRegressor" },
+      DecisionTree: { imp: `from sklearn.tree import DecisionTree${task === "classification" ? "Classifier" : "Regressor"}`, cls: `DecisionTree${task === "classification" ? "Classifier" : "Regressor"}` },
+      RandomForest: { imp: `from sklearn.ensemble import RandomForest${task === "classification" ? "Classifier" : "Regressor"}`, cls: `RandomForest${task === "classification" ? "Classifier" : "Regressor"}` },
+    };
+    const m = sk[algo] || sk.LogisticRegression;
+    const skParam: Record<string, string> = { max_iter: "max_iter", C: "C", alpha: "alpha", n_neighbors: "n_neighbors", weights: "weights", max_depth: "max_depth", min_samples_split: "min_samples_split", n_estimators: "n_estimators", fit_intercept: "fit_intercept" };
+    const p = Object.entries(params).filter(([k]) => skParam[k]).map(([k, v]) => `${skParam[k]}=${/^-?[0-9.]+$/.test(v) ? v : (["True", "False", "None"].includes(v) ? v : `"${v}"`)}`).concat(algo === "DecisionTree" || algo === "RandomForest" ? ["random_state=42"] : []).join(", ");
+    const scoring = task === "classification" ? "accuracy" : "r2";
+    const metricsImp = task === "classification"
+      ? "from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix"
+      : "from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error";
+    const evalBlock = task === "classification"
+      ? `pred = pipe.predict(X_test)
+print("accuracy :", round(accuracy_score(y_test, pred), 3))
+print("precision:", round(precision_score(y_test, pred, average="macro", zero_division=0), 3))
+print("recall   :", round(recall_score(y_test, pred, average="macro", zero_division=0), 3))
+print("f1       :", round(f1_score(y_test, pred, average="macro", zero_division=0), 3))
+print("confusion matrix:\\n", confusion_matrix(y_test, pred))`
+      : `pred = pipe.predict(X_test)
+print("R2  :", round(r2_score(y_test, pred), 3))
+print("MAE :", round(mean_absolute_error(y_test, pred), 3))
+print("RMSE:", round(mean_squared_error(y_test, pred) ** 0.5, 3))`;
+    const advNote = advanced.length ? `\n# NOTE: your pipeline also has advanced steps handled in-lab:\n${advanced.map((s) => `#   • ${s.op} (${s.method}) on ${s.cols.join(", ")}`).join("\n")}\n#   In sklearn add e.g. PowerTransformer / KBinsDiscretizer / a custom clipper.` : "";
+    return `# ══ AI Workbench · complete ML workflow (data → result) ══
+import numpy as np, pandas as pd
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import ${scaleM === "None" ? "OneHotEncoder, OrdinalEncoder" : `${scaleM === "QuantileUniform" ? "QuantileTransformer" : scaleM}, OneHotEncoder, OrdinalEncoder`}
+${m.imp}
+${metricsImp}
+
+# 1) Load data
+df = pd.read_csv("data.csv")
+num = ${JSON.stringify(num)}
+cat = ${JSON.stringify(cat)}
+X, y = df[num + cat], df["${target}"]
+
+# 2) Hold-out split (test set kept untouched until the very end)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=${testSize}, random_state=42${task === "classification" ? ", stratify=y" : ""})
+${advNote}
+# 3) Preprocess (impute → scale numeric · impute → encode categorical)
+pre = ColumnTransformer([
+    ("num", Pipeline([("imp", SimpleImputer(strategy="${impM}")),
+                      ("sc", ${scaler})]), num),
+    ("cat", Pipeline([("imp", SimpleImputer(strategy="most_frequent")),
+                      ("enc", ${encoder})]), cat),
+])
+
+# 4) Model + full pipeline
+model = ${m.cls}(${p})
+pipe = Pipeline([("pre", pre), ("model", model)])
+
+# 5) Cross-validate (${cvFolds}-fold) BEFORE the final fit
+cv = cross_val_score(pipe, X_train, y_train, cv=${cvFolds}, scoring="${scoring}")
+print("CV ${scoring}:", np.round(cv, 3), "| mean:", round(cv.mean(), 3), "± ", round(cv.std(), 3))
+
+# 6) Fit on the training set
+pipe.fit(X_train, y_train)
+
+# 7) Evaluate on the held-out test set
+${evalBlock}`;
+  }
+  function runTrain() {
+    if (!ds) return; setTraining(true); setStep("train"); setResult(null); setFlowStep(0); setTreeViz(null);
+    if (flowTimer.current) clearInterval(flowTimer.current);
+    let fs = 0; flowTimer.current = setInterval(() => { fs++; setFlowStep(fs); if (fs >= 6) { if (flowTimer.current) clearInterval(flowTimer.current); } }, 420);
+    setTimeout(() => {
+      try {
+        const b = buildMatrix(ds, features, target, task, steps);
+        const nClasses = b.classes?.length || 0;
+        const { Xtr, ytr, Xte, yte } = split(b.X, b.y, testSize);
+        const cfg: TrainConfig = { task, algo, params, testSize, cvFolds };
+        const t0 = performance.now(); const model = makeModel(cfg, Xtr, ytr, nClasses); const pred = predict(model, Xte); const ms = Math.round(performance.now() - t0);
+        const importance = featureImportance(model, b.featureNames); const cv = crossVal(cfg, b.X, b.y, nClasses);
+        const loss = (model.kind === "logreg" || model.kind === "linear") ? model.loss : undefined;
+        modelRef.current = model; setTrained({ featureNames: b.featureNames, classes: b.classes ?? null, algo, task });
+        if (model.kind === "tree") setTreeViz({ root: model.root, depth: treeDepth(model.root), nodes: countNodes(model.root) });
+        else if (model.kind === "forest") setTreeViz({ root: model.trees[0], depth: treeDepth(model.trees[0]), nodes: countNodes(model.trees[0]), nTrees: model.nTrees });
+        if (task === "classification") setResult({ metrics: classificationMetrics(yte, pred.map((p) => Math.round(p)), b.classes!), importance, cv, loss, ms });
+        else setResult({ metrics: regressionMetrics(yte, pred), importance, cv, predActual: yte.map((a, i) => [a, pred[i]] as [number, number]), loss, ms });
+      } catch (e) { setMsg("Training error: " + (e as Error).message); }
+      setTraining(false); setTimeout(() => setFlowStep(7), 500);
+    }, 60);
+  }
+  // On a fresh result: start the data→model playback and seed the tester fields.
+  useEffect(() => {
+    if (step !== "train" || !result || !ds) return;
+    setTpIdx(0); setTpPlaying(true);
+    const init: Record<string, string> = {};
+    features.forEach((f) => {
+      const c = ds.columns.find((x) => x.name === f); if (!c) return;
+      if (c.type === "num") { const v = c.values.filter((x): x is number => x != null).map(Number).sort((a, b) => a - b); init[f] = String(v.length ? v[Math.floor(v.length / 2)] : 0); }
+      else { const s = colStats(c) as { top: [string, number][] }; init[f] = String(s.top[0]?.[0] ?? ""); }
+    });
+    setTestInputs(init); setTestOut(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+  // training-playback ticker
+  const TP_SHOWN = ds ? Math.min(18, ds.nrows) : 0;
+  const TP_EPOCHS = result?.loss ? Math.min(8, result.loss.length) : 3;
+  const TP_TOTAL = Math.max(1, TP_SHOWN * TP_EPOCHS);
+  useEffect(() => {
+    if (!tpPlaying) return;
+    if (tpIdx >= TP_TOTAL - 1) { setTpPlaying(false); return; }
+    const t = setTimeout(() => setTpIdx((i) => i + 1), tpSpeed);
+    return () => clearTimeout(t);
+  }, [tpPlaying, tpIdx, tpSpeed, TP_TOTAL]);
+
+  // Run the fitted model on a single raw record (same preprocessing → predict).
+  function predictRow(inputs: Record<string, string>, actual?: string) {
+    if (!ds || !modelRef.current || !trained) return;
+    const cols = ds.columns.map((c) => {
+      let val: number | string | null;
+      if (c.name === target) val = null;
+      else { const raw = inputs[c.name]; val = raw === undefined || raw === "" ? null : (c.type === "num" ? Number(raw) : raw); }
+      return { name: c.name, type: c.type, values: [...c.values, val] };
+    });
+    const aug: Dataset = { nrows: ds.nrows + 1, columns: cols };
+    const b2 = buildMatrix(aug, features, target, task, steps);
+    const p = predict(modelRef.current, [b2.X[b2.X.length - 1]])[0];
+    const pred = trained.classes ? (trained.classes[Math.round(p)] ?? "?") : p.toFixed(3);
+    const ok = actual != null && trained.classes ? String(pred) === String(actual) : undefined;
+    setTestOut({ pred, actual, ok });
+  }
+  function randomizeInputs() {
+    if (!ds) return;
+    const r = Math.floor(Math.random() * ds.nrows);
+    const init: Record<string, string> = {};
+    ds.columns.forEach((c) => { if (c.name !== target) { const v = c.values[r]; init[c.name] = v == null ? "" : String(v); } });
+    setTestInputs(init);
+    const actual = ds.columns.find((c) => c.name === target)?.values[r];
+    predictRow(init, actual == null ? undefined : String(actual));
+  }
+  // loss curve + predicted-vs-actual as clean Plotly figures (theme-aware)
+  const lossFig = useMemo(() => {
+    if (!result?.loss?.length) return null; const t = plotlyTheme(); const L = result.loss;
+    return { data: [{ type: "scatter", mode: "lines", x: L.map((_, i) => i), y: L, line: { color: t.accent, width: 2.5, shape: "spline" }, fill: "tozeroy", fillcolor: t.accent + "22", hovertemplate: "epoch %{x}<br>loss %{y:.4f}<extra></extra>" }], layout: chartLayout(t, "Training loss per epoch", "recorded epoch", "loss") };
+  }, [result]);
+  const pvaFig = useMemo(() => {
+    if (!result?.predActual) return null; const t = plotlyTheme();
+    const xs = result.predActual.map((p) => p[0]), ys = result.predActual.map((p) => p[1]);
+    const all = [...xs, ...ys], mn = Math.min(...all), mx = Math.max(...all);
+    return { data: [
+      { type: "scatter", mode: "lines", x: [mn, mx], y: [mn, mx], line: { color: t.muted, width: 1.5, dash: "dash" }, hoverinfo: "skip", name: "ideal" },
+      { type: "scatter", mode: "markers", x: xs, y: ys, marker: { color: t.accent, size: 7, opacity: 0.6 }, hovertemplate: "actual %{x:.2f}<br>pred %{y:.2f}<extra></extra>", name: "points" },
+    ], layout: chartLayout(t, "Predicted vs actual", "actual", "predicted") };
+  }, [result]);
+
+  function download() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "ml_workflow.py"; a.click(); URL.revokeObjectURL(a.href); }
+  function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
+  async function saveProject() {
+    const config = { dsName, target, task, features, steps, algo, params, testSize, cvFolds };
+    try { const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "ml", name: dsName || "ML build", config }) }); setSavedMsg(r.ok ? "Saved ✓" : "Save failed"); }
+    catch { setSavedMsg("Save failed"); }
+    setTimeout(() => setSavedMsg(""), 2000);
+  }
+
+  const stepBtn = (k: Step, n: number, label: string) => (<button className={step === k ? "on" : ""} disabled={!ds} onClick={() => setStep(k)}><b>{n}</b>{label}</button>);
+  const cvMean = result ? result.cv.reduce((a, b) => a + b, 0) / (result.cv.length || 1) : 0;
+  const cur = snaps[Math.min(ppIdx, snaps.length - 1)];
+  const FLOW = [
+    { w: "Load preprocessed matrix", d: "the encoded/scaled feature matrix enters the trainer" },
+    { w: "Split train / test", d: `hold out ${Math.round(testSize * 100)}% as an unseen test set` },
+    { w: `Initialise ${algo}`, d: "set up parameters & (for GD models) zero the weights" },
+    { w: `Fit ${algo} on train`, d: modelKind === "gd" ? "gradient descent minimises the loss over epochs" : modelKind === "tree" ? "recursively split features to reduce impurity" : modelKind === "forest" ? "grow many trees on bootstrapped samples" : "store the training data / class statistics" },
+    { w: "Predict on test set", d: "run the fitted model on the held-out rows" },
+    { w: "Evaluate metrics", d: task === "classification" ? "accuracy · precision · recall · F1" : "R² · MAE · RMSE" },
+    { w: "Done", d: "results & feature importance ready" },
+  ];
+
+  return (
+    <>
+      <div className="lab-head">
+        <div><div className="eyebrow">Lab 04 · runs in your browser</div><h2 className="page-h">ML Lab</h2><p className="page-sub" style={{ margin: 0 }}>Connect data, explore, preprocess (with a live pipeline animation), tune a model, and watch it train — all real, in your browser.</p></div>
+        <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{savedMsg || "💾 Save"}</button><button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button></div>
+      </div>
+      {msg && <div className="err">{msg}</div>}
+      <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> Models train from scratch in your browser so every step is inspectable. It&apos;s a faithful but simplified approximation — the <b>Get code</b> export uses scikit-learn, the version you&apos;d ship.</span></div>
+      <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}</div>
+
+      {/* STEP 1 DATA */}
+      {step === "data" && (
+        <div className="card">
+          <div className="card-h"><span className="t">Connect your data</span><div className="tabs"><button className={dataTab === "sample" ? "on" : ""} onClick={() => setDataTab("sample")}>Sample</button><button className={dataTab === "upload" ? "on" : ""} onClick={() => setDataTab("upload")}>Upload CSV</button><button className={dataTab === "db" ? "on" : ""} onClick={() => setDataTab("db")}>Database</button></div></div>
+          <div className="card-b">
+            {dataTab === "sample" && (<><label className="fld">Sample dataset</label><div className="row" style={{ gap: 8 }}><select value={sampleKey} onChange={(e) => setSampleKey(e.target.value)}>{sampleDatasets().map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select><button className="btn sm" onClick={loadSample}>Load</button></div></>)}
+            {dataTab === "upload" && (<><div className="dropzone" onClick={() => fileRef.current?.click()}>Click to upload a <b>CSV</b> file (parsed &amp; trained locally)</div><input ref={fileRef} type="file" accept=".csv,.tsv,text/csv" onChange={onFile} style={{ display: "none" }} /></>)}
+            {dataTab === "db" && (<><label className="fld">MySQL / TiDB connection URL</label><input type="text" value={dbUrl} onChange={(e) => setDbUrl(e.target.value)} /><label className="fld" style={{ marginTop: 10 }}>Query</label><textarea rows={2} value={dbQ} onChange={(e) => setDbQ(e.target.value)} /><div style={{ marginTop: 10 }}><button className="btn sm" onClick={runDbQuery} disabled={dbBusy}>{dbBusy ? "Running…" : "Run query & load"}</button></div></>)}
+            {ds && (<>
+              <div className="row" style={{ gap: 10, flexWrap: "wrap", margin: "16px 0 12px", alignItems: "center" }}>
+                <span className="pill"><span className="dot" />{dsName}</span><span className="pill">rows {ds.nrows}</span><span className="pill">cols {ds.columns.length}</span>
+                <div className="rangebtns" style={{ marginLeft: "auto" }}><button className={viewMode === "head" ? "on" : ""} onClick={() => setViewMode("head")}>Head</button><button className={viewMode === "tail" ? "on" : ""} onClick={() => setViewMode("tail")}>Tail</button><button className={viewMode === "range" ? "on" : ""} onClick={() => setViewMode("range")}>Range</button></div>
+                {viewMode !== "range" ? <span className="row" style={{ gap: 6 }}><span className="note">rows</span><input type="number" value={nRows} min={1} max={ds.nrows} onChange={(e) => setNRows(Math.max(1, +e.target.value))} style={{ width: 70 }} /></span>
+                  : <span className="row" style={{ gap: 6 }}><span className="note">from</span><input type="number" value={rFrom} min={0} max={ds.nrows} onChange={(e) => setRFrom(+e.target.value)} style={{ width: 70 }} /><span className="note">to</span><input type="number" value={rTo} min={1} max={ds.nrows} onChange={(e) => setRTo(+e.target.value)} style={{ width: 70 }} /></span>}
+              </div>
+              <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>#</th>{ds.columns.map((c) => <th key={c.name}>{c.name} <span style={{ color: "var(--faint)" }}>{c.type}{c.name === target ? "·target" : ""}</span></th>)}</tr>{viewRows.map((r) => <tr key={r}><td style={{ color: "var(--faint)" }}>{r}</td>{ds.columns.map((c) => <td key={c.name}>{c.values[r] ?? "—"}</td>)}</tr>)}</tbody></table></div>
+              <label className="fld" style={{ marginTop: 16 }}>Summary statistics (numeric columns · like pandas .describe())</label>
+              <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>column</th><th>count</th><th>missing</th><th>mean</th><th>std</th><th>min</th><th>25%</th><th>50%</th><th>75%</th><th>max</th></tr>{desc.map((d) => <tr key={d.name}><td>{d.name}</td><td>{d.count}</td><td>{d.missing}</td><td>{d.mean.toFixed(2)}</td><td>{d.std.toFixed(2)}</td><td>{d.min.toFixed(1)}</td><td>{d.q25.toFixed(1)}</td><td>{d.q50.toFixed(1)}</td><td>{d.q75.toFixed(1)}</td><td>{d.max.toFixed(1)}</td></tr>)}</tbody></table></div>
+              <div className="stepnav"><button className="btn" onClick={() => setStep("eda")}>Next: EDA →</button></div>
+            </>)}
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2 EDA */}
+      {step === "eda" && ds && (() => {
+        const numericNames = ds.columns.filter((c) => c.type === "num").map((c) => c.name);
+        const catNames = ds.columns.filter((c) => c.type === "cat").map((c) => c.name);
+        const uniColType = ds.columns.find((c) => c.name === uniCol)?.type ?? "num";
+        const missingCells = ds.columns.reduce((a, c) => a + c.values.filter((v) => v == null).length, 0);
+        let dupRows = 0; { const seen = new Set<string>(); for (let i = 0; i < ds.nrows; i++) { const key = ds.columns.map((c) => String(c.values[i])).join("¦"); if (seen.has(key)) dupRows++; else seen.add(key); } }
+        const plotHeight = cmpChart === "Scatter matrix" && edaMode === "compare" ? 540 : (cmpChart === "Parallel coordinates" && edaMode === "compare" ? 470 : 430);
+        const needsXY = ["Scatter", "Line", "2D density"].includes(cmpChart);
+        const needsGroupNum = ["Box by group", "Violin by group"].includes(cmpChart);
+        const needsBar = ["Grouped bar", "Stacked bar"].includes(cmpChart);
+        const needsMulti = ["Scatter matrix", "Correlation heatmap", "Parallel coordinates"].includes(cmpChart);
+        return (
+          <div className="split" style={{ gridTemplateColumns: "244px 1fr" }}>
+            {/* LEFT — overview + column list */}
+            <div className="eda-side">
+              <div className="card">
+                <div className="card-h"><span className="t">Dataset overview</span></div>
+                <div className="card-b" style={{ padding: 12 }}>
+                  <div className="ov-grid">
+                    <div className="ov"><b>{ds.nrows}</b><span>rows</span></div>
+                    <div className="ov"><b>{ds.columns.length}</b><span>columns</span></div>
+                    <div className="ov"><b>{numericNames.length}</b><span>numeric</span></div>
+                    <div className="ov"><b>{catNames.length}</b><span>categorical</span></div>
+                    <div className="ov"><b>{missingCells}</b><span>missing cells</span></div>
+                    <div className="ov"><b>{dupRows}</b><span>duplicate rows</span></div>
+                  </div>
+                </div>
+              </div>
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="card-h"><span className="t">Columns</span><span className="mono r">click to plot</span></div>
+                <div className="card-b" style={{ maxHeight: 430, overflow: "auto", padding: 8 }}>
+                  {ds.columns.map((c) => { const s = colStats(c); return (
+                    <div key={c.name} className={`col-item ${edaMode === "single" && uniCol === c.name ? "on" : ""}`} onClick={() => { setEdaMode("single"); pickUniCol(c.name); }}>
+                      <span>{c.name}</span>
+                      {s.missing > 0 && <span className="note" style={{ color: "var(--crit)" }}>{s.missing}na</span>}
+                      <span className={`ty ${c.type}`}>{c.type}{c.name === target ? "·t" : ""}</span>
+                    </div>); })}
+                </div>
+              </div>
+            </div>
+
+            {/* RIGHT — explorer */}
+            <div>
+              <div className="card">
+                <div className="card-h">
+                  <span className="t">Explore</span>
+                  <div className="tabs">
+                    <button className={edaMode === "single" ? "on" : ""} onClick={() => setEdaMode("single")}>Single column</button>
+                    <button className={edaMode === "compare" ? "on" : ""} onClick={() => setEdaMode("compare")}>Compare columns</button>
+                  </div>
+                </div>
+                <div className="card-b">
+                  {edaMode === "single" ? (
+                    <div className="eda-controls">
+                      <div className="ec"><label className="fld">Column</label>
+                        <select value={uniCol} onChange={(e) => pickUniCol(e.target.value)}>{ds.columns.map((c) => <option key={c.name} value={c.name}>{c.name} · {c.type}</option>)}</select>
+                      </div>
+                      <div className="ec"><label className="fld">Chart type</label>
+                        <select value={uniChart} onChange={(e) => setUniChart(e.target.value)}>{(uniColType === "num" ? SINGLE_NUM : SINGLE_CAT).map((c) => <option key={c}>{c}</option>)}</select>
+                      </div>
+                      {uniColType === "num" && uniChart === "Histogram" && (
+                        <div className="ec"><label className="fld">Bins · {bins}</label><input type="range" min={5} max={60} value={bins} onChange={(e) => setBins(+e.target.value)} /></div>
+                      )}
+                      {uniColType === "num" && ["Histogram", "Box", "Violin"].includes(uniChart) && catNames.length > 0 && (
+                        <div className="ec"><label className="fld">Split by (group)</label>
+                          <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)}><option>(none)</option>{catNames.map((c) => <option key={c}>{c}</option>)}</select>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="eda-controls">
+                      <div className="ec"><label className="fld">Chart type</label>
+                        <select value={cmpChart} onChange={(e) => pickCmpChart(e.target.value)}>{COMPARE_CHARTS.map((c) => <option key={c}>{c}</option>)}</select>
+                      </div>
+                      {needsXY && (<>
+                        <div className="ec"><label className="fld">X (numeric)</label><select value={xCol} onChange={(e) => setXCol(e.target.value)}>{numericNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                        <div className="ec"><label className="fld">Y (numeric)</label><select value={yCol} onChange={(e) => setYCol(e.target.value)}>{numericNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                        {cmpChart !== "2D density" && <div className="ec"><label className="fld">Color / group</label><select value={colorCol} onChange={(e) => setColorCol(e.target.value)}><option>(none)</option>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select></div>}
+                        {cmpChart === "Scatter" && <label className="ec chkline"><input type="checkbox" checked={trend} onChange={(e) => setTrend(e.target.checked)} /> trendline (OLS)</label>}
+                      </>)}
+                      {needsGroupNum && (<>
+                        <div className="ec"><label className="fld">Value (numeric)</label><select value={yCol} onChange={(e) => setYCol(e.target.value)}>{numericNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                        <div className="ec"><label className="fld">Group (categorical)</label><select value={xCol} onChange={(e) => setXCol(e.target.value)}>{catNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                      </>)}
+                      {needsBar && (<>
+                        <div className="ec"><label className="fld">X (categorical)</label><select value={xCol} onChange={(e) => setXCol(e.target.value)}>{catNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                        <div className="ec"><label className="fld">Split by (categorical)</label><select value={colorCol} onChange={(e) => setColorCol(e.target.value)}><option>(none)</option>{catNames.map((c) => <option key={c}>{c}</option>)}</select></div>
+                        <div className="ec"><label className="fld">Bar height</label><select value={yCol} onChange={(e) => setYCol(e.target.value)}><option>(count)</option>{numericNames.map((c) => <option key={c}>mean {c}</option>)}</select></div>
+                      </>)}
+                      {needsMulti && (
+                        <div className="ec ec-wide"><label className="fld">Numeric columns ({multiCols.length} selected)</label>
+                          <div className="checklist">{numericNames.map((c) => <span key={c} className={`chk ${multiCols.includes(c) ? "on" : ""}`} onClick={() => setMultiCols((m) => m.includes(c) ? m.filter((x) => x !== c) : [...m, c])}>{c}</span>)}</div>
+                        </div>
+                      )}
+                      {["Scatter matrix", "Parallel coordinates"].includes(cmpChart) && (
+                        <div className="ec"><label className="fld">Color by</label><select value={colorCol} onChange={(e) => setColorCol(e.target.value)}><option>(none)</option>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select></div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="card-b" style={{ padding: 10 }}>
+                  {edaFig && edaFig.data.length ? <Plot data={edaFig.data} layout={edaFig.layout} style={{ height: plotHeight }} /> : <div className="note" style={{ padding: 30, textAlign: "center" }}>Adjust the controls above to render a chart.</div>}
+                </div>
+              </div>
+
+              <div className="card" style={{ marginTop: 14 }}>
+                <div className="card-h"><span className="t">What to look at</span><span className="mono r">auto-insights</span></div>
+                <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  {insights.map((ins, i) => <div key={i} className={`insight ${ins.kind}`}><span className="idot" />{ins.text}</div>)}
+                </div>
+              </div>
+
+              <div className="stepnav"><button className="btn" onClick={() => setStep("prep")}>Next: Preprocess →</button></div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* STEP 3 PREP */}
+      {step === "prep" && ds && (
+        <>
+          <div className="split col-2e">
+            <div className="card"><div className="card-h"><span className="t">Add a preprocessing step</span></div>
+              <div className="card-b">
+                <label className="fld">Operation</label><select value={prepOp} onChange={(e) => { setPrepOp(e.target.value); setPrepMethod(OPS[e.target.value].methods[0]); setPrepCols([]); }}>{Object.keys(OPS).map((o) => <option key={o}>{o}</option>)}</select>
+                <label className="fld" style={{ marginTop: 12 }}>Columns</label><div className="checklist">{eligibleCols.map((c) => <span key={c} className={`chk ${prepCols.includes(c) ? "on" : ""}`} onClick={() => setPrepCols((p) => p.includes(c) ? p.filter((x) => x !== c) : [...p, c])}>{c}</span>)}</div>
+                <label className="fld" style={{ marginTop: 12 }}>Method</label><select value={prepMethod} onChange={(e) => setPrepMethod(e.target.value)}>{opSpec.methods.map((m) => <option key={m}>{m}</option>)}</select>
+                <div className="op-hint">{opSpec.hint}<span>{describeStep(prepOp, prepMethod)}</span></div>
+                <button className="btn" style={{ marginTop: 14 }} onClick={addStep}>+ Add step</button>
+              </div>
+            </div>
+            <div className="card"><div className="card-h"><span className="t">Pipeline</span><span className="mono r">{steps.length} steps</span></div>
+              <div className="card-b">{steps.map((s, i) => <div key={i} className="prep-step"><span className="op">{s.op}</span><span className="mono">{s.method} · {s.cols.join(", ")}</span><span className="rm" onClick={() => setSteps((ss) => ss.filter((_, j) => j !== i))}>×</span></div>)}{steps.length === 0 && <div className="note">No steps yet.</div>}
+                <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={runPreprocessing}>▶ Run preprocessing</button><span className="note">applies every step &amp; animates the transform</span></div>
+              </div>
+            </div>
+          </div>
+          {snaps.length > 0 && cur && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Pipeline — step by step</span><span className="mono r">{cur.nRows} rows × {cur.nCols} cols</span></div>
+              <div className="card-b">
+                {/* player controls */}
+                <div className="pp-player">
+                  <button className="pp-ctrl" title="Restart" onClick={() => { setPpPlaying(false); setPpIdx(0); }}>⏮</button>
+                  <button className="pp-ctrl" title="Previous step" onClick={() => { setPpPlaying(false); setPpIdx((i) => Math.max(0, i - 1)); }}>‹</button>
+                  <button className="pp-ctrl play" onClick={() => { if (ppIdx >= snaps.length - 1) { setPpIdx(0); setPpPlaying(true); } else setPpPlaying((p) => !p); }}>{ppPlaying ? "⏸ Pause" : (ppIdx >= snaps.length - 1 ? "↻ Replay" : "▶ Play")}</button>
+                  <button className="pp-ctrl" title="Next step" onClick={() => { setPpPlaying(false); setPpIdx((i) => Math.min(snaps.length - 1, i + 1)); }}>›</button>
+                  <span className="pp-count">step {ppIdx} / {snaps.length - 1}</span>
+                  <span className="pp-speed">speed
+                    <select value={ppSpeed} onChange={(e) => setPpSpeed(+e.target.value)}><option value={2600}>0.5×</option><option value={1500}>1×</option><option value={800}>2×</option></select>
+                  </span>
+                </div>
+                <div className="pp-progress"><i style={{ width: `${(ppIdx / Math.max(1, snaps.length - 1)) * 100}%` }} /></div>
+
+                {/* jump-to-step chips */}
+                <div className="pp-chips">{snaps.map((s, i) => <button key={i} className={`chk ${ppIdx === i ? "on" : ""}`} onClick={() => { setPpPlaying(false); setPpIdx(i); }}>{i === 0 ? "raw" : `${i}. ${s.op}`}</button>)}</div>
+
+                {/* current-step explanation */}
+                <div className="pp-explain">
+                  <div className="pp-badge">{ppIdx === 0 ? "RAW" : `STEP ${ppIdx}`}</div>
+                  <div style={{ flex: 1 }}>
+                    <div className="pp-title">{cur.op}{cur.method !== "source data" ? <span className="pp-method"> · {cur.method}</span> : null}</div>
+                    <div className="pp-sub">{ppIdx === 0 ? "The original dataset before any preprocessing." : describeStep(cur.op, cur.method)}{cur.changedCols.length ? <> Affected columns: <b>{cur.changedCols.join(", ")}</b>.</> : null}</div>
+                  </div>
+                  <div className="pp-shape">{cur.nRows}×{cur.nCols}</div>
+                </div>
+
+                {/* data table — changed columns highlighted */}
+                <div style={{ overflowX: "auto" }}><table className="pp-table"><tbody><tr>{cur.colNames.map((n) => <th key={n} className={cur.changedCols.includes(n) ? "hl" : ""}>{n}</th>)}</tr>{cur.sample.map((row, ri) => <tr key={ri}>{row.map((v, ci) => <td key={ci} className={cur.changedCols.includes(cur.colNames[ci]) ? "hl" : ""}>{v}</td>)}</tr>)}</tbody></table></div>
+
+                <div className="split col-2e" style={{ marginTop: 14 }}>
+                  <div><label className="fld">Before (raw)</label><div className="note">{snaps[0].nCols} columns, {snaps[0].nRows} rows</div><div style={{ overflowX: "auto" }}><table className="pp-table"><tbody><tr>{snaps[0].colNames.slice(0, 6).map((n) => <th key={n}>{n}</th>)}</tr>{snaps[0].sample.slice(0, 3).map((row, ri) => <tr key={ri}>{row.slice(0, 6).map((v, ci) => <td key={ci}>{v}</td>)}</tr>)}</tbody></table></div></div>
+                  <div><label className="fld">After (fully processed)</label><div className="note">{processedCols} columns (all numeric), ready to train</div><div style={{ overflowX: "auto" }}><table className="pp-table"><tbody><tr>{snaps[snaps.length - 1].colNames.slice(0, 6).map((n) => <th key={n}>{n}</th>)}</tr>{snaps[snaps.length - 1].sample.slice(0, 3).map((row, ri) => <tr key={ri}>{row.slice(0, 6).map((v, ci) => <td key={ci}>{v}</td>)}</tr>)}</tbody></table></div></div>
+                </div>
+                <div className="stepnav"><button className="btn" onClick={() => setStep("model")}>Next: Model →</button></div>
+              </div>
+            </div>
+          )}
+          {snaps.length === 0 && <div className="stepnav" style={{ marginTop: 16 }}><button className="btn" onClick={() => setStep("model")}>Next: Model →</button></div>}
+        </>
+      )}
+
+      {/* STEP 4 MODEL */}
+      {step === "model" && ds && (
+        <>
+          <div className="card">
+            <div className="card-h"><span className="t">Choose a model</span><span className="mono r">{Object.keys(MODELS[task]).length} available · {task}</span></div>
+            <div className="card-b">
+              <div className="row" style={{ marginBottom: 12 }}><span className="note">Task</span>
+                <div className="rangebtns"><button className={task === "classification" ? "on" : ""} onClick={() => { setTask("classification"); const a = Object.keys(MODELS.classification)[0]; setAlgo(a); setParamsFor("classification", a); }}>Classification</button><button className={task === "regression" ? "on" : ""} onClick={() => { setTask("regression"); const a = Object.keys(MODELS.regression)[0]; setAlgo(a); setParamsFor("regression", a); }}>Regression</button></div>
+              </div>
+              <div className="model-grid">
+                {Object.keys(MODELS[task]).map((a) => { const info = MODEL_INFO[a]; const np = MODELS[task][a].length; return (
+                  <div key={a} className={`model-card ${algo === a ? "on" : ""}`} onClick={() => { setAlgo(a); setParamsFor(task, a); }}>
+                    <div className="mc-top"><span className="mc-name">{info?.label ?? a}</span><span className="mc-fam">{info?.family}</span></div>
+                    <div className="mc-desc">{info?.desc}</div>
+                    <div className="mc-foot">{np ? `${np} hyperparameter${np > 1 ? "s" : ""}` : "no hyperparameters"}{algo === a ? " · selected" : ""}</div>
+                  </div>); })}
+              </div>
+            </div>
+          </div>
+
+          <div className="split col-2e" style={{ marginTop: 16 }}>
+            <div className="card"><div className="card-h"><span className="t">Target &amp; features</span></div>
+              <div className="card-b">
+                <label className="fld">Target column</label><select value={target} onChange={(e) => setTarget(e.target.value)}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
+                <div className="split col-2e" style={{ marginTop: 12 }}><div><label className="fld">Test size</label><input type="text" value={testSize} onChange={(e) => setTestSize(Number(e.target.value) || 0.2)} /></div><div><label className="fld">CV folds</label><input type="text" value={cvFolds} onChange={(e) => setCvFolds(Number(e.target.value) || 5)} /></div></div>
+                <label className="fld" style={{ marginTop: 12 }}>Feature columns ({features.length})</label><div className="checklist">{ds.columns.filter((c) => c.name !== target).map((c) => <span key={c.name} className={`chk ${features.includes(c.name) ? "on" : ""}`} onClick={() => setFeatures((f) => f.includes(c.name) ? f.filter((x) => x !== c.name) : [...f, c.name])}>{c.name}</span>)}</div>
+              </div>
+            </div>
+            <div className="card"><div className="card-h"><span className="t">Hyperparameters</span><span className="mono r">{MODEL_INFO[algo]?.label ?? algo}</span></div>
+              <div className="card-b"><div className="hyper">{MODELS[task][algo].length === 0 && <div className="note">This model has no tunable hyperparameters.</div>}{MODELS[task][algo].map((sp) => (
+                <div key={sp.name} className="hp"><label>{sp.name}</label>{sp.type === "sel"
+                  ? <select value={params[sp.name] ?? String(sp.def)} onChange={(e) => setParams((p) => ({ ...p, [sp.name]: e.target.value }))}>{sp.opts!.map((o) => <option key={o}>{o}</option>)}</select>
+                  : <span className="slider-row"><input type="range" min={sp.min} max={sp.max} step={sp.step} value={params[sp.name] ?? String(sp.def)} onChange={(e) => setParams((p) => ({ ...p, [sp.name]: e.target.value }))} style={{ width: 96 }} /><input type="text" value={params[sp.name] ?? String(sp.def)} onChange={(e) => setParams((p) => ({ ...p, [sp.name]: e.target.value }))} style={{ width: 62 }} /><span className="rng">{sp.min}–{sp.max}</span></span>}</div>
+              ))}</div>
+                <div className="note" style={{ marginTop: 12 }}>Defaults shown; each field shows its valid min–max range.</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-h"><span className="t">Preprocessed data → model input</span><span className="mono r">{built ? `${built.X.length} rows × ${built.featureNames.length} features` : "—"}</span></div>
+            <div className="card-b">
+              {built && built.featureNames.length ? (<>
+                <div className="note" style={{ marginBottom: 8 }}>After your preprocessing pipeline every feature is numeric — this exact matrix is what the model trains on.</div>
+                <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
+                  <tr><th>#</th>{built.featureNames.map((n) => <th key={n}>{n}</th>)}<th style={{ color: "var(--accent)" }}>{target} (y)</th></tr>
+                  {built.X.slice(0, 6).map((row, ri) => <tr key={ri}><td style={{ color: "var(--faint)" }}>{ri}</td>{row.map((v, ci) => <td key={ci}>{fmtNum(v)}</td>)}<td style={{ color: "var(--accent)" }}>{built.classes ? (built.classes[built.y[ri]] ?? "—") : fmtNum(built.y[ri])}</td></tr>)}
+                </tbody></table></div>
+              </>) : <div className="note">Pick a target and at least one feature to build the model-input matrix.</div>}
+              <div className="stepnav"><button className="btn" onClick={() => setStep("validation")}>Next: Validation →</button></div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* STEP 5 VALIDATION */}
+      {step === "validation" && ds && (
+        <>
+          <div className="card">
+            <div className="card-h"><span className="t">How will you validate the model?</span><span className="mono r">{MODEL_INFO[algo]?.label ?? algo}</span></div>
+            <div className="card-b">
+              <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                <div className="rangebtns"><button className={valMethod === "kfold" ? "on" : ""} onClick={() => setValMethod("kfold")}>K-Fold cross-validation</button><button className={valMethod === "holdout" ? "on" : ""} onClick={() => setValMethod("holdout")}>Hold-out validation</button></div>
+              </div>
+              {/* split diagram */}
+              {(() => { const n = built ? built.X.length : ds.nrows; const sc = valMethod === "holdout" ? splitCounts(n, valSize, testSize) : { train: n - Math.round(n * testSize), val: 0, test: Math.round(n * testSize) }; const pct = (x: number) => `${(x / n) * 100}%`; return (
+                <>
+                  <label className="fld">Data split ({n} rows)</label>
+                  <div className="split-bar">
+                    <div className="sb train" style={{ width: pct(sc.train) }}><span>train · {sc.train}</span></div>
+                    {valMethod === "holdout" && sc.val > 0 && <div className="sb val" style={{ width: pct(sc.val) }}><span>val · {sc.val}</span></div>}
+                    <div className="sb test" style={{ width: pct(sc.test) }}><span>test · {sc.test}</span></div>
+                  </div>
+                  <div className="row" style={{ gap: 18, flexWrap: "wrap", marginTop: 12 }}>
+                    <div className="knob" style={{ margin: 0, minWidth: 190 }}><div className="kr"><span>Test size</span><b>{testSize}</b></div><input type="range" min={0.1} max={0.4} step={0.05} value={testSize} onChange={(e) => setTestSize(+e.target.value)} /></div>
+                    {valMethod === "holdout" && <div className="knob" style={{ margin: 0, minWidth: 190 }}><div className="kr"><span>Validation size</span><b>{valSize}</b></div><input type="range" min={0.1} max={0.4} step={0.05} value={valSize} onChange={(e) => setValSize(+e.target.value)} /></div>}
+                    {valMethod === "kfold" && <div className="knob" style={{ margin: 0, minWidth: 190 }}><div className="kr"><span>CV folds (k)</span><b>{cvFolds}</b></div><input type="range" min={2} max={10} value={cvFolds} onChange={(e) => setCvFolds(+e.target.value)} /></div>}
+                  </div>
+                  <div className="note" style={{ marginTop: 10 }}>{valMethod === "kfold" ? `K-fold splits the training data into ${cvFolds} parts; the model trains on ${cvFolds - 1} and validates on the held-out part, rotating through all ${cvFolds}. Every row is validated exactly once — the mean score is a robust estimate.` : "Hold-out keeps a single validation slice aside to tune on, and a separate test slice untouched until the end."}</div>
+                </>
+              ); })()}
+            </div>
+          </div>
+
+          {valMethod === "kfold" && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Cross-validation</span><span className="mono r">{cvRunning ? <><span className="busy-dot" />running…</> : cvResult.length ? `${cvResult.length} folds complete` : "not run"}</span></div>
+              <div className="card-b">
+                <div className="row" style={{ marginBottom: 14 }}><button className="btn" onClick={runCrossVal} disabled={cvRunning || !built}>▶ Run {cvFolds}-fold cross-validation</button><span className="note">trains a fresh model on each fold — {task === "classification" ? "accuracy" : "R²"} per fold</span></div>
+                {cvResult.slice(0, cvShown).map((f) => (
+                  <div key={f.fold} className="fold-row reveal-in">
+                    <span className="fold-lbl">fold {f.fold}</span>
+                    <div className="fold-mini"><span className="fm-train" style={{ flex: f.trainN }} title={`train ${f.trainN}`} /><span className="fm-test" style={{ flex: f.testN }} title={`test ${f.testN}`} /></div>
+                    <div className="fold-bar"><i style={{ width: `${Math.max(0, Math.min(1, f.score)) * 100}%` }} /></div>
+                    <span className="fold-score">{f.score.toFixed(3)}</span>
+                  </div>
+                ))}
+                {cvShown >= cvResult.length && cvResult.length > 0 && (
+                  <div className="cv-summary">
+                    <div className="metric"><span className="v">{mean(cvAllScores).toFixed(3)}</span><span className="k">mean {task === "classification" ? "accuracy" : "R²"}</span></div>
+                    <div className="metric"><span className="v">±{std(cvAllScores).toFixed(3)}</span><span className="k">std dev</span></div>
+                    <div className="metric"><span className="v">{Math.min(...cvAllScores).toFixed(3)}</span><span className="k">worst fold</span></div>
+                    <div className="metric"><span className="v">{Math.max(...cvAllScores).toFixed(3)}</span><span className="k">best fold</span></div>
+                  </div>
+                )}
+                {cvResult.length === 0 && !cvRunning && <div className="note">Run cross-validation to validate the model across all {cvFolds} folds before final training.</div>}
+                <div className="stepnav"><button className="btn ghost" onClick={() => setStep("model")}>← Back</button><button className="btn" onClick={runTrain}>Next: Train →</button></div>
+              </div>
+            </div>
+          )}
+          {valMethod === "holdout" && <div className="stepnav" style={{ marginTop: 16 }}><button className="btn ghost" onClick={() => setStep("model")}>← Back</button><button className="btn" onClick={runTrain}>Next: Train →</button></div>}
+        </>
+      )}
+
+      {/* STEP 6 TRAIN */}
+      {step === "train" && ds && (
+        <>
+          <div className="row" style={{ marginBottom: 14 }}><button className="btn" onClick={runTrain} disabled={training}>▶ Train model</button><span className="mono" style={{ color: "var(--faint)", marginLeft: 10 }}>{training ? "training…" : result ? `trained in ${result.ms}ms` : "not trained"}</span></div>
+          <div className="tflow2">{FLOW.map((s, i) => <div key={i} className={`tf2 ${flowStep > i ? "done" : flowStep === i ? "active" : ""}`}><div className="tf2-i">{flowStep > i ? "✓" : flowStep === i ? <span className="busy-dot" /> : i + 1}</div><div className="tf2-t"><b>{s.w}</b><span>{s.d}</span></div></div>)}</div>
+          {result && (<>
+            {/* data → model, sample by sample */}
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-h"><span className="t">Watch it train — data fed to the model</span><span className="mono r">sample by sample</span></div>
+              <div className="card-b">
+                {(() => {
+                  const curS = TP_SHOWN ? tpIdx % TP_SHOWN : 0;
+                  const epoch = TP_SHOWN ? Math.floor(tpIdx / TP_SHOWN) + 1 : 1;
+                  const prog = TP_TOTAL > 1 ? tpIdx / (TP_TOTAL - 1) : 1;
+                  const lossVal = result.loss?.length ? result.loss[Math.round(prog * (result.loss.length - 1))] : undefined;
+                  const featShown = features.slice(0, 3);
+                  return (<>
+                    <div className="pp-player">
+                      <button className="pp-ctrl" title="Restart" onClick={() => { setTpPlaying(false); setTpIdx(0); }}>⏮</button>
+                      <button className="pp-ctrl play" onClick={() => { if (tpIdx >= TP_TOTAL - 1) { setTpIdx(0); setTpPlaying(true); } else setTpPlaying((p) => !p); }}>{tpPlaying ? "⏸ Pause" : (tpIdx >= TP_TOTAL - 1 ? "↻ Replay" : "▶ Play")}</button>
+                      <span className="pp-count">epoch {epoch}/{TP_EPOCHS} · sample {curS + 1}/{TP_SHOWN}</span>
+                      <span className="pp-speed">speed<select value={tpSpeed} onChange={(e) => setTpSpeed(+e.target.value)}><option value={900}>0.5×</option><option value={500}>1×</option><option value={220}>2×</option></select></span>
+                    </div>
+                    <div className="pp-progress"><i style={{ width: `${prog * 100}%` }} /></div>
+                    <div className="feeder">
+                      <div className="feeder-rows">
+                        <div className="feed-head"><span className="fr-idx">row</span>{featShown.map((f) => <span key={f} className="fr-cell">{f.slice(0, 8)}</span>)}<span className="fr-y">{target.slice(0, 8)}</span></div>
+                        {Array.from({ length: TP_SHOWN }, (_, i) => i).map((i) => (
+                          <div key={i} className={`feed-row ${i === curS ? "on" : i < curS ? "past" : ""}`}>
+                            <span className="fr-idx">#{i}</span>
+                            {featShown.map((f) => { const c = ds.columns.find((x) => x.name === f); const v = c?.values[i]; return <span key={f} className="fr-cell">{v == null ? "∅" : (typeof v === "number" ? (Number.isInteger(v) ? v : Number(v).toFixed(1)) : String(v).slice(0, 8))}</span>; })}
+                            <span className="fr-y">{(() => { const v = ds.columns.find((x) => x.name === target)?.values[i]; return v == null ? "?" : String(v).slice(0, 8); })()}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className={`feeder-arrow ${tpPlaying ? "run" : ""}`}>→</div>
+                      <div className="feeder-model">
+                        <div className="fm-title">{MODEL_INFO[algo]?.label ?? algo}</div>
+                        {modelKind === "gd" && result.loss?.length ? (<>
+                          <div className="fm-metric">loss <b>{lossVal!.toFixed(3)}</b></div>
+                          <Sparkline values={result.loss} upto={Math.round(prog * result.loss.length)} />
+                          <div className="note" style={{ marginTop: 6 }}>each sample nudges the weights ↓ the loss</div>
+                        </>) : (modelKind === "tree" || modelKind === "forest") ? (
+                          <div className="fm-metric">splitting samples<div className="note" style={{ marginTop: 6 }}>rows partitioned to reduce impurity{modelKind === "forest" ? ` across ${treeViz?.nTrees ?? ""} trees` : ""}</div></div>
+                        ) : modelKind === "knn" ? (
+                          <div className="fm-metric">memorising<div className="note" style={{ marginTop: 6 }}>KNN is lazy — it just stores each sample</div></div>
+                        ) : (
+                          <div className="fm-metric">class stats<div className="note" style={{ marginTop: 6 }}>updating mean &amp; variance per class</div></div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="note" style={{ marginTop: 10 }}>The model sees the training rows repeatedly — each full pass is one <b>epoch</b>{modelKind === "gd" ? ", adjusting its weights a little each time until the loss flattens." : "."}</div>
+                  </>);
+                })()}
+              </div>
+            </div>
+
+            {/* how the model trained — visualization */}
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-h"><span className="t">How {MODEL_INFO[algo]?.label ?? algo} trained</span><span className="mono r">{modelKind === "gd" ? "gradient descent" : modelKind === "tree" ? "recursive splitting" : modelKind === "forest" ? `${treeViz?.nTrees ?? ""} trees` : modelKind === "gnb" ? "class statistics" : "lazy / instance-based"}</span></div>
+              <div className="card-b">
+                {modelKind === "gd" && result.loss && (<>
+                  <div className="note" style={{ marginBottom: 8 }}>The model starts with zero weights and takes small steps <b>down the loss surface</b> each epoch (gradient descent). Watch the loss fall and flatten as it converges.</div>
+                  {lossFig && <Plot data={lossFig.data} layout={lossFig.layout} style={{ height: 260 }} />}
+                  <div className="note" style={{ marginTop: 6 }}>start loss {result.loss[0].toFixed(3)} → final {result.loss[result.loss.length - 1].toFixed(3)} over {result.loss.length} recorded epochs.</div>
+                </>)}
+                {(modelKind === "tree" || modelKind === "forest") && treeViz && (<>
+                  <div className="note" style={{ marginBottom: 10 }}>{modelKind === "forest" ? `The forest grew ${treeViz.nTrees} trees on bootstrapped samples and averages their votes. Below is one representative tree` : "The tree repeatedly picks the feature & threshold that best separates the target"} — depth {treeViz.depth}, {treeViz.nodes} nodes. Each internal node splits on <b>feature ≤ threshold</b>; leaves give the prediction.</div>
+                  <TreeDiagram root={treeViz.root} featureNames={(built ?? { featureNames: [] as string[] }).featureNames} classes={result.metrics.task === "classification" ? result.metrics.classes : []} task={task} />
+                </>)}
+                {modelKind === "knn" && <div className="note">K-Nearest Neighbors is a <b>lazy learner</b> — it does no work at &ldquo;fit&rdquo; time beyond memorising the {built?.X.length ?? 0} training rows. At prediction it measures distance to every stored point and lets the {params.n_neighbors ?? 5} nearest vote.</div>}
+                {modelKind === "gnb" && <div className="note">Gaussian Naive Bayes learns, per class, the <b>mean &amp; variance</b> of each feature (assuming a bell curve) plus the class priors. Prediction picks the class with the highest combined likelihood.</div>}
+              </div>
+            </div>
+
+            <div className="split col-2e">
+              <div className="card"><div className="card-h"><span className="t">Test-set results</span><span className="mono r">{MODEL_INFO[algo]?.label ?? algo}</span></div>
+                <div className="card-b">
+                  {result.metrics.task === "classification" ? (<>
+                    <div className="split" style={{ gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}><div className="metric"><span className="v">{result.metrics.accuracy.toFixed(2)}</span><span className="k">accuracy</span></div><div className="metric"><span className="v">{result.metrics.precision.toFixed(2)}</span><span className="k">precision</span></div><div className="metric"><span className="v">{result.metrics.recall.toFixed(2)}</span><span className="k">recall</span></div><div className="metric"><span className="v">{result.metrics.f1.toFixed(2)}</span><span className="k">f1</span></div></div>
+                    <label className="fld">Confusion matrix ({result.metrics.classes.join(", ")})</label>
+                    <div className="cmx" style={{ gridTemplateColumns: `repeat(${result.metrics.classes.length},1fr)`, maxWidth: 260 }}>{(result.metrics as ClsMetrics).confusion.flatMap((row, i) => row.map((val, j) => { const mx = Math.max(...(result.metrics as ClsMetrics).confusion.flat(), 1); return <div key={`${i}-${j}`} style={{ background: i === j ? "var(--good)" : (val > 0 ? "var(--crit)" : "var(--panel-2)"), color: val === 0 && i !== j ? "var(--muted)" : "#fff", opacity: i === j || val === 0 ? 1 : 0.5 + 0.5 * (val / mx) }}>{val}</div>; }))}</div>
+                  </>) : (<>
+                    <div className="split" style={{ gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}><div className="metric"><span className="v">{result.metrics.r2.toFixed(2)}</span><span className="k">R²</span></div><div className="metric"><span className="v">{result.metrics.mae.toFixed(1)}</span><span className="k">MAE</span></div><div className="metric"><span className="v">{result.metrics.rmse.toFixed(1)}</span><span className="k">RMSE</span></div></div>
+                    {pvaFig && <Plot data={pvaFig.data} layout={pvaFig.layout} style={{ height: 240 }} />}
+                  </>)}
+                  <label className="fld" style={{ marginTop: 14 }}>Cross-validation ({result.cv.length}-fold {task === "classification" ? "accuracy" : "R²"})</label>
+                  <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{result.cv.map((s) => s.toFixed(3)).join(", ")} · mean {cvMean.toFixed(3)} ± {std(result.cv).toFixed(3)}</div>
+                </div>
+              </div>
+              <div className="card"><div className="card-h"><span className="t">Feature importance</span></div>
+                <div className="card-b">
+                  {result.importance && result.importance.map((f) => <div key={f.name} style={{ marginBottom: 8, fontSize: 12 }}>{f.name}<div className="impbar"><i style={{ width: `${Math.round(f.w * 100)}%` }} /></div></div>)}
+                  {!result.importance && <div className="note">This model exposes no per-feature coefficients (e.g. KNN / Naive Bayes). See the training visualization above for how it works.</div>}
+                </div>
+              </div>
+            </div>
+
+            {/* test the trained model */}
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Test the trained model</span>
+                <div className="tabs"><button className={testTab === "manual" ? "on" : ""} onClick={() => setTestTab("manual")}>Manual input</button><button className={testTab === "sample" ? "on" : ""} onClick={() => setTestTab("sample")}>Random sample</button></div>
+              </div>
+              <div className="card-b">
+                {testTab === "sample" && <div className="row" style={{ marginBottom: 12 }}><button className="btn" onClick={randomizeInputs}>🎲 Pick a random row &amp; predict</button><span className="note">fills the fields from a real row, then predicts &amp; compares to the true label</span></div>}
+                <div className="test-grid">
+                  {features.map((f) => { const c = ds.columns.find((x) => x.name === f); if (!c) return null; return (
+                    <div key={f} className="tf">
+                      <label className="fld">{f} <span style={{ color: "var(--faint)" }}>{c.type}</span></label>
+                      {c.type === "cat"
+                        ? <select value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))}>{Array.from(new Set(c.values.filter((x) => x != null).map(String))).slice(0, 60).map((o) => <option key={o}>{o}</option>)}</select>
+                        : <input type="text" value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))} />}
+                    </div>); })}
+                </div>
+                <div className="row" style={{ marginTop: 14, gap: 12, flexWrap: "wrap" }}>
+                  <button className="btn" onClick={() => predictRow(testInputs)}>▶ Predict</button>
+                  {testOut && (
+                    <div className={`pred-out ${testOut.ok === true ? "good" : testOut.ok === false ? "bad" : ""}`}>
+                      <span className="po-label">prediction</span>
+                      <span className="po-val">{trained?.classes ? testOut.pred : `${target} ≈ ${testOut.pred}`}</span>
+                      {testOut.actual != null && <span className="po-actual">actual <b>{testOut.actual}</b> {testOut.ok === true ? "✓" : testOut.ok === false ? "✗" : ""}</span>}
+                    </div>
+                  )}
+                </div>
+                <div className="note" style={{ marginTop: 10 }}>Inputs run through the exact same preprocessing pipeline, then the trained {MODEL_INFO[algo]?.label ?? algo} predicts. Categorical fields are limited to values seen in training.</div>
+              </div>
+            </div>
+          </>)}
+          {result && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Complete workflow code — data import → result</span><div className="r"><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={download}>Download .py</button></div></div>
+              <div className="card-b"><div className="code" style={{ maxHeight: 300 }}>{buildCode()}</div></div>
+            </div>
+          )}
+        </>
+      )}
+
+      <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
+        <div className="modal"><div className="mh"><b>Complete workflow code</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={download}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="code">{buildCode()}</div></div></div>
+      </div>
+    </>
+  );
+}

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Match the local dev runtime (Node 24 / npm 11). The committed
+          # package-lock.json is authored by npm 11; Node 20's npm 10 rejects
+          # its optional-dep graph with "missing from lock file".
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        # Use `npm install`, not `npm ci`: the lockfile is generated on Windows
+        # and omits Linux-only optional deps (e.g. @emnapi/core via the wasm
+        # variant of eslint's @unrs/resolver binding), which makes the strict
+        # `npm ci` fail on the Linux runner. `npm install` resolves per-platform.
+        run: npm install --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+        env:
+          # Dummy values so the production build never fails on a missing secret.
+          # Real secrets are injected by the deploy environment, not CI.
+          ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          DATABASE_URL: "mysql://ci:ci@localhost:4000/ci"
+          NODE_ENV: production

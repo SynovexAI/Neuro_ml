@@ -25,6 +25,6 @@ export default defineConfig({
     user: decodeURIComponent(u.username),
     password: decodeURIComponent(u.password),
     database: u.pathname.replace(/^\//, ""),
-    ssl: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+    ssl: { rejectUnauthorized: true },
   },
 });

@@ -20,9 +20,6 @@ function poolConfig(): mysql.PoolOptions {
     keepAliveInitialDelay: 10000,
     // Timeout for establishing a new connection.
     connectTimeout: 15000,
-    // Hard timeout per query — ensures a stale connection fails fast (5 s)
-    // instead of hanging indefinitely until the OS TCP timeout fires.
-    queryTimeout: 5000,
     waitForConnections: true,
   };
 }

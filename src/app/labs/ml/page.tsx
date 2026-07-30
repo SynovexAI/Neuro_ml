@@ -1,14 +1,14 @@
 import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth";
 import Shell from "@/components/Shell";
-import Compose from "@/components/Compose";
+import MlLab from "@/components/MlLab";
 
-export default async function ComposePage() {
+export default async function MlPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login");
   return (
-    <Shell user={user} title="Compose">
-      <Compose />
+    <Shell user={user} title="ML Lab">
+      <MlLab />
     </Shell>
   );
 }
