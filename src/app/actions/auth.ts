@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
 import { hashPassword, verifyPassword, createSession, destroySession, uid, userCount } from "@/lib/auth";
+import { audit } from "@/lib/monitor";
 
 type State = { error?: string } | undefined;
 
@@ -36,9 +37,13 @@ export async function loginAction(_prev: State, form: FormData): Promise<State> 
   const password = String(form.get("password") || "");
   const rows = await db.select().from(users).where(eq(users.email, email)).limit(1);
   const u = rows[0];
-  if (!u || !verifyPassword(password, u.passwordHash)) return { error: "Invalid email or password." };
+  if (!u || !verifyPassword(password, u.passwordHash)) {
+    await audit("login_failed", u?.id ?? null, { email });
+    return { error: "Invalid email or password." };
+  }
   if (u.status === "pending") return { error: "Your account is awaiting admin approval." };
   if (u.status === "suspended") return { error: "This account has been suspended." };
+  await audit("login", u.id, { role: u.role });
   await createSession(u.id);
   redirect(u.role === "admin" ? "/admin" : "/dashboard");
 }
