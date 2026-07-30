@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import mysql from "mysql2/promise";
 import { getSessionUser } from "@/lib/auth";
-import { resolvesToPrivate, rateLimit } from "@/lib/net";
+import { resolvesToPrivate } from "@/lib/net";
+import { rateLimitDb } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!rateLimit(`dbq:${user.id}`, 10, 60_000)) return NextResponse.json({ error: "Too many queries — wait a minute." }, { status: 429 });
+  if (!(await rateLimitDb("dbq", user.id, 10, 60_000))) return NextResponse.json({ error: "Too many queries — wait a minute." }, { status: 429 });
   const { url, query } = await req.json().catch(() => ({}));
   if (!/^mysql:\/\//i.test(url || "")) return NextResponse.json({ error: "Provide a mysql:// connection URL (Postgres support coming later)." }, { status: 400 });
   if (!/^\s*select\b/i.test(query || "")) return NextResponse.json({ error: "Only SELECT queries are allowed here." }, { status: 400 });

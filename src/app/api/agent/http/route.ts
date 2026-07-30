@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { resolvesToPrivate, rateLimit } from "@/lib/net";
+import { resolvesToPrivate } from "@/lib/net";
+import { rateLimitDb } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!rateLimit(`http:${user.id}`, 30, 60_000)) return NextResponse.json({ error: "Too many requests — wait a minute." }, { status: 429 });
+  if (!(await rateLimitDb("http", user.id, 30, 60_000))) return NextResponse.json({ error: "Too many requests — wait a minute." }, { status: 429 });
 
   const b = await req.json().catch(() => ({}));
   const url = String(b.url || "");
