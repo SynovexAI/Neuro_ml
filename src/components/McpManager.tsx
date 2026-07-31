@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { toast, confirmDialog } from "@/lib/toast";
 
 type Server = {
   id: string; name: string; transport: "http" | "sse" | "stdio";
@@ -15,6 +16,19 @@ type Form = {
   authType: "none" | "apikey" | "bearer" | "oauth"; headerName: string; envName: string; secret: string;
 };
 const empty: Form = { name: "", transport: "http", url: "", command: "", authType: "none", headerName: "Authorization", envName: "", secret: "" };
+
+// Popular MCP servers. Clicking one pre-fills the connect form; the admin just
+// adds the key / token. (stdio ones must be installed in the deployed image.)
+const CATALOG: (Partial<Form> & { title: string; icon: string; desc: string; needs: string })[] = [
+  { title: "GitHub", icon: "🐙", desc: "Repos, issues, PRs", needs: "personal access token", name: "github", transport: "http", url: "https://api.githubcopilot.com/mcp", authType: "bearer", headerName: "Authorization" },
+  { title: "Brave Search", icon: "🦁", desc: "Web search", needs: "Brave API key", name: "brave-search", transport: "stdio", command: "npx -y @modelcontextprotocol/server-brave-search", envName: "BRAVE_API_KEY" },
+  { title: "Slack", icon: "💬", desc: "Channels & messages", needs: "bot token", name: "slack", transport: "stdio", command: "npx -y @modelcontextprotocol/server-slack", envName: "SLACK_BOT_TOKEN" },
+  { title: "Google Maps", icon: "🗺", desc: "Places & directions", needs: "Maps API key", name: "google-maps", transport: "stdio", command: "npx -y @modelcontextprotocol/server-google-maps", envName: "GOOGLE_MAPS_API_KEY" },
+  { title: "Postgres", icon: "🐘", desc: "Query a database", needs: "connection string", name: "postgres", transport: "stdio", command: "npx -y @modelcontextprotocol/server-postgres", envName: "DATABASE_URL" },
+  { title: "Filesystem", icon: "📁", desc: "Local files", needs: "no auth", name: "filesystem", transport: "stdio", command: "npx -y @modelcontextprotocol/server-filesystem /data", authType: "none" },
+  { title: "Fetch", icon: "🌐", desc: "Fetch & read URLs", needs: "no auth", name: "fetch", transport: "stdio", command: "npx -y @modelcontextprotocol/server-fetch", authType: "none" },
+  { title: "Time", icon: "⏰", desc: "Dates & timezones", needs: "no auth", name: "time", transport: "stdio", command: "npx -y @modelcontextprotocol/server-time", authType: "none" },
+];
 
 export default function McpManager() {
   const [servers, setServers] = useState<Server[]>([]);
@@ -33,28 +47,53 @@ export default function McpManager() {
 
   const remote = f.transport === "http" || f.transport === "sse";
 
+  function applyPreset(c: Partial<Form>) {
+    setF({ ...empty, ...c });
+    setMsg("");
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+    toast(`Filled the form for “${c.name}” — add its key and Connect`, "info");
+  }
+
   async function add() {
     setBusy(true); setMsg("");
     try {
       const r = await fetch("/api/admin/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(f) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) { setMsg(j.error || "Could not add the server."); }
-      else { setF({ ...empty }); await load(); }
-    } catch (e) { setMsg((e as Error).message); }
+      if (!r.ok) { setMsg(j.error || "Could not add the server."); toast(j.error || "Could not connect the server", "error"); }
+      else { toast(`Connected “${f.name}”`, "success"); setF({ ...empty }); await load(); }
+    } catch (e) { setMsg((e as Error).message); toast((e as Error).message, "error"); }
     setBusy(false);
   }
-  async function patch(id: string, body: object) {
+  async function patch(id: string, body: object, note?: string) {
     await fetch(`/api/admin/mcp/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
     load();
+    if (note) toast(note, "success");
   }
   async function remove(s: Server) {
-    if (!window.confirm(`Remove MCP server "${s.name}"?`)) return;
+    if (!(await confirmDialog(`Remove MCP server “${s.name}”?`, { confirmLabel: "Remove", danger: true }))) return;
     await fetch(`/api/admin/mcp/${s.id}`, { method: "DELETE" }).catch(() => {});
     load();
+    toast("MCP server removed", "success");
   }
 
   return (
     <>
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-h"><span className="t">Marketplace</span><span className="note r">click to pre-fill the form below</span></div>
+        <div className="card-b">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+            {CATALOG.map((c) => (
+              <button key={c.title} type="button" onClick={() => applyPreset(c)}
+                style={{ textAlign: "left", border: "1px solid var(--border)", borderRadius: 9, padding: "11px 12px", background: "var(--surface)", cursor: "pointer", fontFamily: "inherit" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 17 }}>{c.icon}</span><b style={{ fontSize: 13 }}>{c.title}</b></div>
+                <div className="note" style={{ marginTop: 3 }}>{c.desc}</div>
+                <div className="note" style={{ marginTop: 4, color: "var(--accent)" }}>needs: {c.needs}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-h"><span className="t">Connect a server</span></div>
         <div className="card-b">
@@ -123,7 +162,7 @@ export default function McpManager() {
                   {s.hasSecret && <span className="badge" title="secret stored encrypted">🔒 key</span>}
                   <span className="note">{s.url || s.command}</span>
                   <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                    <button className="btn ghost sm" onClick={() => patch(s.id, { enabled: !s.enabled })}>{s.enabled ? "Disable" : "Enable"}</button>
+                    <button className="btn ghost sm" onClick={() => patch(s.id, { enabled: !s.enabled }, s.enabled ? "Server disabled" : "Server enabled")}>{s.enabled ? "Disable" : "Enable"}</button>
                     <button className="btn ghost sm danger" onClick={() => remove(s)}>Remove</button>
                   </span>
                 </div>

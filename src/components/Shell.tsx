@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
+import Toaster from "./Toaster";
 
 type Role = "admin" | "student";
 export type ShellUser = { name?: string | null; email: string; role: Role };
@@ -17,6 +18,8 @@ const ZONES: Zone[] = [
       { href: "/dashboard", label: "Dashboard" },
       { href: "/compose", label: "Compose" },
       { href: "/kb", label: "Knowledge bases" },
+      { href: "/admin/mcp", label: "MCP servers" },
+      { href: "/admin/providers", label: "Providers & models" },
       { href: "/projects", label: "My Projects" },
       { href: "/templates", label: "Templates" },
     ],
@@ -33,19 +36,18 @@ const ZONES: Zone[] = [
     ],
   },
   {
-    id: "control", label: "Control Room", desc: "Providers, users, usage, MCP", icon: "▤", home: "/admin", adminOnly: true,
+    id: "control", label: "Control Room", desc: "Users, usage, monitoring", icon: "▤", home: "/admin", adminOnly: true,
     items: [
       { href: "/admin", label: "Overview" },
-      { href: "/admin/providers", label: "Providers & models" },
       { href: "/admin/users", label: "Users" },
       { href: "/admin/usage", label: "Usage & Monitoring" },
       { href: "/admin/agents", label: "Agent analytics" },
-      { href: "/admin/mcp", label: "MCP servers" },
     ],
   },
 ];
 
 function zoneOf(path: string): string {
+  if (path === "/admin/mcp" || path === "/admin/providers") return "studio"; // build tools live in Studio
   if (path.startsWith("/labs")) return "labs";
   if (path.startsWith("/admin")) return "control";
   return "studio";
@@ -107,6 +109,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
         </header>
         <div className="work">{children}</div>
       </div>
+      <Toaster />
     </div>
   );
 }

@@ -159,6 +159,15 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .nat-cfg-h b{font-size:13px}
 .kb-drop{border:1.5px dashed var(--border-strong);border-radius:var(--r);padding:20px 16px;text-align:center;background:var(--panel);transition:border-color .12s}
 .kb-drop:hover{border-color:var(--accent)}
+/* toasts + confirm */
+.toaster{position:fixed;bottom:20px;right:20px;z-index:100;display:flex;flex-direction:column;gap:8px}
+.toast{display:flex;align-items:center;gap:9px;background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:9px;padding:10px 12px 10px 13px;font-size:13px;color:var(--text);box-shadow:var(--shadow-md);min-width:220px;max-width:360px;animation:revealIn .18s ease both}
+.toast .ti{font-weight:700}
+.toast.success{border-left-color:#3b9e5f}.toast.success .ti{color:#3b9e5f}
+.toast.error{border-left-color:#e5484d}.toast.error .ti{color:#e5484d}
+.toast .tx{margin-left:auto;background:none;border:none;color:var(--faint);font-size:16px;line-height:1;cursor:pointer}
+.btn.danger-solid{background:#e5484d;border-color:#e5484d;color:#fff}
+.btn.danger-solid:hover{background:#d3413f;border-color:#d3413f}
 /* full-width flow builder */
 .flow-top{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-bottom:none;border-radius:var(--r) var(--r) 0 0;background:var(--surface)}
 .flow-body{display:grid;grid-template-columns:158px 1fr 244px;border:1px solid var(--border);border-radius:0 0 var(--r) var(--r);overflow:hidden;min-height:440px}

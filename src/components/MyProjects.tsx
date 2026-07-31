@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { toast, confirmDialog } from "@/lib/toast";
 
 type Project = { id: string; lab: string; name: string; updatedAt?: string | null; createdAt?: string | null };
 
@@ -45,11 +46,12 @@ export default function MyProjects() {
     setBusy("");
   }
   async function remove(p: Project) {
-    if (!window.confirm(`Delete "${p.name}"? This can't be undone.`)) return;
+    if (!(await confirmDialog(`Delete “${p.name}”? This can't be undone.`, { confirmLabel: "Delete", danger: true }))) return;
     setBusy(p.id);
     await fetch(`/api/projects?id=${encodeURIComponent(p.id)}`, { method: "DELETE" }).catch(() => {});
     setProjects((ps) => ps.filter((x) => x.id !== p.id));
     setBusy("");
+    toast("Project deleted", "success");
   }
 
   const labs = Array.from(new Set(projects.map((p) => p.lab)));

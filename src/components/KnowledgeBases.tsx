@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { toast, confirmDialog } from "@/lib/toast";
 
 type Kb = { id: string; name: string; status: string; docCount: number; chunkCount: number; embModel: string | null; updatedAt?: string | null };
 type Staged = { name: string; text: string };
@@ -52,18 +53,21 @@ export default function KnowledgeBases() {
 
   async function createKb() {
     if (!newName.trim()) return;
+    const name = newName.trim();
     setBusy("create");
-    const r = await fetch("/api/kb", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: newName }) });
+    const r = await fetch("/api/kb", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
     const j = await r.json().catch(() => ({}));
     setNewName(""); await loadKbs();
-    if (j.id) { setSelId(j.id); setStaged([]); setSyncedDocs([]); setTab("add"); setConnect(false); setPick(null); }
+    if (j.id) { setSelId(j.id); setStaged([]); setSyncedDocs([]); setTab("add"); setConnect(false); setPick(null); toast(`Created “${name}” — add documents to sync`, "success"); }
+    else toast("Couldn't create the knowledge base", "error");
     setBusy("");
   }
   async function removeKb(k: Kb) {
-    if (!window.confirm(`Delete knowledge base "${k.name}"?`)) return;
+    if (!(await confirmDialog(`Delete knowledge base “${k.name}”? This can't be undone.`, { confirmLabel: "Delete", danger: true }))) return;
     await fetch(`/api/kb/${k.id}`, { method: "DELETE" }).catch(() => {});
     if (selId === k.id) { setSelId(null); setStaged([]); }
     loadKbs();
+    toast("Knowledge base deleted", "success");
   }
 
   async function addFiles(files: FileList | null) {
@@ -100,8 +104,8 @@ export default function KnowledgeBases() {
     try {
       const r = await fetch(`/api/kb/${selId}/sync`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ docs: staged }) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) { setMsg(j.error || "Sync failed."); }
-      else { setMsg(`Synced ✓ ${j.chunkCount} chunks · ${j.embModel === "tfidf" ? "TF-IDF (provider has no embeddings)" : "embeddings: " + j.embModel}`); setStaged([]); await loadKbs(); await loadDetail(selId); setTab("docs"); }
+      if (!r.ok) { setMsg(j.error || "Sync failed."); toast(j.error || "Sync failed", "error"); }
+      else { setStaged([]); await loadKbs(); await loadDetail(selId); setTab("docs"); toast(`Synced ✓ ${j.chunkCount} chunks · ${j.embModel === "tfidf" ? "TF-IDF" : "embeddings (" + j.embModel + ")"}`, "success"); }
     } catch (e) { setMsg((e as Error).message); }
     setBusy("");
   }
