@@ -18,6 +18,7 @@ export default function NatAgentPanel() {
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcp, setMcp] = useState<McpOpt[]>([]);
 
+  const [agentType, setAgentType] = useState<"react_agent" | "tool_calling_agent">("react_agent");
   const [tools, setTools] = useState<Set<string>>(new Set(["calculator", "current_datetime"]));
   const [mcpIds, setMcpIds] = useState<Set<string>>(new Set());
   const [kbs, setKbs] = useState<KbOpt[]>([]);
@@ -54,7 +55,7 @@ export default function NatAgentPanel() {
     try {
       const res = await fetch("/api/agent/nat-run", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task, providerId, model, systemPrompt, tools: [...tools], temperature: 0, mcpServerIds: [...mcpIds], knowledgeBaseIds: [...kbIds] }),
+        body: JSON.stringify({ task, providerId, model, systemPrompt, agentType, tools: [...tools], temperature: 0, mcpServerIds: [...mcpIds], knowledgeBaseIds: [...kbIds] }),
       });
       const j = await res.json().catch(() => null);
       if (!res.ok) { setErr(j?.error || `Run failed (${res.status})`); return; }
@@ -86,6 +87,13 @@ export default function NatAgentPanel() {
               {!loadingModels && models.length === 0 && <option value="">no models</option>}
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
+
+            <label className="fld" style={{ marginTop: 12 }}>Agent workflow</label>
+            <div className="seg">
+              <button className={agentType === "react_agent" ? "on" : ""} onClick={() => setAgentType("react_agent")}>ReAct</button>
+              <button className={agentType === "tool_calling_agent" ? "on" : ""} onClick={() => setAgentType("tool_calling_agent")}>Tool-calling</button>
+            </div>
+            <div className="note" style={{ marginTop: 4 }}>{agentType === "react_agent" ? "Reason → act → observe loop (Thought/Action/Observation)." : "Uses the model's native function-calling to invoke tools directly."}</div>
 
             <label className="fld" style={{ marginTop: 12 }}>Built-in tools</label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>

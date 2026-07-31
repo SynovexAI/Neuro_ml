@@ -84,7 +84,7 @@ export async function POST(req: Request) {
     const res = await fetch(serviceUrl.replace(/\/$/, "") + "/run", {
       method: "POST",
       headers: { "content-type": "application/json", ...(process.env.NAT_SHARED_SECRET ? { "x-nat-secret": process.env.NAT_SHARED_SECRET } : {}) },
-      body: JSON.stringify({ task, model, base_url: prov.baseUrl, api_key: prov.apiKey, temperature: b.temperature ?? 0, system_prompt: systemPrompt, tools, mcp_servers, ...(docs.length ? { knowledge: { docs } } : {}) }),
+      body: JSON.stringify({ task, model, base_url: prov.baseUrl, api_key: prov.apiKey, temperature: b.temperature ?? 0, system_prompt: systemPrompt, agent_type: b.agentType === "tool_calling_agent" ? "tool_calling_agent" : "react_agent", tools, mcp_servers, ...(docs.length ? { knowledge: { docs } } : {}) }),
       signal: ctrl.signal,
     });
     const j = await res.json().catch(() => null) as { answer?: string; latency_ms?: number; tool_names?: string[]; unsupported_tools?: string[]; profiler?: Record<string, unknown>; detail?: string } | null;

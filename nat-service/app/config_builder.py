@@ -15,6 +15,9 @@ SUPPORTED_TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
     "current_datetime": ("functions", {"_type": "current_datetime"}),
 }
 
+# NAT workflow agent types the panel can pick.
+ALLOWED_AGENTS = {"react_agent", "tool_calling_agent"}
+
 
 def _safe_name(name: str, taken: set[str]) -> str:
     base = re.sub(r"[^a-z0-9_]", "_", (name or "mcp").lower()).strip("_") or "mcp"
@@ -68,9 +71,10 @@ def build_config(req: RunRequest) -> tuple[dict[str, Any], list[str], list[str]]
         function_groups[name] = {"_type": "mcp_client", "server": server}
         tool_names.append(name)
 
+    agent_type = req.agent_type if req.agent_type in ALLOWED_AGENTS else "react_agent"
     config: dict[str, Any] = {
         "llms": {"app_llm": llm},
-        "workflow": {"_type": "react_agent", "tool_names": tool_names, "llm_name": "app_llm", "verbose": True},
+        "workflow": {"_type": agent_type, "tool_names": tool_names, "llm_name": "app_llm", "verbose": True},
     }
     if function_groups:
         config["function_groups"] = function_groups

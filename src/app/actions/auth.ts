@@ -28,7 +28,7 @@ export async function signupAction(_prev: State, form: FormData): Promise<State>
     status: first ? "active" : "pending",
   });
 
-  if (first) { await createSession(id); redirect("/admin"); }
+  if (first) { await createSession(id); redirect("/dashboard"); }
   redirect("/pending");
 }
 
@@ -45,7 +45,7 @@ export async function loginAction(_prev: State, form: FormData): Promise<State> 
   if (u.status === "suspended") return { error: "This account has been suspended." };
   await audit("login", u.id, { role: u.role });
   await createSession(u.id);
-  redirect(u.role === "admin" ? "/admin" : "/dashboard");
+  redirect("/dashboard"); // everyone lands in Studio
 }
 
 export async function logoutAction(): Promise<void> {

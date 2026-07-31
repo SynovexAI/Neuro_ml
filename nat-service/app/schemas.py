@@ -25,6 +25,7 @@ class RunRequest(BaseModel):
     api_key: str | None = None
     temperature: float = 0.0
     system_prompt: str | None = None
+    agent_type: str = "react_agent"                         # react_agent | tool_calling_agent
     tools: list[str] = Field(default_factory=list)          # built-in tool ids
     mcp_servers: list[McpServerCfg] = Field(default_factory=list)
     knowledge: KnowledgeCfg | None = None
