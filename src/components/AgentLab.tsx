@@ -6,6 +6,7 @@ import {
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
 import type { RagIndex } from "@/lib/ragUtils";
+import NatAgentPanel from "./NatAgentPanel";
 
 type AgentType = "react" | "workflow";
 type Step = "type" | "build" | "run";
@@ -52,6 +53,7 @@ const toolDefault = (i: number) => ({ x: 344 + i * 158, y: 300 });
 export default function AgentLab() {
   const [step, setStep] = useState<Step>("type");
   const [agentType, setAgentType] = useState<AgentType>("react");
+  const [runtime, setRuntime] = useState<"browser" | "nat">("browser");
   const [buildMode, setBuildMode] = useState<"visual" | "manual" | "prompt">("visual");
 
   // providers / models
@@ -546,13 +548,20 @@ if __name__ == "__main__":
       <div className="lab-head">
         <div><div className="eyebrow">Lab 03 · orchestration</div><h2 className="page-h">Agent Lab</h2><p className="page-sub" style={{ margin: 0 }}>Pick an agent type, wire it up on a node canvas (or by form / from a prompt), then run it and watch every step.</p></div>
         <div className="acts" style={{ position: "relative" }}>
-          <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
-          <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
-          <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
-          <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
+          <div className="seg" style={{ width: 210, marginRight: 6 }}>
+            <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>In-browser</button>
+            <button className={runtime === "nat" ? "on" : ""} onClick={() => setRuntime("nat")}>NVIDIA NAT</button>
+          </div>
+          {runtime === "browser" && <>
+            <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
+            <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
+            <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
+            <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
+          </>}
           {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config)}>{a.name}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
         </div>
       </div>
+      {runtime === "nat" ? <NatAgentPanel /> : <>
       {provKnown && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before you can run an agent.</div>}
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
@@ -784,6 +793,7 @@ if __name__ == "__main__":
       <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
         <div className="modal"><div className="mh"><b>Agent code · {curType.label}</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadCode}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="note" style={{ marginBottom: 10 }}>Where to use it: run this Python (<code>pip install openai</code>, set <code>OPENAI_BASE_URL</code> &amp; <code>OPENAI_API_KEY</code>) · or <b>💾 Save</b> to My Projects · or <b>⬇ Export JSON</b> to load the config into your own app.</div><div className="code">{buildCode()}</div></div></div>
       </div>
+      </>}
     </>
   );
 }
