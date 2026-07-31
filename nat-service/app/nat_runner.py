@@ -1,4 +1,4 @@
-"""Run a generated NAT config and return the answer + timing.
+"""Run a generated NAT config and return the answer, timing, and profiler.
 
 Uses NAT's documented programmatic entry point:
     async with load_workflow(config_path) as session_manager:
@@ -14,9 +14,12 @@ import yaml
 
 from nat.runtime.loader import load_workflow
 
+from . import profiler
+
 
 async def run_workflow(config: dict[str, Any], input_message: str) -> dict[str, Any]:
     start = time.perf_counter()
+    collector: list[Any] = []
     # NAT loads config from a file. The provider key lives in this temp file only
     # for the duration of the run, then it's deleted.
     fd, path = tempfile.mkstemp(suffix=".yml", prefix="nat_")
@@ -25,10 +28,12 @@ async def run_workflow(config: dict[str, Any], input_message: str) -> dict[str, 
             yaml.safe_dump(config, f, sort_keys=False)
         async with load_workflow(path) as session_manager:
             async with session_manager.run(input_message) as runner:
+                profiler.subscribe(collector)  # best-effort per-step capture
                 answer = await runner.result(to_type=str)
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
-    return {"answer": answer, "latency_ms": round((time.perf_counter() - start) * 1000)}
+    total_ms = round((time.perf_counter() - start) * 1000)
+    return {"answer": answer, "latency_ms": total_ms, "profiler": profiler.build(collector, total_ms)}

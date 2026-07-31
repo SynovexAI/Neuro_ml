@@ -1,5 +1,6 @@
-# NVIDIA NeMo Agent Toolkit (Apache-2.0) + the LangChain agent framework it drives.
-nvidia-nat[langchain]==1.4.0
+# NVIDIA NeMo Agent Toolkit (Apache-2.0) + the LangChain agent framework and
+# MCP client support it uses.
+nvidia-nat[langchain,mcp]==1.4.0
 # HTTP service.
 fastapi>=0.115,<0.116
 uvicorn[standard]>=0.32,<0.35

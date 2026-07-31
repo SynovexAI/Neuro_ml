@@ -5,11 +5,13 @@ A small Python sidecar that runs agents through the **NVIDIA NeMo Agent Toolkit*
 over Render's private network; the provider API key is passed **per-request** and
 never stored here.
 
-## What it does (phase 1 — the spike)
+## What it does
 - `GET /health` → `{ "ok": true }`
-- `POST /run` → builds a NAT `react_agent` workflow from the request, runs it, returns the answer + latency.
-- Tools wired now: `calculator`, `current_datetime` (NAT core).
-- Coming next: `http`, `knowledge` (RAG — ships doc text and indexes here), and **MCP** tools.
+- `POST /run` → builds a NAT `react_agent` workflow, runs it, returns the answer, latency, and a per-step profiler.
+- Built-in tools: `calculator`, `current_datetime` (NAT core).
+- **MCP tools**: `mcp_servers` in the request become `mcp_client` function groups (HTTP headers / stdio env resolved by the Next proxy).
+- **RAG ingest**: `knowledge.docs` are chunked + retrieved (TF-IDF) and the top passages injected as context (`context_used`).
+- **Per-step profiler**: subscribes to NAT intermediate steps → `profiler.steps` (name, type, ms, tokens); best-effort, degrades to `total_ms`.
 
 ## Request / response
 ```jsonc

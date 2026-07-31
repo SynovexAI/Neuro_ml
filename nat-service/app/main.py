@@ -8,6 +8,7 @@ import os
 
 from fastapi import FastAPI, Header, HTTPException
 
+from . import rag
 from .config_builder import build_config
 from .nat_runner import run_workflow
 from .schemas import RunRequest, RunResponse
@@ -32,6 +33,11 @@ async def run(req: RunRequest, x_nat_secret: str | None = Header(default=None)) 
     config, tool_names, unsupported = build_config(req)
     message = req.task if not req.system_prompt else f"{req.system_prompt}\n\nTask: {req.task}"
 
+    # RAG ingest: ground the run in supplied documents (retrieval + context inject).
+    context_used = False
+    if req.knowledge and req.knowledge.docs:
+        message, context_used = rag.augment(message, req.task, req.knowledge.docs)
+
     try:
         result = await run_workflow(config, message)
     except Exception as e:  # noqa: BLE001 — surface a clean error to the caller
@@ -44,5 +50,6 @@ async def run(req: RunRequest, x_nat_secret: str | None = Header(default=None)) 
         model=req.model,
         tool_names=tool_names,
         unsupported_tools=unsupported,
-        profiler={"total_ms": result["latency_ms"]},
+        context_used=context_used,
+        profiler=result.get("profiler", {"total_ms": result["latency_ms"]}),
     )

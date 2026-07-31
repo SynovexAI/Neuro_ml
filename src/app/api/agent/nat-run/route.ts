@@ -5,7 +5,33 @@ import { rateLimitDb } from "@/lib/ratelimit";
 import { checkQuota, recordUsage, estimateTokens } from "@/lib/usage";
 import { captureError } from "@/lib/monitor";
 import { db } from "@/lib/db";
-import { agentRuns } from "@/lib/db/schema";
+import { agentRuns, mcpServers } from "@/lib/db/schema";
+import { decrypt } from "@/lib/crypto";
+import { and, eq, inArray } from "drizzle-orm";
+
+// Build the resolved MCP configs the NAT service expects (secrets decrypted here,
+// headers/env prepared, never sent to the client).
+async function resolveMcp(ids: string[]) {
+  if (!ids.length) return [];
+  const rows = await db.select().from(mcpServers).where(and(inArray(mcpServers.id, ids), eq(mcpServers.enabled, true)));
+  return rows.map((s) => {
+    const secret = s.secretEnc ? decrypt(s.secretEnc) : "";
+    const cfg: Record<string, unknown> = { name: s.name, transport: s.transport === "http" ? "streamable-http" : s.transport };
+    if (s.transport === "stdio") {
+      const parts = (s.command || "").split(/\s+/).filter(Boolean);
+      cfg.command = parts[0] || "";
+      cfg.args = parts.slice(1);
+      if (s.envName && secret) cfg.env = { [s.envName]: secret };
+    } else {
+      cfg.url = s.url || "";
+      if (secret) {
+        if (s.authType === "bearer") cfg.headers = { Authorization: `Bearer ${secret}` };
+        else if (s.authType === "apikey") cfg.headers = { [s.headerName || "X-API-Key"]: secret };
+      }
+    }
+    return cfg;
+  });
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +54,9 @@ export async function POST(req: Request) {
   if (!task) return NextResponse.json({ error: "A task is required." }, { status: 400 });
   const tools: string[] = Array.isArray(b.tools) ? b.tools.filter((t: unknown) => typeof t === "string") : [];
   const systemPrompt = b.systemPrompt ? String(b.systemPrompt) : undefined;
+  const mcpIds: string[] = Array.isArray(b.mcpServerIds) ? b.mcpServerIds.filter((t: unknown) => typeof t === "string") : [];
+  const docs: string[] = Array.isArray(b.knowledgeDocs) ? b.knowledgeDocs.filter((t: unknown) => typeof t === "string" && t.trim()).map((t: string) => t.slice(0, 40000)) : [];
+  const mcp_servers = await resolveMcp(mcpIds).catch(() => []);
 
   const prov = b.providerId ? await getProviderById(String(b.providerId)) : await getActiveProvider();
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider is configured. An admin must add one under Admin → Providers." }, { status: 400 });
@@ -40,7 +69,7 @@ export async function POST(req: Request) {
     const res = await fetch(serviceUrl.replace(/\/$/, "") + "/run", {
       method: "POST",
       headers: { "content-type": "application/json", ...(process.env.NAT_SHARED_SECRET ? { "x-nat-secret": process.env.NAT_SHARED_SECRET } : {}) },
-      body: JSON.stringify({ task, model, base_url: prov.baseUrl, api_key: prov.apiKey, temperature: b.temperature ?? 0, system_prompt: systemPrompt, tools }),
+      body: JSON.stringify({ task, model, base_url: prov.baseUrl, api_key: prov.apiKey, temperature: b.temperature ?? 0, system_prompt: systemPrompt, tools, mcp_servers, ...(docs.length ? { knowledge: { docs } } : {}) }),
       signal: ctrl.signal,
     });
     const j = await res.json().catch(() => null) as { answer?: string; latency_ms?: number; tool_names?: string[]; unsupported_tools?: string[]; profiler?: Record<string, unknown>; detail?: string } | null;
