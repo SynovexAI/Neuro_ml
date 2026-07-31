@@ -85,7 +85,27 @@ export const auditLog = mysqlTable("audit_log", {
   ts: timestamp("ts").defaultNow(),
 }, (t) => [index("audit_event_ts_idx").on(t.event, t.ts)]);
 
+// Admin-connected MCP (Model Context Protocol) servers. Their tools become
+// available to agents. Secrets (API keys / tokens) are AES-256-GCM encrypted.
+export const mcpServers = mysqlTable("mcp_servers", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  name: varchar("name", { length: 80 }).notNull(),
+  transport: mysqlEnum("transport", ["http", "sse", "stdio"]).notNull().default("http"),
+  url: varchar("url", { length: 500 }),        // http / sse
+  command: varchar("command", { length: 500 }), // stdio
+  authType: mysqlEnum("auth_type", ["none", "apikey", "bearer", "oauth"]).notNull().default("none"),
+  headerName: varchar("header_name", { length: 80 }), // e.g. Authorization or X-API-Key
+  envName: varchar("env_name", { length: 80 }),        // stdio: env var the secret is passed as
+  secretEnc: text("secret_enc"),               // encrypted token / key; never returned to the client
+  enabled: boolean("enabled").notNull().default(true),
+  tools: json("tools"),                        // discovered tool names (populated later)
+  status: varchar("status", { length: 40 }).default("configured"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
+});
+
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Usage = typeof usage.$inferSelect;
+export type McpServer = typeof mcpServers.$inferSelect;
