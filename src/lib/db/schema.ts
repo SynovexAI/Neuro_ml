@@ -126,9 +126,36 @@ export const agentRuns = mysqlTable("agent_runs", {
   ts: timestamp("ts").defaultNow(),
 }, (t) => [index("agent_runs_user_ts_idx").on(t.userId, t.ts)]);
 
+// Per-user reusable knowledge bases (RAG). Documents are chunked + embedded on
+// sync; vectors are stored in kb_chunks (dense embeddings when the provider
+// supports them, else TF-IDF sparse vectors). Agents select a KB to ground on.
+export const knowledgeBases = mysqlTable("knowledge_bases", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  name: varchar("name", { length: 120 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("empty"), // empty | syncing | ready | error
+  docCount: int("doc_count").notNull().default(0),
+  chunkCount: int("chunk_count").notNull().default(0),
+  embModel: varchar("emb_model", { length: 120 }),  // embedding model name, or "tfidf"
+  embMeta: json("emb_meta"),                        // { df, N } for TF-IDF query reconstruction
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
+}, (t) => [index("kb_user_idx").on(t.userId)]);
+
+export const kbChunks = mysqlTable("kb_chunks", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  kbId: varchar("kb_id", { length: 36 }).notNull(),
+  docName: varchar("doc_name", { length: 200 }),
+  idx: int("idx").notNull().default(0),
+  text: text("text"),
+  embedding: json("embedding"),  // dense float[] (embeddings) or sparse {term:weight} (TF-IDF)
+}, (t) => [index("kb_chunks_kb_idx").on(t.kbId)]);
+
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Usage = typeof usage.$inferSelect;
 export type McpServer = typeof mcpServers.$inferSelect;
 export type AgentRun = typeof agentRuns.$inferSelect;
+export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
+export type KbChunk = typeof kbChunks.$inferSelect;

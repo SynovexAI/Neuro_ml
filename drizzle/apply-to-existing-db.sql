@@ -81,8 +81,34 @@ CREATE TABLE IF NOT EXISTS `agent_runs` (
 	CONSTRAINT `agent_runs_id` PRIMARY KEY(`id`)
 );
 
+CREATE TABLE IF NOT EXISTS `knowledge_bases` (
+	`id` varchar(36) NOT NULL,
+	`user_id` varchar(36) NOT NULL,
+	`name` varchar(120) NOT NULL,
+	`status` varchar(24) NOT NULL DEFAULT 'empty',
+	`doc_count` int NOT NULL DEFAULT 0,
+	`chunk_count` int NOT NULL DEFAULT 0,
+	`emb_model` varchar(120),
+	`emb_meta` json,
+	`created_at` timestamp DEFAULT (now()),
+	`updated_at` timestamp DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `knowledge_bases_id` PRIMARY KEY(`id`)
+);
+
+CREATE TABLE IF NOT EXISTS `kb_chunks` (
+	`id` varchar(36) NOT NULL,
+	`kb_id` varchar(36) NOT NULL,
+	`doc_name` varchar(200),
+	`idx` int NOT NULL DEFAULT 0,
+	`text` text,
+	`embedding` json,
+	CONSTRAINT `kb_chunks_id` PRIMARY KEY(`id`)
+);
+
 ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `monthly_token_limit` int;
 
 CREATE INDEX IF NOT EXISTS `usage_user_ts_idx` ON `usage` (`user_id`,`ts`);
 CREATE INDEX IF NOT EXISTS `audit_event_ts_idx` ON `audit_log` (`event`,`ts`);
 CREATE INDEX IF NOT EXISTS `agent_runs_user_ts_idx` ON `agent_runs` (`user_id`,`ts`);
+CREATE INDEX IF NOT EXISTS `kb_user_idx` ON `knowledge_bases` (`user_id`);
+CREATE INDEX IF NOT EXISTS `kb_chunks_kb_idx` ON `kb_chunks` (`kb_id`);

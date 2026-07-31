@@ -5,9 +5,22 @@ import { rateLimitDb } from "@/lib/ratelimit";
 import { checkQuota, recordUsage, estimateTokens } from "@/lib/usage";
 import { captureError } from "@/lib/monitor";
 import { db } from "@/lib/db";
-import { agentRuns, mcpServers } from "@/lib/db/schema";
+import { agentRuns, mcpServers, knowledgeBases, kbChunks } from "@/lib/db/schema";
 import { decrypt } from "@/lib/crypto";
+import { retrieve } from "@/lib/kb";
 import { and, eq, inArray } from "drizzle-orm";
+
+// Retrieve the most relevant chunks from the user's selected knowledge bases.
+async function resolveKbDocs(userId: string, kbIds: string[], query: string, prov: { baseUrl: string; apiKey: string }): Promise<string[]> {
+  const out: string[] = [];
+  for (const kbId of kbIds.slice(0, 3)) {
+    const [kb] = await db.select().from(knowledgeBases).where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.userId, userId)));
+    if (!kb || kb.status !== "ready") continue;
+    const chunks = await db.select({ text: kbChunks.text, embedding: kbChunks.embedding }).from(kbChunks).where(eq(kbChunks.kbId, kbId));
+    out.push(...await retrieve(kb, chunks, query, prov, 4));
+  }
+  return out;
+}
 
 // Build the resolved MCP configs the NAT service expects (secrets decrypted here,
 // headers/env prepared, never sent to the client).
@@ -55,13 +68,15 @@ export async function POST(req: Request) {
   const tools: string[] = Array.isArray(b.tools) ? b.tools.filter((t: unknown) => typeof t === "string") : [];
   const systemPrompt = b.systemPrompt ? String(b.systemPrompt) : undefined;
   const mcpIds: string[] = Array.isArray(b.mcpServerIds) ? b.mcpServerIds.filter((t: unknown) => typeof t === "string") : [];
-  const docs: string[] = Array.isArray(b.knowledgeDocs) ? b.knowledgeDocs.filter((t: unknown) => typeof t === "string" && t.trim()).map((t: string) => t.slice(0, 40000)) : [];
+  const kbIds: string[] = Array.isArray(b.knowledgeBaseIds) ? b.knowledgeBaseIds.filter((t: unknown) => typeof t === "string") : [];
   const mcp_servers = await resolveMcp(mcpIds).catch(() => []);
 
   const prov = b.providerId ? await getProviderById(String(b.providerId)) : await getActiveProvider();
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider is configured. An admin must add one under Admin → Providers." }, { status: 400 });
   const model = b.model ? String(b.model) : prov.model;
   if (!model) return NextResponse.json({ error: "No model selected for this provider." }, { status: 400 });
+
+  const docs = kbIds.length ? await resolveKbDocs(user.id, kbIds, task, prov).catch(() => []) : [];
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 90_000);

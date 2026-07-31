@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 type ProviderOpt = { id: string; provider: string; label: string | null };
 type McpOpt = { id: string; name: string; transport: string };
+type KbOpt = { id: string; name: string; status: string; chunkCount: number };
 type Step = { name: string; type: string; ms: number | null; tokens: number };
 type NatResult = { answer: string; latency_ms: number; model: string; tool_names: string[]; unsupported_tools: string[]; context_used?: boolean; profiler?: { total_ms?: number; steps?: Step[] } };
 
@@ -19,8 +20,8 @@ export default function NatAgentPanel() {
 
   const [tools, setTools] = useState<Set<string>>(new Set(["calculator", "current_datetime"]));
   const [mcpIds, setMcpIds] = useState<Set<string>>(new Set());
-  const [useKnowledge, setUseKnowledge] = useState(false);
-  const [knowledge, setKnowledge] = useState("");
+  const [kbs, setKbs] = useState<KbOpt[]>([]);
+  const [kbIds, setKbIds] = useState<Set<string>>(new Set());
   const [systemPrompt, setSystemPrompt] = useState("You are a careful reasoning agent. Use a tool when a calculation, lookup, or the current date is needed.");
   const [task, setTask] = useState("What is 18% of 2450, and what is today's date?");
 
@@ -35,6 +36,7 @@ export default function NatAgentPanel() {
       setModels(j.models || []); setModel(j.default || j.models?.[0] || "");
     }).catch(() => {});
     fetch("/api/agent/mcp").then((r) => r.json()).then((j) => setMcp(j.servers || [])).catch(() => {});
+    fetch("/api/kb").then((r) => r.json()).then((j) => setKbs((j.kbs || []).filter((k: KbOpt) => k.status === "ready"))).catch(() => {});
   }, []);
 
   async function onProvider(id: string) {
@@ -52,7 +54,7 @@ export default function NatAgentPanel() {
     try {
       const res = await fetch("/api/agent/nat-run", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task, providerId, model, systemPrompt, tools: [...tools], temperature: 0, mcpServerIds: [...mcpIds], knowledgeDocs: useKnowledge && knowledge.trim() ? [knowledge] : [] }),
+        body: JSON.stringify({ task, providerId, model, systemPrompt, tools: [...tools], temperature: 0, mcpServerIds: [...mcpIds], knowledgeBaseIds: [...kbIds] }),
       });
       const j = await res.json().catch(() => null);
       if (!res.ok) { setErr(j?.error || `Run failed (${res.status})`); return; }
@@ -96,10 +98,11 @@ export default function NatAgentPanel() {
                 : mcp.map((s) => <button key={s.id} type="button" onClick={() => toggle(setMcpIds, s.id)} className={`chip ${mcpIds.has(s.id) ? "on" : ""}`} title={s.transport}>{mcpIds.has(s.id) ? "✓ " : ""}{s.name} · MCP</button>)}
             </div>
 
-            <label className="fld" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
-              <input type="checkbox" checked={useKnowledge} onChange={(e) => setUseKnowledge(e.target.checked)} style={{ width: "auto" }} /> Ground on documents (RAG)
-            </label>
-            {useKnowledge && <textarea value={knowledge} onChange={(e) => setKnowledge(e.target.value)} rows={3} placeholder="Paste reference text — it's ingested and the top passages are injected as context." />}
+            <label className="fld" style={{ marginTop: 12 }}>Knowledge bases (RAG) <span className="note">· from Studio → Knowledge bases</span></label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {kbs.length === 0 ? <span className="note">no synced knowledge bases — <a href="/kb">create one</a></span>
+                : kbs.map((k) => <button key={k.id} type="button" onClick={() => toggle(setKbIds, k.id)} className={`chip ${kbIds.has(k.id) ? "on" : ""}`} title={`${k.chunkCount} chunks`}>{kbIds.has(k.id) ? "✓ " : ""}{k.name}</button>)}
+            </div>
 
             <label className="fld" style={{ marginTop: 12 }}>System prompt</label>
             <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={2} />
