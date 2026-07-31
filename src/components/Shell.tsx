@@ -36,7 +36,11 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
         <nav className="nav">{STUDIO.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
         {user.role === "admin" && (<>
           <div className="nav-label">Admin</div>
-          <nav className="nav"><Link href="/admin" className={on("/admin") ? "on" : ""}>Admin panel</Link></nav>
+          <nav className="nav">
+            <Link href="/admin" className={path === "/admin" ? "on" : ""}>Admin panel</Link>
+            <Link href="/admin/users" className={on("/admin/users") ? "on" : ""}>Users</Link>
+            <Link href="/admin/usage" className={on("/admin/usage") ? "on" : ""}>Usage &amp; Monitoring</Link>
+          </nav>
         </>)}
         <div className="foot">{user.role === "admin" ? "admin" : "student"} · {user.email}</div>
       </aside>
