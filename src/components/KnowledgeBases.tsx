@@ -14,6 +14,7 @@ export default function KnowledgeBases() {
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
   const [tab, setTab] = useState<"add" | "docs">("add");
+  const [creating, setCreating] = useState(false);
   const [syncedDocs, setSyncedDocs] = useState<{ docName: string | null; chunks: number }[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -36,7 +37,7 @@ export default function KnowledgeBases() {
     const r = await fetch("/api/kb", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: newName }) });
     const j = await r.json().catch(() => ({}));
     setNewName(""); await loadKbs();
-    if (j.id) { setSelId(j.id); setStaged([]); setSyncedDocs([]); setTab("add"); }
+    if (j.id) { setSelId(j.id); setStaged([]); setSyncedDocs([]); setTab("add"); setCreating(false); }
     setBusy("");
   }
   async function removeKb(k: Kb) {
@@ -90,40 +91,44 @@ export default function KnowledgeBases() {
   const badge = (s: string) => s === "ready" ? "badge good" : s === "syncing" ? "badge warn" : s === "error" ? "badge" : "badge";
 
   return (
-    <div className="split" style={{ gridTemplateColumns: "300px 1fr", gap: 16 }}>
-      <div className="card">
-        <div className="card-h"><span className="t">Your knowledge bases</span><span className="mono r">{kbs.length}</span></div>
-        <div className="card-b">
-          <div className="row" style={{ gap: 8 }}>
-            <input type="text" placeholder="new KB name" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createKb(); }} />
-            <button className="btn sm" onClick={createKb} disabled={busy === "create"}>+ New</button>
+    <>
+      <div className="cards" style={{ marginBottom: sel ? 18 : 0 }}>
+        {kbs.map((k) => (
+          <div key={k.id} className="lab-card" onClick={() => selectKb(k.id, k.docCount > 0)}
+            style={{ cursor: "pointer", borderColor: selId === k.id ? "var(--accent)" : undefined, background: selId === k.id ? "var(--accent-weak)" : undefined }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span className="zi">📚</span><span className={badge(k.status)} style={{ marginLeft: "auto" }}>{k.status}</span></div>
+            <h3 style={{ fontSize: 14.5, margin: "8px 0 0" }}>{k.name}</h3>
+            <p style={{ margin: "2px 0 0" }}>{k.docCount} docs · {k.chunkCount} chunks · {k.embModel === "tfidf" ? "TF-IDF" : k.embModel || "not synced"}</p>
           </div>
-          <div style={{ marginTop: 12 }}>
-            {kbs.length === 0 ? <div className="note">No knowledge bases yet. Create one, add files or URLs, and sync.</div>
-              : kbs.map((k) => (
-                <div key={k.id} onClick={() => selectKb(k.id, k.docCount > 0)}
-                  style={{ padding: "9px 10px", borderRadius: 7, cursor: "pointer", marginBottom: 6, border: "1px solid var(--border)", background: selId === k.id ? "var(--panel)" : "transparent" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <b style={{ fontSize: 13 }}>{k.name}</b><span className={badge(k.status)} style={{ marginLeft: "auto" }}>{k.status}</span>
-                  </div>
-                  <div className="note" style={{ marginTop: 3 }}>{k.docCount} docs · {k.chunkCount} chunks{k.embModel ? ` · ${k.embModel === "tfidf" ? "TF-IDF" : k.embModel}` : ""}</div>
-                </div>
-              ))}
+        ))}
+        {creating ? (
+          <div className="lab-card" style={{ gap: 8 }}>
+            <label className="fld" style={{ margin: 0 }}>New knowledge base</label>
+            <input type="text" autoFocus placeholder="e.g. Product docs" value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createKb(); if (e.key === "Escape") { setCreating(false); setNewName(""); } }} />
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn sm" onClick={createKb} disabled={busy === "create" || !newName.trim()}>{busy === "create" ? "Creating…" : "Create"}</button>
+              <button className="btn ghost sm" onClick={() => { setCreating(false); setNewName(""); }}>Cancel</button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="lab-card" onClick={() => setCreating(true)} style={{ cursor: "pointer", alignItems: "center", justifyContent: "center", borderStyle: "dashed", textAlign: "center" }}>
+            <div style={{ fontSize: 24, opacity: 0.5, lineHeight: 1 }}>＋</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginTop: 6 }}>New knowledge base</div>
+            <p style={{ margin: "2px 0 0" }}>Upload files or URLs, then sync</p>
+          </div>
+        )}
       </div>
 
-      <div className="card">
-        <div className="card-h"><span className="t">{sel ? sel.name : "Select or create a knowledge base"}</span>{sel && <button className="btn ghost sm danger r" onClick={() => removeKb(sel)}>Delete</button>}</div>
-        <div className="card-b">
-          {!sel ? <div className="note">Pick a knowledge base on the left, or create one, to add documents.</div> : (
-            <>
-              <div className="seg" style={{ maxWidth: 300, marginBottom: 14 }}>
-                <button className={tab === "add" ? "on" : ""} onClick={() => setTab("add")}>Add documents</button>
-                <button className={tab === "docs" ? "on" : ""} onClick={() => setTab("docs")}>Documents{sel.docCount ? ` · ${sel.docCount}` : ""}</button>
-              </div>
+      {sel && (
+        <div className="card">
+          <div className="card-h"><span className="t">{sel.name}</span><span className={badge(sel.status)} style={{ marginLeft: 8 }}>{sel.status}</span><span style={{ flex: 1 }} /><button className="btn ghost sm danger" onClick={() => removeKb(sel)}>Delete</button></div>
+          <div className="card-b">
+            <div className="seg" style={{ maxWidth: 300, marginBottom: 14 }}>
+              <button className={tab === "add" ? "on" : ""} onClick={() => setTab("add")}>Add documents</button>
+              <button className={tab === "docs" ? "on" : ""} onClick={() => setTab("docs")}>Documents{sel.docCount ? ` · ${sel.docCount}` : ""}</button>
+            </div>
 
-              {tab === "add" ? (
+            {tab === "add" ? (
                 <>
                   <div className="kb-drop">
                     <div style={{ fontSize: 26, opacity: 0.45, lineHeight: 1 }}>⬆</div>
@@ -175,10 +180,9 @@ export default function KnowledgeBases() {
                       </>)}
                 </>
               )}
-            </>
-          )}
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
