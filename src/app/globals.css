@@ -159,6 +159,22 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .nat-cfg-h b{font-size:13px}
 .kb-drop{border:1.5px dashed var(--border-strong);border-radius:var(--r);padding:20px 16px;text-align:center;background:var(--panel);transition:border-color .12s}
 .kb-drop:hover{border-color:var(--accent)}
+/* full-width flow builder */
+.flow-top{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-bottom:none;border-radius:var(--r) var(--r) 0 0;background:var(--surface)}
+.flow-body{display:grid;grid-template-columns:158px 1fr 244px;border:1px solid var(--border);border-radius:0 0 var(--r) var(--r);overflow:hidden;min-height:440px}
+.flow-rail{border-right:1px solid var(--border);padding:10px 8px;overflow:auto;background:var(--surface)}
+.flow-rail .cat{font-size:9.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);margin:12px 0 6px;font-weight:600}
+.flow-rail .cat:first-child{margin-top:0}
+.prow{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:12px;background:var(--panel);cursor:pointer;transition:border-color .12s,background .12s}
+.prow:hover{border-color:var(--border-strong)}
+.prow.on{border-color:var(--accent);background:var(--accent-weak);color:var(--accent-strong)}
+.prow .pic{width:22px;height:22px;flex:none;border-radius:6px;display:grid;place-items:center;font-size:12px;background:var(--panel-2)}
+.flow-canvas{position:relative;overflow:hidden;background-image:radial-gradient(color-mix(in srgb,var(--border) 70%,transparent) 1px,transparent 1px);background-size:16px 16px;user-select:none;touch-action:none;min-height:440px}
+.flow-drawer{border-left:1px solid var(--border);padding:11px 12px;background:var(--surface);overflow:auto}
+.flow-drawer .dh{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.flow-tabs{display:flex;gap:10px;font-size:11px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.flow-tabs span{padding-bottom:6px;color:var(--muted)}
+.flow-tabs span.on{color:var(--accent);border-bottom:1.5px solid var(--accent);font-weight:600}
 .main{display:flex;flex-direction:column;min-width:0}
 .top{height:56px;flex:none;display:flex;align-items:center;gap:10px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:20}
 .top h1{font-size:14.5px}
