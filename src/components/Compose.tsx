@@ -98,8 +98,9 @@ export default function Compose() {
               <div className="compose-chain">
                 {chain.map((n, i) => (
                   <div key={n.id} style={{ display: "contents" }}>
-                    <div className={`anode ${status[n.id] || ""}`} style={{ position: "static", width: 150 }}>
-                      <div className="ah"><span className="aic">{n.icon}</span><div><div className="atitle">{n.label}</div><div className="asub">{n.sub}</div></div><span className="abadge" /></div>
+                    <div className={`nnode ${status[n.id] === "running" ? "lit" : status[n.id] === "done" ? "done" : ""}`} style={{ position: "static", width: 160, cursor: "default" }}>
+                      <div className="nn-hd">{n.sub}</div>
+                      <div className="nn-t"><span style={{ marginRight: 6 }}>{n.icon}</span>{n.label}</div>
                     </div>
                     {i < chain.length - 1 && <span className="compose-arrow">→</span>}
                   </div>

@@ -110,14 +110,18 @@ export default function KnowledgeBases() {
         <div className="card-b">
           {!sel ? <div className="note">Pick a knowledge base on the left, or create one, to add documents.</div> : (
             <>
-              <label className="fld">Add documents</label>
-              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                <button className="btn ghost sm" onClick={() => fileRef.current?.click()} disabled={busy === "extract"}>{busy === "extract" ? "Reading…" : "Upload files (pdf/docx/xlsx/csv/txt)"}</button>
-                <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.doc,.xlsx,.xls" onChange={(e) => addFiles(e.target.files)} style={{ display: "none" }} />
-              </div>
-              <div className="row" style={{ gap: 8, marginTop: 8 }}>
-                <input type="text" placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} />
-                <button className="btn ghost sm" onClick={addUrl} disabled={busy === "url"}>{busy === "url" ? "Fetching…" : "Add URL"}</button>
+              <div className="kb-drop">
+                <div style={{ fontSize: 26, opacity: 0.45, lineHeight: 1 }}>⬆</div>
+                <div style={{ fontWeight: 600, fontSize: 13.5, marginTop: 6 }}>Add documents</div>
+                <div className="note" style={{ marginTop: 2 }}>PDF · DOCX · XLSX · CSV · TXT — or a web page</div>
+                <div className="row" style={{ gap: 8, marginTop: 12, justifyContent: "center" }}>
+                  <button className="btn sm" onClick={() => fileRef.current?.click()} disabled={busy === "extract"}>{busy === "extract" ? "Reading…" : "Choose files"}</button>
+                  <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.doc,.xlsx,.xls" onChange={(e) => addFiles(e.target.files)} style={{ display: "none" }} />
+                </div>
+                <div className="row" style={{ gap: 8, marginTop: 10, maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
+                  <input type="text" placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} />
+                  <button className="btn ghost sm" onClick={addUrl} disabled={busy === "url"}>{busy === "url" ? "Fetching…" : "Add URL"}</button>
+                </div>
               </div>
 
               {staged.length > 0 && (

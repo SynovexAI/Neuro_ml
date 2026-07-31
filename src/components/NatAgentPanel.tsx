@@ -31,6 +31,8 @@ export default function NatAgentPanel() {
   const [err, setErr] = useState("");
   const [view, setView] = useState<"form" | "visual">("form");
   const [pos, setPos] = useState<Record<string, { x: number; y: number }>>({});
+  const [sel, setSel] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
 
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => {
@@ -94,9 +96,9 @@ export default function NatAgentPanel() {
   const center = (id: string) => { const p = gp(id); return { x: p.x + NW / 2, y: p.y + NH / 2 }; };
   const wires: [string, string][] = [["provider", "agent"], ["agent", "output"], ...attached.map((a) => [a.id, "agent"] as [string, string])];
   function nodeDown(e: React.PointerEvent, id: string) {
-    const start = gp(id); const sx = e.clientX, sy = e.clientY;
-    const mv = (ev: PointerEvent) => setPos((p) => ({ ...p, [id]: { x: Math.max(0, start.x + ev.clientX - sx), y: Math.max(0, start.y + ev.clientY - sy) } }));
-    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
+    const start = gp(id); const sx = e.clientX, sy = e.clientY; let moved = false;
+    const mv = (ev: PointerEvent) => { const dx = (ev.clientX - sx) / zoom, dy = (ev.clientY - sy) / zoom; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; setPos((p) => ({ ...p, [id]: { x: Math.max(0, start.x + dx), y: Math.max(0, start.y + dy) } })); };
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); if (!moved) setSel(id); };
     window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
   }
   function removeNode(id: string) {
@@ -143,20 +145,53 @@ export default function NatAgentPanel() {
               </div>
             </div>
 
-            {view === "visual" && (
-              <div className="nat-canvas" style={{ height: canvasH }}>
-                <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
-                  {wires.map(([a, b], i) => { const c1 = center(a), c2 = center(b); const mx = (c1.x + c2.x) / 2; return <path key={i} d={`M ${c1.x} ${c1.y} C ${mx} ${c1.y}, ${mx} ${c2.y}, ${c2.x} ${c2.y}`} className="nat-wire" />; })}
-                </svg>
-                {nodes.map((n) => { const p = gp(n.id); return (
-                  <div key={n.id} className={`nnode nt-${n.type} ${lit(n.id)}`} style={{ left: p.x, top: p.y, width: NW }} onPointerDown={(e) => nodeDown(e, n.id)}>
-                    <div className="nn-t">{n.label}</div>{n.sub && <div className="nn-s">{n.sub}</div>}
-                    {(n.type === "tool" || n.type === "mcp" || n.type === "kb") && <button className="nn-x" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(n.id); }}>×</button>}
-                  </div>
-                ); })}
+            {view === "visual" && (<>
+              <div className="nat-canvas" style={{ height: canvasH }} onPointerDown={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
+                <div style={{ position: "absolute", inset: 0, transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
+                  <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
+                    {wires.map(([a, b], i) => { const c1 = center(a), c2 = center(b); const mx = (c1.x + c2.x) / 2; return <path key={i} d={`M ${c1.x} ${c1.y} C ${mx} ${c1.y}, ${mx} ${c2.y}, ${c2.x} ${c2.y}`} className="nat-wire" />; })}
+                  </svg>
+                  {nodes.map((n) => { const p = gp(n.id); return (
+                    <div key={n.id} className={`nnode nt-${n.type} ${lit(n.id)}${sel === n.id ? " sel" : ""}`} style={{ left: p.x, top: p.y, width: NW }} onPointerDown={(e) => nodeDown(e, n.id)}>
+                      <div className="nn-hd">{n.type}</div>
+                      <div className="nn-t">{n.label}</div>{n.sub && <div className="nn-s">{n.sub}</div>}
+                      {n.id !== "provider" && <span className="nport nport-in" />}
+                      {n.id !== "output" && <span className="nport nport-out" />}
+                      {(n.type === "tool" || n.type === "mcp" || n.type === "kb") && <button className="nn-x" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(n.id); if (sel === n.id) setSel(null); }}>×</button>}
+                    </div>
+                  ); })}
+                </div>
+                <div className="nat-zoom">
+                  <button onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button>
+                  <span>{Math.round(zoom * 100)}%</span>
+                  <button onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.1).toFixed(2)))}>+</button>
+                  <button onClick={() => { setZoom(1); setPos({}); }}>Fit</button>
+                </div>
               </div>
-            )}
-            {view === "visual" && <div className="note" style={{ margin: "8px 0 5px" }}>drag nodes to arrange · click a chip to add / remove</div>}
+
+              {sel && (() => {
+                const n = nodes.find((x) => x.id === sel); if (!n) return null;
+                return (
+                  <div className="nat-cfg">
+                    <div className="nat-cfg-h"><span className="badge">{n.type}</span><b>{n.label}</b><button className="nn-x" style={{ position: "static", marginLeft: "auto" }} onClick={() => setSel(null)}>×</button></div>
+                    {n.type === "provider" && (<>
+                      <label className="fld">Provider</label><select value={providerId} onChange={(e) => onProvider(e.target.value)}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>
+                      <label className="fld" style={{ marginTop: 10 }}>Model</label><select value={model} onChange={(e) => setModel(e.target.value)}>{models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
+                    </>)}
+                    {n.type === "agent" && (<>
+                      <label className="fld">Agent workflow</label>
+                      <div className="seg"><button className={agentType === "react_agent" ? "on" : ""} onClick={() => setAgentType("react_agent")}>ReAct</button><button className={agentType === "tool_calling_agent" ? "on" : ""} onClick={() => setAgentType("tool_calling_agent")}>Tool-calling</button></div>
+                      <label className="fld" style={{ marginTop: 10 }}>System prompt</label><textarea rows={3} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
+                    </>)}
+                    {n.type === "output" && (<><label className="fld">Task</label><textarea rows={3} value={task} onChange={(e) => setTask(e.target.value)} /></>)}
+                    {(n.type === "tool" || n.type === "mcp" || n.type === "kb") && (
+                      <div className="note">{n.type === "kb" ? "Knowledge base — the agent retrieves the top passages at run time." : n.type === "mcp" ? "MCP server tool." : "Built-in tool."} <button className="btn ghost sm" style={{ marginLeft: 8 }} onClick={() => { removeNode(n.id); setSel(null); }}>Remove node</button></div>
+                    )}
+                  </div>
+                );
+              })()}
+              <div className="note" style={{ margin: "8px 0 5px" }}>drag to arrange · click a node to configure · add tools &amp; knowledge below</div>
+            </>)}
 
             {view === "form" && <label className="fld" style={{ marginTop: 4 }}>Built-in tools</label>}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: view === "visual" ? 0 : undefined }}>
