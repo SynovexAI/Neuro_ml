@@ -104,8 +104,31 @@ export const mcpServers = mysqlTable("mcp_servers", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
 
+// One row per agent run (in-browser ReAct/workflow or NAT). Powers the agent
+// analytics: success rate, iterations, tool usage, tokens/cost, latency.
+export const agentRuns = mysqlTable("agent_runs", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  agentName: varchar("agent_name", { length: 120 }),
+  agentType: varchar("agent_type", { length: 24 }),   // react | workflow | nat
+  runtime: varchar("runtime", { length: 16 }),        // browser | nat
+  provider: varchar("provider", { length: 40 }),
+  model: varchar("model", { length: 120 }),
+  iterations: int("iterations").notNull().default(0),
+  toolCalls: json("tool_calls"),                      // [{ tool, count }]
+  toolCallCount: int("tool_call_count").notNull().default(0),
+  promptTokens: int("prompt_tokens").notNull().default(0),
+  completionTokens: int("completion_tokens").notNull().default(0),
+  totalTokens: int("total_tokens").notNull().default(0),
+  latencyMs: int("latency_ms").notNull().default(0),
+  outcome: varchar("outcome", { length: 24 }),        // success | max_iters | error | stopped
+  errorMsg: varchar("error_msg", { length: 300 }),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("agent_runs_user_ts_idx").on(t.userId, t.ts)]);
+
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Usage = typeof usage.$inferSelect;
 export type McpServer = typeof mcpServers.$inferSelect;
+export type AgentRun = typeof agentRuns.$inferSelect;

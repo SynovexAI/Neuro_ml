@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
-import { getSessionUser } from "@/lib/auth";
+import { getSessionUser, uid } from "@/lib/auth";
 import { getActiveProvider, getProviderById } from "@/lib/providers";
 import { rateLimitDb } from "@/lib/ratelimit";
 import { checkQuota, recordUsage, estimateTokens } from "@/lib/usage";
 import { captureError } from "@/lib/monitor";
+import { db } from "@/lib/db";
+import { agentRuns } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +47,16 @@ export async function POST(req: Request) {
     if (!res.ok) return NextResponse.json({ error: j?.detail || `NAT service error ${res.status}` }, { status: 502 });
 
     // NAT doesn't return token counts yet — meter an estimate so cost accounting stays unified.
-    void recordUsage({ userId: user.id, lab: "agent-nat", model, promptTokens: estimateTokens(task + (systemPrompt || "")), completionTokens: estimateTokens(j?.answer || ""), estimated: true });
+    const pt = estimateTokens(task + (systemPrompt || "")), ct = estimateTokens(j?.answer || "");
+    void recordUsage({ userId: user.id, lab: "agent-nat", model, promptTokens: pt, completionTokens: ct, estimated: true });
+    // Log the run for the agent analytics dashboard.
+    db.insert(agentRuns).values({
+      id: uid(), userId: user.id, agentName: "NAT agent", agentType: "nat", runtime: "nat",
+      provider: prov.provider, model, iterations: 0,
+      toolCalls: (j?.tool_names || []).map((t) => ({ tool: t, count: 1 })), toolCallCount: (j?.tool_names || []).length,
+      promptTokens: pt, completionTokens: ct, totalTokens: pt + ct,
+      latencyMs: Number(j?.latency_ms || 0), outcome: "success",
+    }).catch((e) => captureError(e, { where: "nat-run.log" }));
 
     return NextResponse.json(j);
   } catch (e) {

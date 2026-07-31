@@ -40,6 +40,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
             <Link href="/admin" className={path === "/admin" ? "on" : ""}>Admin panel</Link>
             <Link href="/admin/users" className={on("/admin/users") ? "on" : ""}>Users</Link>
             <Link href="/admin/usage" className={on("/admin/usage") ? "on" : ""}>Usage &amp; Monitoring</Link>
+            <Link href="/admin/agents" className={on("/admin/agents") ? "on" : ""}>Agent analytics</Link>
             <Link href="/admin/mcp" className={on("/admin/mcp") ? "on" : ""}>MCP servers</Link>
           </nav>
         </>)}

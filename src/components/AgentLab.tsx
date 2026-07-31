@@ -283,8 +283,11 @@ export default function AgentLab() {
     const push = (t: TraceItem) => setTrace((tr) => [...tr, t]);
     const est = (s: string) => Math.round(s.length / 4);
     let calls = 0, toolsUsed = 0, tokens = 0; const t0 = performance.now();
+    const toolCounts: Record<string, number> = {};
+    let iterations = 0, outcome = "max_iters", errorMsg = "";
     try {
       for (let iter = 0; iter < maxIters; iter++) {
+        iterations = iter + 1;
         push({ kind: "thought", text: "thinking…", state: "active" });
         setNodeStatus((s) => ({ ...s, agent: "running" }));
         tokens += messages.reduce((a, m) => a + est(m.content), 0); calls++;
@@ -292,10 +295,10 @@ export default function AgentLab() {
         tokens += est(resp);
         const p = parseReAct(resp);
         setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" }; return c; });
-        if (p.final || (!p.action && !p.final)) { const ans = p.final || resp; setFinalOut(ans); push({ kind: "final", text: ans, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); break; }
+        if (p.final || (!p.action && !p.final)) { const ans = p.final || resp; setFinalOut(ans); push({ kind: "final", text: ans, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); outcome = "success"; break; }
         const tool = tools.find((t) => t.name.toLowerCase() === (p.action || "").toLowerCase());
         push({ kind: "action", text: p.input || "", tool: p.action, state: "active" });
-        if (tool) { toolsUsed++; setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "running" })); }
+        if (tool) { toolsUsed++; toolCounts[tool.name] = (toolCounts[tool.name] || 0) + 1; setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "running" })); }
         const obs = tool ? await tool.run(p.input || "", ctx) : `Unknown tool "${p.action}". Available: ${tools.map((t) => t.name).join(", ")}.`;
         if (tool) setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "done" }));
         setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { ...c[c.length - 1], state: "done" }; return c; });
@@ -303,13 +306,23 @@ export default function AgentLab() {
         messages.push({ role: "assistant", content: resp }); messages.push({ role: "user", content: `Observation: ${obs}` });
         if (iter === maxIters - 1) { push({ kind: "error", text: `Reached the ${maxIters}-step limit without a final answer.`, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); }
       }
-    } catch (e) { push({ kind: "error", text: (e as Error).message, state: "done" }); }
-    setMetrics({ calls, tools: toolsUsed, ms: Math.round(performance.now() - t0), tokens });
+    } catch (e) { outcome = "error"; errorMsg = (e as Error).message; push({ kind: "error", text: (e as Error).message, state: "done" }); }
+    const ms = Math.round(performance.now() - t0);
+    setMetrics({ calls, tools: toolsUsed, ms, tokens });
+    logAgentRun({
+      agentName: name, agentType: "react", runtime: "browser", provider: providerLabel, model,
+      iterations, toolCalls: Object.entries(toolCounts).map(([tool, count]) => ({ tool, count })),
+      toolCallCount: toolsUsed, totalTokens: tokens, latencyMs: ms, outcome, errorMsg,
+    });
     setPendingApproval(null); setRunning(false);
+  }
+  // Fire-and-forget: persist a run summary for the agent analytics dashboard.
+  function logAgentRun(payload: Record<string, unknown>) {
+    fetch("/api/agent/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) }).catch(() => {});
   }
   async function runWorkflow() {
     setRunning(true); setMsg(""); setFinalOut(""); setWfOutputs(steps.map((s) => ({ name: s.name, text: "", state: "" })));
-    let prev = task;
+    let prev = task; let outcome = "success", errorMsg = "", tokens = Math.round(task.length / 4); const t0 = performance.now();
     try {
       for (let k = 0; k < steps.length; k++) {
         setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], state: "active" }; return n; });
@@ -319,10 +332,11 @@ export default function AgentLab() {
         const reader = res.body.getReader(); const dec = new TextDecoder(); let acc = "";
         for (; ;) { const { done, value } = await reader.read(); if (done) break; acc += dec.decode(value, { stream: true }); setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], text: acc }; return n; }); }
         setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], state: "done" }; return n; });
-        prev = acc;
+        prev = acc; tokens += Math.round(acc.length / 4);
       }
       setFinalOut(prev);
-    } catch (e) { setMsg("Workflow error: " + (e as Error).message); }
+    } catch (e) { outcome = "error"; errorMsg = (e as Error).message; setMsg("Workflow error: " + errorMsg); }
+    logAgentRun({ agentName: name, agentType: "workflow", runtime: "browser", provider: providerLabel, model, iterations: steps.length, toolCalls: [], toolCallCount: 0, totalTokens: tokens, latencyMs: Math.round(performance.now() - t0), outcome, errorMsg });
     setRunning(false);
   }
   function startRun() { setStep("run"); if (agentType === "react") runReact(); else runWorkflow(); }
