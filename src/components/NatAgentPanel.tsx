@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type ProviderOpt = { id: string; provider: string; label: string | null };
 type McpOpt = { id: string; name: string; transport: string };
@@ -33,6 +33,7 @@ export default function NatAgentPanel() {
   const [pos, setPos] = useState<Record<string, { x: number; y: number }>>({});
   const [sel, setSel] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => {
@@ -85,12 +86,14 @@ export default function NatAgentPanel() {
     { id: "output", type: "output", label: "Answer", sub: undefined },
   ];
   const NW = 148;
+  // Agent-centric layout: agent in the middle, provider in, output out, tools
+  // attached around/below (a ReAct agent has tools attached — it's not a sequence).
   const defPos = (id: string): { x: number; y: number } => {
-    if (id === "provider") return { x: 20, y: 170 };
-    if (id === "agent") return { x: 270, y: 170 };
-    if (id === "output") return { x: 690, y: 170 };
+    if (id === "provider") return { x: 20, y: 40 };
+    if (id === "agent") return { x: 210, y: 150 };
+    if (id === "output") return { x: 400, y: 40 };
     const i = attached.findIndex((a) => a.id === id);
-    return { x: 490, y: 24 + i * 62 };
+    return { x: 20 + (i % 3) * 155, y: 268 + Math.floor(i / 3) * 66 };
   };
   const gp = (id: string) => pos[id] || defPos(id);
   const center = (id: string) => { const p = gp(id); return { x: p.x + NW / 2, y: p.y + 23 }; };
@@ -101,11 +104,31 @@ export default function NatAgentPanel() {
     const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); if (!moved) setSel(id); };
     window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
   }
-  function removeNode(id: string) {
+  function canvasDown(e: React.PointerEvent) {
+    if (e.target !== e.currentTarget) return; // only when dragging empty canvas
+    setSel(null);
+    const sx = e.clientX, sy = e.clientY; const start = { ...pan };
+    const mv = (ev: PointerEvent) => setPan({ x: start.x + (ev.clientX - sx), y: start.y + (ev.clientY - sy) });
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+  }
+  const removeNode = useCallback((id: string) => {
     if (id.startsWith("tool:")) toggle(setTools, id.slice(5));
     else if (id.startsWith("mcp:")) toggle(setMcpIds, id.slice(4));
     else if (id.startsWith("kb:")) toggle(setKbIds, id.slice(3));
-  }
+  }, []);
+  // Delete / Backspace removes the selected tool / KB / MCP node.
+  useEffect(() => {
+    if (view !== "visual") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (sel && (sel.startsWith("tool:") || sel.startsWith("mcp:") || sel.startsWith("kb:"))) { e.preventDefault(); removeNode(sel); setSel(null); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, sel, removeNode]);
   const lit = (id: string) => running ? (id === "agent" || id === "provider" ? "lit" : "") : (result ? "done" : "");
   const selNode = nodes.find((x) => x.id === sel);
 
@@ -164,11 +187,15 @@ export default function NatAgentPanel() {
   );
 
   const canvas = (
-    <div className="flow-canvas" onPointerDown={(e) => { if (e.target === e.currentTarget) setSel(null); }}>
-      <div style={{ position: "absolute", inset: 0, transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
+    <div className="flow-canvas" onPointerDown={canvasDown} style={{ cursor: "grab" }}>
+      <div style={{ position: "absolute", inset: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0" }}>
         <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
           {wires.map(([a, b], i) => { const c1 = center(a), c2 = center(b); const mx = (c1.x + c2.x) / 2; return <path key={i} d={`M ${c1.x} ${c1.y} C ${mx} ${c1.y}, ${mx} ${c2.y}, ${c2.x} ${c2.y}`} className="nat-wire" />; })}
         </svg>
+        {/* detach affordance on each tool→agent wire */}
+        {attached.map((a) => { const c1 = center(a.id), c2 = center("agent"); return (
+          <button key={`wx-${a.id}`} className="wire-x" style={{ left: (c1.x + c2.x) / 2 - 9, top: (c1.y + c2.y) / 2 - 9 }} title="detach tool" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(a.id); if (sel === a.id) setSel(null); }}>×</button>
+        ); })}
         {nodes.map((n) => { const p = gp(n.id); return (
           <div key={n.id} className={`nnode nt-${n.type} ${lit(n.id)}${sel === n.id ? " sel" : ""}`} style={{ left: p.x, top: p.y, width: NW }} onPointerDown={(e) => nodeDown(e, n.id)}>
             <div className="nn-hd">{n.type}</div><div className="nn-t">{n.label}</div>{n.sub && <div className="nn-s">{n.sub}</div>}
@@ -178,7 +205,7 @@ export default function NatAgentPanel() {
         ); })}
       </div>
       <div className="nat-zoom">
-        <button onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.1).toFixed(2)))}>+</button><button onClick={() => { setZoom(1); setPos({}); }}>Fit</button>
+        <button onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.1).toFixed(2)))}>+</button><button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setPos({}); }}>Fit</button>
       </div>
     </div>
   );
@@ -247,6 +274,7 @@ export default function NatAgentPanel() {
             {canvas}
             <div className="flow-drawer">{drawer}</div>
           </div>
+          <div className="note" style={{ margin: "8px 2px 0" }}>Tools are <b>attached</b> to the agent — a ReAct agent decides when to call them (not a fixed sequence). Drag empty canvas to pan · drag nodes to arrange · <b>×</b> on a wire (or select a tool and press <b>⌫</b>) detaches it.</div>
           {err && <div className="err" style={{ marginTop: 12 }}>{err}</div>}
           <div style={{ marginTop: 16 }}>{report}</div>
         </>
