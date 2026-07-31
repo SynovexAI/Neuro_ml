@@ -29,6 +29,8 @@ export default function NatAgentPanel() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<NatResult | null>(null);
   const [err, setErr] = useState("");
+  const [view, setView] = useState<"form" | "visual">("form");
+  const [pos, setPos] = useState<Record<string, { x: number; y: number }>>({});
 
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => {
@@ -67,6 +69,44 @@ export default function NatAgentPanel() {
   const steps = result?.profiler?.steps || [];
   const maxMs = Math.max(1, ...steps.map((s) => s.ms || 0));
 
+  // ── visual node builder (shares the same config state) ──
+  const providerLabel = providers.find((p) => p.id === providerId)?.label || providers.find((p) => p.id === providerId)?.provider || "provider";
+  const attached = [
+    ...[...tools].map((t) => ({ id: `tool:${t}`, type: "tool", label: t })),
+    ...[...mcpIds].map((id) => ({ id: `mcp:${id}`, type: "mcp", label: mcp.find((m) => m.id === id)?.name || "mcp" })),
+    ...[...kbIds].map((id) => ({ id: `kb:${id}`, type: "kb", label: kbs.find((k) => k.id === id)?.name || "kb" })),
+  ];
+  const nodes = [
+    { id: "provider", type: "provider", label: providerLabel, sub: model },
+    { id: "agent", type: "agent", label: agentType === "react_agent" ? "ReAct agent" : "Tool-calling", sub: `${attached.length} tool${attached.length === 1 ? "" : "s"}` },
+    ...attached.map((a) => ({ ...a, sub: undefined as string | undefined })),
+    { id: "output", type: "output", label: "Answer", sub: undefined },
+  ];
+  const NW = 148, NH = 46;
+  const defPos = (id: string): { x: number; y: number } => {
+    if (id === "provider") return { x: 16, y: 150 };
+    if (id === "agent") return { x: 250, y: 150 };
+    if (id === "output") return { x: 660, y: 150 };
+    const i = attached.findIndex((a) => a.id === id);
+    return { x: 470, y: 20 + i * 62 };
+  };
+  const gp = (id: string) => pos[id] || defPos(id);
+  const center = (id: string) => { const p = gp(id); return { x: p.x + NW / 2, y: p.y + NH / 2 }; };
+  const wires: [string, string][] = [["provider", "agent"], ["agent", "output"], ...attached.map((a) => [a.id, "agent"] as [string, string])];
+  function nodeDown(e: React.PointerEvent, id: string) {
+    const start = gp(id); const sx = e.clientX, sy = e.clientY;
+    const mv = (ev: PointerEvent) => setPos((p) => ({ ...p, [id]: { x: Math.max(0, start.x + ev.clientX - sx), y: Math.max(0, start.y + ev.clientY - sy) } }));
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+  }
+  function removeNode(id: string) {
+    if (id.startsWith("tool:")) toggle(setTools, id.slice(5));
+    else if (id.startsWith("mcp:")) toggle(setMcpIds, id.slice(4));
+    else if (id.startsWith("kb:")) toggle(setKbIds, id.slice(3));
+  }
+  const canvasH = Math.max(340, 40 + attached.length * 62);
+  const lit = (id: string) => running ? (id === "agent" || id === "provider" ? "lit" : "") : (result ? "done" : "");
+
   return (
     <>
       <div className="teach-note"><span className="ic">⚡</span><span><b>NAT runtime.</b> Runs server-side through the real <b>NVIDIA NeMo Agent Toolkit</b> — with MCP tools, document grounding, and a per-step profiler. Needs the NAT sidecar deployed (<code>NAT_SERVICE_URL</code>).</span></div>
@@ -95,12 +135,37 @@ export default function NatAgentPanel() {
             </div>
             <div className="note" style={{ marginTop: 4 }}>{agentType === "react_agent" ? "Reason → act → observe loop (Thought/Action/Observation)." : "Uses the model's native function-calling to invoke tools directly."}</div>
 
-            <label className="fld" style={{ marginTop: 12 }}>Built-in tools</label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
-              {SUPPORTED.map((t) => <button key={t.id} type="button" onClick={() => toggle(setTools, t.id)} className={`chip ${tools.has(t.id) ? "on" : ""}`}>{tools.has(t.id) ? "✓ " : ""}{t.label}</button>)}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, marginBottom: 6 }}>
+              <label className="fld" style={{ margin: 0 }}>Tools &amp; knowledge</label>
+              <div className="seg" style={{ width: 150 }}>
+                <button className={view === "form" ? "on" : ""} onClick={() => setView("form")}>List</button>
+                <button className={view === "visual" ? "on" : ""} onClick={() => setView("visual")}>Visual</button>
+              </div>
             </div>
 
-            <label className="fld" style={{ marginTop: 12 }}>MCP tools <span className="note">· from Admin → MCP servers</span></label>
+            {view === "visual" && (
+              <div className="nat-canvas" style={{ height: canvasH }}>
+                <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
+                  {wires.map(([a, b], i) => { const c1 = center(a), c2 = center(b); const mx = (c1.x + c2.x) / 2; return <path key={i} d={`M ${c1.x} ${c1.y} C ${mx} ${c1.y}, ${mx} ${c2.y}, ${c2.x} ${c2.y}`} className="nat-wire" />; })}
+                </svg>
+                {nodes.map((n) => { const p = gp(n.id); return (
+                  <div key={n.id} className={`nnode nt-${n.type} ${lit(n.id)}`} style={{ left: p.x, top: p.y, width: NW }} onPointerDown={(e) => nodeDown(e, n.id)}>
+                    <div className="nn-t">{n.label}</div>{n.sub && <div className="nn-s">{n.sub}</div>}
+                    {(n.type === "tool" || n.type === "mcp" || n.type === "kb") && <button className="nn-x" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(n.id); }}>×</button>}
+                  </div>
+                ); })}
+              </div>
+            )}
+            {view === "visual" && <div className="note" style={{ margin: "8px 0 5px" }}>drag nodes to arrange · click a chip to add / remove</div>}
+
+            {view === "form" && <label className="fld" style={{ marginTop: 4 }}>Built-in tools</label>}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: view === "visual" ? 0 : undefined }}>
+              {SUPPORTED.map((t) => <button key={t.id} type="button" onClick={() => toggle(setTools, t.id)} className={`chip ${tools.has(t.id) ? "on" : ""}`}>{tools.has(t.id) ? "✓ " : "+ "}{t.label}</button>)}
+              {view === "visual" && mcp.map((s) => <button key={s.id} type="button" onClick={() => toggle(setMcpIds, s.id)} className={`chip ${mcpIds.has(s.id) ? "on" : ""}`} title={s.transport}>{mcpIds.has(s.id) ? "✓ " : "+ "}{s.name} · MCP</button>)}
+              {view === "visual" && kbs.map((k) => <button key={k.id} type="button" onClick={() => toggle(setKbIds, k.id)} className={`chip ${kbIds.has(k.id) ? "on" : ""}`} title={`${k.chunkCount} chunks`}>{kbIds.has(k.id) ? "✓ " : "+ "}{k.name}</button>)}
+            </div>
+
+            {view === "form" && <><label className="fld" style={{ marginTop: 12 }}>MCP tools <span className="note">· from Admin → MCP servers</span></label>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
               {mcp.length === 0 ? <span className="note">no enabled MCP servers</span>
                 : mcp.map((s) => <button key={s.id} type="button" onClick={() => toggle(setMcpIds, s.id)} className={`chip ${mcpIds.has(s.id) ? "on" : ""}`} title={s.transport}>{mcpIds.has(s.id) ? "✓ " : ""}{s.name} · MCP</button>)}
@@ -110,7 +175,7 @@ export default function NatAgentPanel() {
             <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
               {kbs.length === 0 ? <span className="note">no synced knowledge bases — <a href="/kb">create one</a></span>
                 : kbs.map((k) => <button key={k.id} type="button" onClick={() => toggle(setKbIds, k.id)} className={`chip ${kbIds.has(k.id) ? "on" : ""}`} title={`${k.chunkCount} chunks`}>{kbIds.has(k.id) ? "✓ " : ""}{k.name}</button>)}
-            </div>
+            </div></>}
 
             <label className="fld" style={{ marginTop: 12 }}>System prompt</label>
             <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={2} />
