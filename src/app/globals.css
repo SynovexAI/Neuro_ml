@@ -116,6 +116,18 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .top .spacer{flex:1}
 .avatar{width:30px;height:30px;border-radius:50%;background:var(--panel-2);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted);font-weight:600;font-size:12px}
 .work{padding:24px 28px;overflow:auto;flex:1}
+/* focus / full-screen mode: collapse the sidebar so a lab fills the viewport */
+.iconbtn{width:32px;height:32px;flex:none;border:1px solid var(--border);background:var(--surface);border-radius:var(--rs);color:var(--muted);cursor:pointer;display:grid;place-items:center;font-size:15px;line-height:1;transition:background .12s,color .12s,border-color .12s}
+.iconbtn:hover{background:var(--panel);color:var(--text);border-color:var(--border-strong)}
+.app.focus{grid-template-columns:1fr}
+.app.focus .side{display:none}
+.app.focus .work{padding:22px 40px;max-width:1500px;margin:0 auto;width:100%}
+.app.focus .top{background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:saturate(1.1) blur(6px)}
+/* quieter, consistent scrollbars */
+.work::-webkit-scrollbar,.stepper::-webkit-scrollbar,.card-b::-webkit-scrollbar{height:9px;width:9px}
+.work::-webkit-scrollbar-thumb,.stepper::-webkit-scrollbar-thumb,.card-b::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px;border:2px solid transparent;background-clip:content-box}
+.work::-webkit-scrollbar-thumb:hover{background:var(--muted);background-clip:content-box}
+.work::-webkit-scrollbar-track{background:transparent}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
 .lab-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px;display:flex;flex-direction:column;gap:8px;min-height:130px;box-shadow:var(--shadow-sm);transition:transform .12s,box-shadow .14s,border-color .14s}
 .lab-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:var(--border-strong)}
@@ -603,3 +615,17 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
   .nav-label,.side .foot{display:none}
   .col-2{grid-template-columns:1fr}
 }
+
+/* ── polish pass ── */
+.badge.warn{background:#fdefdb}
+:root[data-theme="dark"] .badge.warn{background:#2c1f08;color:#e6a552}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .badge.warn{background:#2c1f08;color:#e6a552}}
+/* softer, more even card elevation + gentle hover on the clickable ones */
+.lab-card,.proj-card{transition:transform .13s ease,box-shadow .14s ease,border-color .14s ease}
+.card-h .t{font-weight:600;letter-spacing:-.01em}
+.page-h{letter-spacing:-.01em}
+/* keep wide content (canvases, tables, node graphs) from ever bleeding the page */
+.work{scrollbar-gutter:stable}
+select,input[type=text],input[type=email],input[type=password]{transition:border-color .12s,box-shadow .12s,background .12s}
+.metric{transition:border-color .13s}
+.stepper button{transition:background .12s,color .12s}

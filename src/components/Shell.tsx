@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
 
 type Role = "admin" | "student";
@@ -27,8 +28,11 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
   const path = usePathname();
   const on = (href: string) => path === href || (href !== "/dashboard" && path.startsWith(href));
   const initial = (user.name || user.email).charAt(0).toUpperCase();
+  const [focus, setFocus] = useState(false);
+  useEffect(() => { setFocus(localStorage.getItem("awb_focus") === "1"); }, []);
+  const toggleFocus = () => setFocus((f) => { const n = !f; localStorage.setItem("awb_focus", n ? "1" : "0"); return n; });
   return (
-    <div className="app">
+    <div className={`app${focus ? " focus" : ""}`}>
       <aside className="side">
         <div className="brand"><div className="logo">◆</div><div><b>AI Workbench</b><small>build · not read</small></div></div>
         <div className="nav-label">Labs</div>
@@ -49,6 +53,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
       </aside>
       <div className="main">
         <header className="top">
+          <button className="iconbtn" onClick={toggleFocus} title={focus ? "Show sidebar" : "Focus mode — full-screen view"} aria-label="Toggle focus mode">{focus ? "☰" : "⛶"}</button>
           <h1>{title}</h1>
           <div className="spacer" />
           <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{user.role}</span>
