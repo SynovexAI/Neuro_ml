@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 type ProviderOpt = { id: string; provider: string; label: string | null };
 type McpOpt = { id: string; name: string; transport: string };
@@ -8,7 +8,10 @@ type KbOpt = { id: string; name: string; status: string; chunkCount: number };
 type Step = { name: string; type: string; ms: number | null; tokens: number };
 type NatResult = { answer: string; latency_ms: number; model: string; tool_names: string[]; unsupported_tools: string[]; context_used?: boolean; profiler?: { total_ms?: number; steps?: Step[] } };
 
-const SUPPORTED = [{ id: "calculator", label: "calculator" }, { id: "current_datetime", label: "current_datetime" }];
+const SUPPORTED = [
+  { id: "calculator", label: "Calculator", icon: "🧮", sub: "arithmetic" },
+  { id: "current_datetime", label: "Date & time", icon: "🕐", sub: "current date" },
+];
 
 export default function NatAgentPanel() {
   const [providers, setProviders] = useState<ProviderOpt[]>([]);
@@ -17,23 +20,20 @@ export default function NatAgentPanel() {
   const [model, setModel] = useState("");
   const [loadingModels, setLoadingModels] = useState(false);
   const [mcp, setMcp] = useState<McpOpt[]>([]);
+  const [kbs, setKbs] = useState<KbOpt[]>([]);
 
   const [agentType, setAgentType] = useState<"react_agent" | "tool_calling_agent">("react_agent");
   const [tools, setTools] = useState<Set<string>>(new Set(["calculator", "current_datetime"]));
   const [mcpIds, setMcpIds] = useState<Set<string>>(new Set());
-  const [kbs, setKbs] = useState<KbOpt[]>([]);
   const [kbIds, setKbIds] = useState<Set<string>>(new Set());
-  const [systemPrompt, setSystemPrompt] = useState("You are a careful reasoning agent. Use a tool when a calculation, lookup, or the current date is needed.");
+  const [temperature, setTemperature] = useState(0.2);
+  const [systemPrompt, setSystemPrompt] = useState("You are a helpful agent. Use a tool when a calculation, lookup, or the current date is needed, and answer from the attached knowledge when relevant.");
   const [task, setTask] = useState("What is 18% of 2450, and what is today's date?");
 
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<NatResult | null>(null);
   const [err, setErr] = useState("");
-  const [view, setView] = useState<"form" | "visual">("form");
-  const [pos, setPos] = useState<Record<string, { x: number; y: number }>>({});
-  const [sel, setSel] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [picker, setPicker] = useState<"tool" | "kb" | null>(null);
 
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => {
@@ -60,7 +60,7 @@ export default function NatAgentPanel() {
     try {
       const res = await fetch("/api/agent/nat-run", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task, providerId, model, systemPrompt, agentType, tools: [...tools], temperature: 0, mcpServerIds: [...mcpIds], knowledgeBaseIds: [...kbIds] }),
+        body: JSON.stringify({ task, providerId, model, systemPrompt, agentType, tools: [...tools], temperature, mcpServerIds: [...mcpIds], knowledgeBaseIds: [...kbIds] }),
       });
       const j = await res.json().catch(() => null);
       if (!res.ok) { setErr(j?.error || `Run failed (${res.status})`); return; }
@@ -72,212 +72,148 @@ export default function NatAgentPanel() {
   const steps = result?.profiler?.steps || [];
   const maxMs = Math.max(1, ...steps.map((s) => s.ms || 0));
 
-  // ── node graph (shares the same config state) ──
-  const providerLabel = providers.find((p) => p.id === providerId)?.label || providers.find((p) => p.id === providerId)?.provider || "provider";
-  const attached = [
-    ...[...tools].map((t) => ({ id: `tool:${t}`, type: "tool", label: t })),
-    ...[...mcpIds].map((id) => ({ id: `mcp:${id}`, type: "mcp", label: mcp.find((m) => m.id === id)?.name || "mcp" })),
-    ...[...kbIds].map((id) => ({ id: `kb:${id}`, type: "kb", label: kbs.find((k) => k.id === id)?.name || "kb" })),
+  // attached tool cards (built-in + MCP)
+  const toolCards = [
+    ...[...tools].map((t) => { const m = SUPPORTED.find((x) => x.id === t); return { id: `tool:${t}`, icon: m?.icon || "🔧", label: m?.label || t, sub: m?.sub || "tool" }; }),
+    ...[...mcpIds].map((id) => ({ id: `mcp:${id}`, icon: "🔌", label: mcp.find((m) => m.id === id)?.name || "mcp", sub: "MCP" })),
   ];
-  const nodes = [
-    { id: "provider", type: "provider", label: providerLabel, sub: model as string | undefined },
-    { id: "agent", type: "agent", label: agentType === "react_agent" ? "ReAct agent" : "Tool-calling", sub: `${attached.length} tool${attached.length === 1 ? "" : "s"}` },
-    ...attached.map((a) => ({ ...a, sub: undefined as string | undefined })),
-    { id: "output", type: "output", label: "Answer", sub: undefined },
-  ];
-  const NW = 148;
-  // Agent-centric layout: agent in the middle, provider in, output out, tools
-  // attached around/below (a ReAct agent has tools attached — it's not a sequence).
-  const defPos = (id: string): { x: number; y: number } => {
-    if (id === "provider") return { x: 20, y: 40 };
-    if (id === "agent") return { x: 210, y: 150 };
-    if (id === "output") return { x: 400, y: 40 };
-    const i = attached.findIndex((a) => a.id === id);
-    return { x: 20 + (i % 3) * 155, y: 268 + Math.floor(i / 3) * 66 };
-  };
-  const gp = (id: string) => pos[id] || defPos(id);
-  const center = (id: string) => { const p = gp(id); return { x: p.x + NW / 2, y: p.y + 23 }; };
-  const wires: [string, string][] = [["provider", "agent"], ["agent", "output"], ...attached.map((a) => [a.id, "agent"] as [string, string])];
-  function nodeDown(e: React.PointerEvent, id: string) {
-    const start = gp(id); const sx = e.clientX, sy = e.clientY; let moved = false;
-    const mv = (ev: PointerEvent) => { const dx = (ev.clientX - sx) / zoom, dy = (ev.clientY - sy) / zoom; if (Math.abs(dx) + Math.abs(dy) > 3) moved = true; setPos((p) => ({ ...p, [id]: { x: Math.max(0, start.x + dx), y: Math.max(0, start.y + dy) } })); };
-    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); if (!moved) setSel(id); };
-    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
-  }
-  function canvasDown(e: React.PointerEvent) {
-    if (e.target !== e.currentTarget) return; // only when dragging empty canvas
-    setSel(null);
-    const sx = e.clientX, sy = e.clientY; const start = { ...pan };
-    const mv = (ev: PointerEvent) => setPan({ x: start.x + (ev.clientX - sx), y: start.y + (ev.clientY - sy) });
-    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
-    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
-  }
-  const removeNode = useCallback((id: string) => {
+  const kbCards = [...kbIds].map((id) => { const k = kbs.find((x) => x.id === id); return { id: `kb:${id}`, label: k?.name || "knowledge", sub: `${k?.chunkCount ?? 0} chunks` }; });
+  function detach(id: string) {
     if (id.startsWith("tool:")) toggle(setTools, id.slice(5));
     else if (id.startsWith("mcp:")) toggle(setMcpIds, id.slice(4));
     else if (id.startsWith("kb:")) toggle(setKbIds, id.slice(3));
-  }, []);
-  // Delete / Backspace removes the selected tool / KB / MCP node.
-  useEffect(() => {
-    if (view !== "visual") return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Delete" && e.key !== "Backspace") return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if (sel && (sel.startsWith("tool:") || sel.startsWith("mcp:") || sel.startsWith("kb:"))) { e.preventDefault(); removeNode(sel); setSel(null); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [view, sel, removeNode]);
-  const lit = (id: string) => running ? (id === "agent" || id === "provider" ? "lit" : "") : (result ? "done" : "");
-  const selNode = nodes.find((x) => x.id === sel);
-
-  const report = (
-    <div className="card">
-      <div className="card-h"><span className="t">NAT profiler report</span>{result && <span className="mono r" style={{ color: "#3b9e5f" }}>success</span>}</div>
-      <div className="card-b">
-        {!result && !running && <div className="note">Run the agent to see its answer and profiler.</div>}
-        {running && <div className="note">Waiting for the NAT service…</div>}
-        {result && (<>
-          <div className="cv-summary" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-            <div className="metric"><span className="v">{((result.profiler?.total_ms ?? result.latency_ms) / 1000).toFixed(2)}s</span><span className="k">Total latency</span></div>
-            <div className="metric"><span className="v">{result.tool_names.length}</span><span className="k">Tools</span></div>
-            {result.context_used && <div className="metric"><span className="v">RAG</span><span className="k">Grounded</span></div>}
-          </div>
-          {steps.length > 0 && (<>
-            <label className="fld">Step timeline</label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
-              {steps.map((s, i) => { const bottleneck = (s.ms || 0) === maxMs && maxMs > 1; return (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ width: 110, fontSize: 11, color: "var(--muted)", flex: "0 0 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.type || s.name}</span>
-                  <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 4, height: 16, position: "relative" }}>
-                    <div style={{ width: `${Math.max(3, ((s.ms || 0) / maxMs) * 100)}%`, height: "100%", background: bottleneck ? "#f59e0b" : "var(--accent)", borderRadius: 4 }} />
-                    <span style={{ position: "absolute", right: 6, top: 0, lineHeight: "16px", fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>{s.ms != null ? `${s.ms}ms` : ""}{s.tokens ? ` · ${s.tokens}t` : ""}{bottleneck ? " · slow" : ""}</span>
-                  </div>
-                </div>
-              ); })}
-            </div>
-          </>)}
-          <label className="fld">Answer</label>
-          <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 12px", fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{result.answer}</div>
-          <div className="note" style={{ marginTop: 10 }}>tools: {result.tool_names.join(", ") || "none"}{result.unsupported_tools.length ? ` · unsupported: ${result.unsupported_tools.join(", ")}` : ""}</div>
-        </>)}
-      </div>
-    </div>
-  );
-
-  const drawer = !selNode ? <div className="note">Select a node on the canvas to configure it.</div> : (
-    <>
-      <div className="dh"><span className="badge">{selNode.type}</span><b style={{ fontSize: 13 }}>{selNode.label}</b></div>
-      <div className="flow-tabs"><span className="on">Config</span><span>Input · Output</span><span>Policy</span></div>
-      {selNode.type === "provider" && (<>
-        <label className="fld">Provider</label><select value={providerId} onChange={(e) => onProvider(e.target.value)}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>
-        <label className="fld" style={{ marginTop: 10 }}>Model</label><select value={model} onChange={(e) => setModel(e.target.value)} disabled={loadingModels}>{models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
-      </>)}
-      {selNode.type === "agent" && (<>
-        <label className="fld">Agent workflow</label>
-        <div className="seg"><button className={agentType === "react_agent" ? "on" : ""} onClick={() => setAgentType("react_agent")}>ReAct</button><button className={agentType === "tool_calling_agent" ? "on" : ""} onClick={() => setAgentType("tool_calling_agent")}>Tool-calling</button></div>
-        <label className="fld" style={{ marginTop: 10 }}>System prompt</label><textarea rows={5} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
-      </>)}
-      {selNode.type === "output" && (<><label className="fld">Task</label><textarea rows={5} value={task} onChange={(e) => setTask(e.target.value)} /></>)}
-      {(selNode.type === "tool" || selNode.type === "mcp" || selNode.type === "kb") && (
-        <div className="note">{selNode.type === "kb" ? "Knowledge base — the agent retrieves the top passages at run time." : selNode.type === "mcp" ? "MCP server tool." : "Built-in tool."}<div style={{ marginTop: 10 }}><button className="btn ghost sm" onClick={() => { removeNode(selNode.id); setSel(null); }}>Remove node</button></div></div>
-      )}
-    </>
-  );
-
-  const canvas = (
-    <div className="flow-canvas" onPointerDown={canvasDown} style={{ cursor: "grab" }}>
-      <div style={{ position: "absolute", inset: 0, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0" }}>
-        <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
-          {wires.map(([a, b], i) => { const c1 = center(a), c2 = center(b); const mx = (c1.x + c2.x) / 2; return <path key={i} d={`M ${c1.x} ${c1.y} C ${mx} ${c1.y}, ${mx} ${c2.y}, ${c2.x} ${c2.y}`} className="nat-wire" />; })}
-        </svg>
-        {/* detach affordance on each tool→agent wire */}
-        {attached.map((a) => { const c1 = center(a.id), c2 = center("agent"); return (
-          <button key={`wx-${a.id}`} className="wire-x" style={{ left: (c1.x + c2.x) / 2 - 9, top: (c1.y + c2.y) / 2 - 9 }} title="detach tool" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(a.id); if (sel === a.id) setSel(null); }}>×</button>
-        ); })}
-        {nodes.map((n) => { const p = gp(n.id); return (
-          <div key={n.id} className={`nnode nt-${n.type} ${lit(n.id)}${sel === n.id ? " sel" : ""}`} style={{ left: p.x, top: p.y, width: NW }} onPointerDown={(e) => nodeDown(e, n.id)}>
-            <div className="nn-hd">{n.type}</div><div className="nn-t">{n.label}</div>{n.sub && <div className="nn-s">{n.sub}</div>}
-            {n.id !== "provider" && <span className="nport nport-in" />}{n.id !== "output" && <span className="nport nport-out" />}
-            {(n.type === "tool" || n.type === "mcp" || n.type === "kb") && <button className="nn-x" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeNode(n.id); if (sel === n.id) setSel(null); }}>×</button>}
-          </div>
-        ); })}
-      </div>
-      <div className="nat-zoom">
-        <button onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom((z) => Math.min(1.5, +(z + 0.1).toFixed(2)))}>+</button><button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); setPos({}); }}>Fit</button>
-      </div>
-    </div>
-  );
+  }
 
   return (
     <>
-      <div className="teach-note"><span className="ic">⚡</span><span><b>NAT runtime.</b> Runs server-side through the real <b>NVIDIA NeMo Agent Toolkit</b> — with MCP tools, document grounding, and a per-step profiler. Needs the NAT sidecar deployed (<code>NAT_SERVICE_URL</code>).</span></div>
+      <div className="teach-note"><span className="ic">⚡</span><span><b>NAT runtime.</b> Runs server-side through the real <b>NVIDIA NeMo Agent Toolkit</b>. Needs the NAT sidecar deployed (<code>NAT_SERVICE_URL</code>).</span></div>
 
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
-        <div className="seg" style={{ width: 230 }}>
-          <button className={view === "form" ? "on" : ""} onClick={() => setView("form")}>Form</button>
-          <button className={view === "visual" ? "on" : ""} onClick={() => setView("visual")}>Visual builder</button>
+      <div className="flowstrip">
+        <span className="fs-node"><span>💬</span>Input</span>
+        <span className="fs-arrow">→</span>
+        <span className="fs-agent"><span>🤖</span>Agent</span>
+        <span className="fs-arrow">→</span>
+        <span className="fs-node"><span>✅</span>Answer</span>
+        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--faint)" }}>how it runs</span>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-h"><span className="fs-agent" style={{ padding: "3px 9px" }}><span>🤖</span>Agent</span><span className="note">{agentType === "react_agent" ? "ReAct — reasons and calls tools on its own" : "Tool-calling — native function calls"}</span><span style={{ flex: 1 }} /><button className="btn sm" onClick={run} disabled={running || !providerId || !model}>{running ? "Running…" : "▶ Run"}</button></div>
+        <div className="card-b">
+          <div className="split col-2e">
+            <div><label className="fld">Provider</label><select value={providerId} onChange={(e) => onProvider(e.target.value)}>{providers.length === 0 && <option value="">No provider configured</option>}{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>
+            <div><label className="fld">Model</label><select value={model} onChange={(e) => setModel(e.target.value)} disabled={loadingModels}>{loadingModels && <option>loading…</option>}{!loadingModels && models.length === 0 && <option value="">no models</option>}{models.map((m) => <option key={m} value={m}>{m}</option>)}</select></div>
+          </div>
+          <div className="split col-2e" style={{ marginTop: 12 }}>
+            <div><label className="fld">Agent type</label><div className="seg"><button className={agentType === "react_agent" ? "on" : ""} onClick={() => setAgentType("react_agent")}>ReAct</button><button className={agentType === "tool_calling_agent" ? "on" : ""} onClick={() => setAgentType("tool_calling_agent")}>Tool-calling</button></div></div>
+            <div><label className="fld">Temperature · {temperature.toFixed(2)}</label><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div>
+          </div>
+          <label className="fld" style={{ marginTop: 12 }}>Instructions</label>
+          <textarea rows={3} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
         </div>
       </div>
 
-      {view === "form" ? (
-        <div className="split" style={{ gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <div className="card">
-            <div className="card-h"><span className="t">Build</span></div>
-            <div className="card-b">
-              <label className="fld">Provider</label>
-              <select value={providerId} onChange={(e) => onProvider(e.target.value)}>{providers.length === 0 && <option value="">No provider configured</option>}{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>
-              <label className="fld" style={{ marginTop: 12 }}>Model</label>
-              <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loadingModels}>{loadingModels && <option>loading…</option>}{!loadingModels && models.length === 0 && <option value="">no models</option>}{models.map((m) => <option key={m} value={m}>{m}</option>)}</select>
-              <label className="fld" style={{ marginTop: 12 }}>Agent workflow</label>
-              <div className="seg"><button className={agentType === "react_agent" ? "on" : ""} onClick={() => setAgentType("react_agent")}>ReAct</button><button className={agentType === "tool_calling_agent" ? "on" : ""} onClick={() => setAgentType("tool_calling_agent")}>Tool-calling</button></div>
-              <label className="fld" style={{ marginTop: 12 }}>Built-in tools</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{SUPPORTED.map((t) => <button key={t.id} type="button" onClick={() => toggle(setTools, t.id)} className={`chip ${tools.has(t.id) ? "on" : ""}`}>{tools.has(t.id) ? "✓ " : ""}{t.label}</button>)}</div>
-              <label className="fld" style={{ marginTop: 12 }}>MCP tools <span className="note">· from Admin → MCP servers</span></label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{mcp.length === 0 ? <span className="note">no enabled MCP servers</span> : mcp.map((s) => <button key={s.id} type="button" onClick={() => toggle(setMcpIds, s.id)} className={`chip ${mcpIds.has(s.id) ? "on" : ""}`} title={s.transport}>{mcpIds.has(s.id) ? "✓ " : ""}{s.name} · MCP</button>)}</div>
-              <label className="fld" style={{ marginTop: 12 }}>Knowledge bases (RAG) <span className="note">· from Studio → Knowledge bases</span></label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{kbs.length === 0 ? <span className="note">no synced knowledge bases — <a href="/kb">create one</a></span> : kbs.map((k) => <button key={k.id} type="button" onClick={() => toggle(setKbIds, k.id)} className={`chip ${kbIds.has(k.id) ? "on" : ""}`} title={`${k.chunkCount} chunks`}>{kbIds.has(k.id) ? "✓ " : ""}{k.name}</button>)}</div>
-              <label className="fld" style={{ marginTop: 12 }}>System prompt</label>
-              <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={2} />
-              <label className="fld" style={{ marginTop: 12 }}>Task</label>
-              <textarea value={task} onChange={(e) => setTask(e.target.value)} rows={2} />
-              <button className="btn block" style={{ marginTop: 14 }} onClick={run} disabled={running || !providerId || !model}>{running ? "Running via NAT…" : "▶ Run via NAT"}</button>
-              {err && <div className="err" style={{ marginTop: 10 }}>{err}</div>}
-            </div>
+      <div className="sec-head"><b>Tools</b><span className="note">the agent calls these when it decides to</span></div>
+      <div className="tool-grid">
+        {toolCards.map((t) => (
+          <div key={t.id} className="tool-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 15 }}>{t.icon}</span><b>{t.label}</b>{t.sub === "MCP" && <span className="badge" style={{ marginLeft: "auto" }}>MCP</span>}</div>
+            {t.sub !== "MCP" && <div className="note" style={{ marginTop: 3 }}>{t.sub}</div>}
+            <button className="tc-x" title="Remove" onClick={() => detach(t.id)}>×</button>
           </div>
-          {report}
+        ))}
+        <button className="tool-card add" onClick={() => setPicker("tool")}>＋ Add tool</button>
+      </div>
+
+      <div className="sec-head"><b>Knowledge</b><span className="note">grounds answers on your documents (RAG)</span></div>
+      <div className="tool-grid">
+        {kbCards.map((k) => (
+          <div key={k.id} className="tool-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 15 }}>📚</span><b>{k.label}</b></div>
+            <div className="note" style={{ marginTop: 3 }}>{k.sub}</div>
+            <button className="tc-x" title="Detach" onClick={() => detach(k.id)}>×</button>
+          </div>
+        ))}
+        <button className="tool-card add" onClick={() => setPicker("kb")}>＋ Attach knowledge</button>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-h"><span className="t">Task</span></div>
+        <div className="card-b">
+          <textarea rows={2} value={task} onChange={(e) => setTask(e.target.value)} />
+          <button className="btn block" style={{ marginTop: 12 }} onClick={run} disabled={running || !providerId || !model}>{running ? "Running via NAT…" : "▶ Run via NAT"}</button>
+          {err && <div className="err" style={{ marginTop: 10 }}>{err}</div>}
         </div>
-      ) : (
-        <>
-          <div className="flow-top">
-            <b style={{ fontSize: 13 }}>Agent flow</b>
-            <span className="note" style={{ marginLeft: 4 }}>{providerLabel} · {model || "—"} · {agentType === "react_agent" ? "ReAct" : "Tool-calling"}</span>
-            <span style={{ flex: 1 }} />
-            <button className="btn sm" onClick={run} disabled={running || !providerId || !model}>{running ? "Running…" : "▶ Run via NAT"}</button>
-          </div>
-          <div className="flow-body">
-            <div className="flow-rail">
-              <div className="cat">Models</div>
-              <div className={`prow ${sel === "provider" ? "on" : ""}`} onClick={() => setSel("provider")}><span className="pic">◆</span>LLM · model</div>
-              <div className={`prow ${sel === "agent" ? "on" : ""}`} onClick={() => setSel("agent")}><span className="pic">🧠</span>Agent</div>
-              <div className="cat">Tools</div>
-              {SUPPORTED.map((t) => <div key={t.id} className={`prow ${tools.has(t.id) ? "on" : ""}`} onClick={() => toggle(setTools, t.id)}><span className="pic">🧮</span>{t.label}</div>)}
-              {mcp.map((s) => <div key={s.id} className={`prow ${mcpIds.has(s.id) ? "on" : ""}`} onClick={() => toggle(setMcpIds, s.id)}><span className="pic">🔌</span>{s.name}</div>)}
-              {mcp.length === 0 && <div className="note" style={{ padding: "0 4px" }}>no MCP servers</div>}
-              <div className="cat">Knowledge</div>
-              {kbs.map((k) => <div key={k.id} className={`prow ${kbIds.has(k.id) ? "on" : ""}`} onClick={() => toggle(setKbIds, k.id)}><span className="pic">📚</span>{k.name}</div>)}
-              {kbs.length === 0 && <div className="note" style={{ padding: "0 4px" }}>no KBs — <a href="/kb">create</a></div>}
-              <div className="cat">Output</div>
-              <div className={`prow ${sel === "output" ? "on" : ""}`} onClick={() => setSel("output")}><span className="pic">✅</span>Answer</div>
+      </div>
+
+      <div className="card">
+        <div className="card-h"><span className="t">NAT profiler report</span>{result && <span className="mono r" style={{ color: "#3b9e5f" }}>success</span>}</div>
+        <div className="card-b">
+          {!result && !running && <div className="note">Run the agent to see its answer and profiler.</div>}
+          {running && <div className="note">Waiting for the NAT service…</div>}
+          {result && (<>
+            <div className="cv-summary" style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <div className="metric"><span className="v">{((result.profiler?.total_ms ?? result.latency_ms) / 1000).toFixed(2)}s</span><span className="k">Total latency</span></div>
+              <div className="metric"><span className="v">{result.tool_names.length}</span><span className="k">Tools</span></div>
+              {result.context_used && <div className="metric"><span className="v">RAG</span><span className="k">Grounded</span></div>}
             </div>
-            {canvas}
-            <div className="flow-drawer">{drawer}</div>
+            {steps.length > 0 && (<>
+              <label className="fld">Step timeline</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+                {steps.map((s, i) => { const bottleneck = (s.ms || 0) === maxMs && maxMs > 1; return (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 110, fontSize: 11, color: "var(--muted)", flex: "0 0 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.type || s.name}</span>
+                    <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 4, height: 16, position: "relative" }}>
+                      <div style={{ width: `${Math.max(3, ((s.ms || 0) / maxMs) * 100)}%`, height: "100%", background: bottleneck ? "#f59e0b" : "var(--accent)", borderRadius: 4 }} />
+                      <span style={{ position: "absolute", right: 6, top: 0, lineHeight: "16px", fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>{s.ms != null ? `${s.ms}ms` : ""}{s.tokens ? ` · ${s.tokens}t` : ""}{bottleneck ? " · slow" : ""}</span>
+                    </div>
+                  </div>
+                ); })}
+              </div>
+            </>)}
+            <label className="fld">Answer</label>
+            <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 12px", fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{result.answer}</div>
+            <div className="note" style={{ marginTop: 10 }}>tools: {result.tool_names.join(", ") || "none"}{result.unsupported_tools.length ? ` · unsupported: ${result.unsupported_tools.join(", ")}` : ""}</div>
+          </>)}
+        </div>
+      </div>
+
+      {picker && (
+        <div className="modal-wrap show" onClick={(e) => { if (e.target === e.currentTarget) setPicker(null); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <div className="mh"><b>{picker === "tool" ? "Add a tool" : "Attach knowledge"}</b><button className="x" onClick={() => setPicker(null)}>×</button></div>
+            <div className="mb">
+              {picker === "tool" ? (
+                <>
+                  <div className="note" style={{ marginBottom: 8 }}>Built-in</div>
+                  {SUPPORTED.map((t) => (
+                    <div key={t.id} className="pick-row" onClick={() => toggle(setTools, t.id)}>
+                      <span style={{ fontSize: 15 }}>{t.icon}</span><b>{t.label}</b><span className="note">{t.sub}</span>
+                      <span className="pick-tick">{tools.has(t.id) ? "✓ added" : "+ add"}</span>
+                    </div>
+                  ))}
+                  <div className="note" style={{ margin: "12px 0 8px" }}>MCP servers <span style={{ color: "var(--faint)" }}>· from Studio → MCP servers</span></div>
+                  {mcp.length === 0 ? <div className="note">no MCP servers — <a href="/admin/mcp">connect one</a></div>
+                    : mcp.map((s) => (
+                      <div key={s.id} className="pick-row" onClick={() => toggle(setMcpIds, s.id)}>
+                        <span style={{ fontSize: 15 }}>🔌</span><b>{s.name}</b><span className="badge">{s.transport}</span>
+                        <span className="pick-tick">{mcpIds.has(s.id) ? "✓ added" : "+ add"}</span>
+                      </div>
+                    ))}
+                </>
+              ) : (
+                kbs.length === 0 ? <div className="note">no knowledge bases — <a href="/kb">create one</a></div>
+                  : kbs.map((k) => (
+                    <div key={k.id} className="pick-row" onClick={() => toggle(setKbIds, k.id)}>
+                      <span style={{ fontSize: 15 }}>📚</span><b>{k.name}</b><span className="note">{k.chunkCount} chunks</span>
+                      <span className="pick-tick">{kbIds.has(k.id) ? "✓ attached" : "+ attach"}</span>
+                    </div>
+                  ))
+              )}
+              <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={() => setPicker(null)}>Done</button></div>
+            </div>
           </div>
-          <div className="note" style={{ margin: "8px 2px 0" }}>Tools are <b>attached</b> to the agent — a ReAct agent decides when to call them (not a fixed sequence). Drag empty canvas to pan · drag nodes to arrange · <b>×</b> on a wire (or select a tool and press <b>⌫</b>) detaches it.</div>
-          {err && <div className="err" style={{ marginTop: 12 }}>{err}</div>}
-          <div style={{ marginTop: 16 }}>{report}</div>
-        </>
+        </div>
       )}
     </>
   );
