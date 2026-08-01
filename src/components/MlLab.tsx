@@ -959,10 +959,14 @@ ${evalBlock}`;
     };
 
     let intro = ""; let legend: { sym: string; desc: string; how?: string; val?: string }[] = [];
-    // Each step: symbolic form → the same formula with your real numbers → the result.
-    let subSteps: { sym: string; sub: string; res: string }[] = [];
-    let viz: (applied: number) => React.ReactNode = () => null;
+    // chainFor(row): the formula for THAT row — symbolic → its real numbers → its result.
+    // So single-stepping shows the example row, and apply-to-all re-fills it per row.
+    let chainFor: (r: number) => { sym: string; sub: string; res: string }[] = () => [];
+    // viz(applied, curRow, stage): applied>0 fills the graph & highlights curRow;
+    // applied===0 shows just the one example row executing through the formula stages.
+    let viz: (applied: number, curRow: number, stage: number) => React.ReactNode = () => null;
     let total = idx.length; let applyNote = "each row is scored one at a time";
+    let exampleRow = idx[0] ?? 0; let orderList: number[] = idx;
     const kind = modelKind; // "gd" | "tree" | "forest" | "gnb" | "knn"
     // b + w₁(x₁) + w₂(x₂) + … for one row, as a KaTeX string with the real numbers.
     const linSub = (w: number[], x: number[]) => `${fv(w[0])} ${x.slice(0, 2).map((xi, j) => `${(w[j + 1] ?? 0) < 0 ? "-" : "+"}\\,${fv(Math.abs(w[j + 1] ?? 0))}\\!\\times\\!${fv(xi)}`).join(" ")}${x.length > 2 ? " + \\dots" : ""}`;
@@ -982,18 +986,21 @@ ${evalBlock}`;
         { sym: "z", desc: "linear score", how: "z = b + Σⱼ wⱼ·xⱼ over the row", val: fv(z0) },
         { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "ŷ = 1 / (1 + e⁻ᶻ)", val: fv(p0) },
       ];
-      const cls1 = (classes?.[1] ?? "class 1").toString().replace(/[^a-zA-Z0-9 ]/g, " ");
-      subSteps = [
-        { sym: "z = b + \\sum_j w_j x_j", sub: gw ? `z = ${linSub(gw, X[0])}` : "z = \\dots", res: `z = ${fv(z0)}` },
-        { sym: "\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", sub: `\\hat y = \\tfrac{1}{1+e^{-(${fv(z0)})}}`, res: `\\hat y = ${fv(p0)}` },
-        { sym: "\\text{class} = 1 \\text{ if } \\hat y \\ge 0.5", sub: `${fv(p0)} \\ge 0.5`, res: `\\Rightarrow \\text{${p0 >= 0.5 ? cls1 : (classes?.[0] ?? "class 0").toString().replace(/[^a-zA-Z0-9 ]/g, " ")}}` },
-      ];
+      const cls1 = (classes?.[1] ?? "class 1").toString().replace(/[^a-zA-Z0-9 ]/g, " "), cls0 = (classes?.[0] ?? "class 0").toString().replace(/[^a-zA-Z0-9 ]/g, " ");
+      exampleRow = idx[0] ?? 0; orderList = order;
+      chainFor = (r) => { const zr = z(X[r]), pr = sig(zr); return [
+        { sym: "z = b + \\sum_j w_j x_j", sub: gw ? `z = ${linSub(gw, X[r])}` : "z = \\dots", res: `z = ${fv(zr)}` },
+        { sym: "\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", sub: `\\hat y = \\tfrac{1}{1+e^{-(${fv(zr)})}}`, res: `\\hat y = ${fv(pr)}` },
+        { sym: "\\text{class} = 1 \\text{ if } \\hat y \\ge 0.5", sub: `${fv(pr)} \\ge 0.5`, res: `\\Rightarrow \\text{${pr >= 0.5 ? cls1 : cls0}}` },
+      ]; };
       applyNote = "each row's score becomes a probability on the curve";
-      viz = (applied) => svg([
+      viz = (applied, curRow, stage) => svg([
         <polyline key="curve" points={order.map((i) => `${sx(f0.z[i])},${sy(pz[i])}`).join(" ")} fill="none" stroke="#3ecf7f" strokeWidth={2} />,
         <line key="thr" x1={PX0} y1={sy(0.5)} x2={PX1} y2={sy(0.5)} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="5 4" />,
         <text key="thrl" x={PX0 + 3} y={sy(0.5) - 4} fill="var(--faint)" fontSize={11} fontFamily="monospace">0.5</text>,
-        ...order.slice(0, applied).map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(pz[i])} r={4} fill={clsColor(i)} opacity={0.85} />),
+        ...order.slice(0, applied).map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(pz[i])} r={i === curRow ? 6 : 4} fill={clsColor(i)} opacity={0.85} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />),
+        applied === 0 ? <line key="drop" x1={sx(f0.z[curRow])} y1={sy(Y[curRow] ? 0.86 : 0.14)} x2={sx(f0.z[curRow])} y2={sy(stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14))} stroke="var(--faint)" strokeDasharray="3 3" /> : null,
+        applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14))} r={7} fill={clsColor(curRow)} stroke="var(--text)" strokeWidth={1.5} style={{ transition: "cy .4s" }} /> : null,
       ]);
     } else if (kind === "gd" && isReg) { // Linear / Ridge Regression
       let gw: number[] | null = null;
@@ -1009,19 +1016,21 @@ ${evalBlock}`;
         { sym: "\\hat y", desc: "prediction", how: "ŷ = b + Σⱼ wⱼ·xⱼ", val: gw ? fv(pred(X[0])) : "—" },
         { sym: "\\mathcal L", desc: "mean squared error", how: "L = (1/n) Σ (ŷ−y)²", val: fv(mse) },
       ];
-      const yh0 = pred(X[0]), r0 = yh0 - Y[0];
-      subSteps = [
-        { sym: "\\hat y = b + \\sum_j w_j x_j", sub: gw ? `\\hat y = ${linSub(gw, X[0])}` : "\\hat y = \\dots", res: `\\hat y = ${fv(yh0)}` },
-        { sym: "r = \\hat y - y", sub: `r = ${fv(yh0)} - ${fv(Y[0])}`, res: `r = ${fv(r0)}` },
-        { sym: "\\mathcal L = \\tfrac1n\\sum r_i^2", sub: `\\mathcal L = \\tfrac1{${msePairs.length}}(${fv(r0 * r0)} + \\dots)`, res: `\\mathcal L = ${fv(mse)}` },
-      ].concat(algo === "Ridge" ? [{ sym: "\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", sub: "\\text{add the L2 penalty}", res: "\\text{shrinks the weights}" }] : []);
+      exampleRow = idx[0] ?? 0; orderList = order;
+      chainFor = (r) => { const yhr = pred(X[r]), rr = yhr - Y[r]; return [
+        { sym: "\\hat y = b + \\sum_j w_j x_j", sub: gw ? `\\hat y = ${linSub(gw, X[r])}` : "\\hat y = \\dots", res: `\\hat y = ${fv(yhr)}` },
+        { sym: "r = \\hat y - y", sub: `r = ${fv(yhr)} - ${fv(Y[r])}`, res: `r = ${fv(rr)}` },
+        { sym: "\\mathcal L = \\tfrac1n\\sum r_i^2", sub: `\\mathcal L = \\tfrac1{${msePairs.length}}(${fv(rr * rr)} + \\dots)`, res: `\\mathcal L = ${fv(mse)}` },
+      ].concat(algo === "Ridge" ? [{ sym: "\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", sub: "\\text{add the L2 penalty}", res: "\\text{shrinks the weights}" }] : []); };
       applyNote = "each row's prediction lands on the line";
-      viz = (applied) => svg([
+      viz = (applied, curRow) => svg([
         <polyline key="ln" points={order.map((i) => `${sx(f0.z[i])},${sy(yhn.z[i])}`).join(" ")} fill="none" stroke="#f59e0b" strokeWidth={2.5} />,
         ...order.slice(0, applied).map((i, k) => [
           <line key={"r" + k} x1={sx(f0.z[i])} y1={sy(yn.z[i])} x2={sx(f0.z[i])} y2={sy(yhn.z[i])} stroke="#ef4444" strokeWidth={1} opacity={0.6} />,
-          <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(yn.z[i])} r={4} fill="#5b7cff" opacity={0.75} />,
+          <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(yn.z[i])} r={i === curRow ? 6 : 4} fill="#5b7cff" opacity={0.8} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />,
         ]),
+        applied === 0 ? <line key="r0" x1={sx(f0.z[curRow])} y1={sy(yn.z[curRow])} x2={sx(f0.z[curRow])} y2={sy(yhn.z[curRow])} stroke="#ef4444" strokeWidth={1.5} /> : null,
+        applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(yn.z[curRow])} r={7} fill="#5b7cff" stroke="var(--text)" strokeWidth={1.5} /> : null,
         applied >= total ? <text key="mse" x={140} y={34} fill="var(--faint)" fontSize={12} fontFamily="monospace">MSE = {fv(mse)}</text> : null,
       ]);
     } else if (kind === "knn") {
@@ -1041,19 +1050,20 @@ ${evalBlock}`;
         { sym: "k", desc: "neighbours kept", how: `n_neighbors setting = ${kk}`, val: String(kk) },
         { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? "ŷ = (1/k) Σ yᵢ of neighbours" : "ŷ = most common label among k", val: yhat },
       ];
-      const qx1 = X[qi]?.[idxF], qx2 = X[qi]?.[idxG], n0 = near[0], nx1 = n0 != null ? X[n0]?.[idxF] : NaN, nx2 = n0 != null ? X[n0]?.[idxG] : NaN;
+      const qx1 = X[qi]?.[idxF], qx2 = X[qi]?.[idxG];
       const nearD = near.slice(0, 5).map((i) => fv(dist(X[i]))).join(",\\ ");
-      subSteps = [
-        { sym: "d = \\sqrt{\\textstyle\\sum_j (q_j - x_j)^2}", sub: `d = \\sqrt{(${fv(qx1)}\\!-\\!${fv(nx1)})^2 + (${fv(qx2)}\\!-\\!${fv(nx2)})^2 + \\dots}`, res: `d = ${fv(dNear)}` },
+      exampleRow = near[0] ?? others[0] ?? qi; orderList = others;
+      chainFor = (r) => { const rx1 = X[r]?.[idxF], rx2 = X[r]?.[idxG], dr = dist(X[r]); return [
+        { sym: "d = \\sqrt{\\textstyle\\sum_j (q_j - x_j)^2}", sub: `d = \\sqrt{(${fv(qx1)}\\!-\\!${fv(rx1)})^2 + (${fv(qx2)}\\!-\\!${fv(rx2)})^2 + \\dots}`, res: `d = ${fv(dr)}` },
         { sym: `\\text{keep the } k=${kk} \\text{ smallest } d`, sub: `d = [${nearD}]`, res: `${kk} \\text{ neighbours}` },
         isReg
           ? { sym: "\\hat y = \\tfrac1k\\textstyle\\sum_{i\\in kNN} y_i", sub: `\\hat y = \\tfrac1{${kk}}(${near.map((i) => fv(Y[i])).join("+")})`, res: `\\hat y = ${yhat}` }
           : { sym: "\\hat y = \\text{mode of the labels}", sub: `\\text{votes} = ${votes}\\text{ vs }${kk - votes}`, res: `\\Rightarrow \\text{${yhat.replace(/[^a-zA-Z0-9 ]/g, " ")}}` },
-      ];
+      ]; };
       total = others.length; applyNote = "distance measured to each stored row";
-      viz = (applied) => svg([
-        ...others.slice(0, applied).map((i, k) => <line key={"l" + k} x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[i])} y2={sy(f1.z[i])} stroke="var(--border-strong)" strokeWidth={0.6} opacity={0.5} />),
-        ...others.map((i, k) => { const done = applied >= total; const isN = near.includes(i); return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={done && isN ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={done && !isN ? 0.35 : 0.85} />; }),
+      viz = (applied, curRow) => svg([
+        ...(applied === 0 ? [<line key="dl" x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[curRow])} y2={sy(f1.z[curRow])} stroke="#a855f7" strokeWidth={1.2} />] : others.slice(0, applied).map((i, k) => <line key={"l" + k} x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[i])} y2={sy(f1.z[i])} stroke="var(--border-strong)" strokeWidth={0.6} opacity={0.5} />)),
+        ...others.map((i, k) => { const done = applied >= total; const isN = near.includes(i); const hot = applied === 0 && i === curRow; return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={hot || (done && isN) ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={applied === 0 && !hot ? 0.4 : (done && !isN ? 0.35 : 0.85)} stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />; }),
         applied >= total && near.length ? <circle key="ring" cx={sx(f0.z[qi])} cy={sy(f1.z[qi])} r={Math.max(...near.map((i) => Math.hypot(sx(f0.z[i]) - sx(f0.z[qi]), sy(f1.z[i]) - sy(f1.z[qi]))))} fill="none" stroke="#a855f7" strokeWidth={1.5} /> : null,
         <text key="star" x={sx(f0.z[qi]) - 6} y={sy(f1.z[qi]) + 5} fill="var(--text)" fontSize={16} fontFamily="monospace">★</text>,
         applied >= total ? <text key="vt" x={110} y={PYb + 2} fill="var(--faint)" fontSize={11} fontFamily="monospace">{isReg ? `mean → ${yhat}` : `vote → ${yhat}`}</text> : null,
@@ -1065,9 +1075,9 @@ ${evalBlock}`;
       const sA = mV(cA.length ? cA : idx), sB = mV(cB.length ? cB : idx);
       const priorA = (cA.length || 1) / (idx.length || 1), priorB = (cB.length || 1) / (idx.length || 1);
       const cf = colF.filter((c) => Number.isFinite(c)); const range = [cf.length ? Math.min(...cf) : 0, cf.length ? Math.max(...cf) : 1];
-      const xq = Number.isFinite(X[0]?.[idxF]) ? X[0][idxF] : sA.mu; const xqn = (xq - range[0]) / ((range[1] - range[0]) || 1);
+      const xq = Number.isFinite(X[0]?.[idxF]) ? X[0][idxF] : sA.mu;
       const bell = (x: number, mu: number, va: number) => Math.exp(-((x - mu) ** 2) / (2 * va));
-      const likeA = bell(xq, sA.mu, sA.va), likeB = bell(xq, sB.mu, sB.va);
+      const likeA = bell(xq, sA.mu, sA.va);
       const curve = (mu: number, va: number) => { const pts: string[] = []; for (let t = 0; t <= 60; t++) { const x = range[0] + (range[1] - range[0]) * (t / 60); pts.push(`${sx(t / 60)},${sy(bell(x, mu, va) * 0.9)}`); } return pts.join(" "); };
       intro = "Learn one bell curve (mean & variance) per class. A point's class score is that class's prior times the bell heights at the point.";
       legend = [
@@ -1077,21 +1087,26 @@ ${evalBlock}`;
         { sym: "P(x\\mid y)", desc: "bell height at x", how: "e^(−(x−μ)²/2σ²)", val: fv(likeA) },
       ];
       const clsA = (classes?.[0] ?? "A").toString().replace(/[^a-zA-Z0-9 ]/g, " "), clsB = (classes?.[1] ?? "B").toString().replace(/[^a-zA-Z0-9 ]/g, " ");
-      const winner = (priorA * likeA) >= (priorB * likeB) ? clsA : clsB;
-      subSteps = [
-        { sym: "P(x\\mid y) = \\tfrac{1}{\\sqrt{2\\pi\\sigma^2}} e^{-\\frac{(x-\\mu)^2}{2\\sigma^2}}", sub: `P(x\\mid ${clsA}) = e^{-\\frac{(${fv(xq)}-${fv(sA.mu)})^2}{2\\cdot${fv(sA.va)}}}`, res: `= ${fv(likeA)}` },
-        { sym: "P(y\\mid x) \\propto P(y)\\,P(x\\mid y)", sub: `${clsA}: ${fv(priorA)}\\!\\times\\!${fv(likeA)},\\ ${clsB}: ${fv(priorB)}\\!\\times\\!${fv(likeB)}`, res: `\\propto ${fv(priorA * likeA)} \\text{ vs } ${fv(priorB * likeB)}` },
-        { sym: "\\hat y = \\arg\\max_y P(y\\mid x)", sub: `\\max(${fv(priorA * likeA)},\\ ${fv(priorB * likeB)})`, res: `\\Rightarrow \\text{${winner}}` },
-      ];
       const rowOrder = [...idx].sort((a, c) => colF[a] - colF[c]);
+      const xOf = (r: number) => (Number.isFinite(colF[r]) ? colF[r] : sA.mu);
+      exampleRow = rowOrder[Math.floor(rowOrder.length / 2)] ?? (idx[0] ?? 0); orderList = rowOrder;
+      chainFor = (r) => { const xr = xOf(r); const lA = bell(xr, sA.mu, sA.va), lB = bell(xr, sB.mu, sB.va), pA = priorA * lA, pB = priorB * lB; return [
+        { sym: "P(x\\mid y) = \\tfrac{1}{\\sqrt{2\\pi\\sigma^2}} e^{-\\frac{(x-\\mu)^2}{2\\sigma^2}}", sub: `P(${fv(xr)}\\mid ${clsA}) = e^{-\\frac{(${fv(xr)}-${fv(sA.mu)})^2}{2\\cdot${fv(sA.va)}}}`, res: `= ${fv(lA)}` },
+        { sym: "P(y\\mid x) \\propto P(y)\\,P(x\\mid y)", sub: `${clsA}: ${fv(priorA)}\\!\\times\\!${fv(lA)},\\ ${clsB}: ${fv(priorB)}\\!\\times\\!${fv(lB)}`, res: `\\propto ${fv(pA)} \\text{ vs } ${fv(pB)}` },
+        { sym: "\\hat y = \\arg\\max_y P(y\\mid x)", sub: `\\max(${fv(pA)},\\ ${fv(pB)})`, res: `\\Rightarrow \\text{${pA >= pB ? clsA : clsB}}` },
+      ]; };
       total = idx.length; applyNote = "each row scored under its class bell";
-      viz = (applied) => svg([
+      const ptOf = (r: number) => { const xr = xOf(r); const xn = (xr - range[0]) / ((range[1] - range[0]) || 1); const h = bell(xr, Y[r] === 0 ? sA.mu : sB.mu, Y[r] === 0 ? sA.va : sB.va); return { xn, h }; };
+      viz = (applied, curRow) => svg([
         <polyline key="bA" points={curve(sA.mu, sA.va)} fill="none" stroke={PAL_ML[0]} strokeWidth={2} />,
         <polyline key="bB" points={curve(sB.mu, sB.va)} fill="none" stroke={PAL_ML[1]} strokeWidth={2} />,
-        <line key="xq" x1={sx(xqn)} y1={PYt} x2={sx(xqn)} y2={PYb} stroke="var(--faint)" strokeDasharray="4 4" />,
-        <text key="xql" x={sx(xqn) - 4} y={PYb + 2} fill="var(--text)" fontSize={11} fontFamily="monospace">x</text>,
-        ...rowOrder.slice(0, applied).map((i, k) => { const xi = colF[i]; const xn = (xi - range[0]) / ((range[1] - range[0]) || 1); const h = bell(xi, Y[i] === 0 ? sA.mu : sB.mu, Y[i] === 0 ? sA.va : sB.va); return <circle key={"p" + k} cx={sx(xn)} cy={sy(h * 0.9)} r={3.5} fill={PAL_ML[Y[i] % PAL_ML.length]} opacity={0.8} />; }),
-        applied >= total ? <text key="win" x={96} y={34} fill="var(--faint)" fontSize={11} fontFamily="monospace">{winner} wins</text> : null,
+        ...rowOrder.slice(0, applied).map((i, k) => { const p = ptOf(i); return <circle key={"p" + k} cx={sx(p.xn)} cy={sy(p.h * 0.9)} r={i === curRow ? 5.5 : 3.5} fill={PAL_ML[Y[i] % PAL_ML.length]} opacity={0.8} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />; }),
+        ...(applied === 0 ? [(() => { const p = ptOf(curRow); return [
+          <line key="xq" x1={sx(p.xn)} y1={PYt} x2={sx(p.xn)} y2={PYb} stroke="var(--faint)" strokeDasharray="4 4" />,
+          <circle key="oA" cx={sx(p.xn)} cy={sy(bell(xOf(curRow), sA.mu, sA.va) * 0.9)} r={6} fill={PAL_ML[0]} />,
+          <circle key="oB" cx={sx(p.xn)} cy={sy(bell(xOf(curRow), sB.mu, sB.va) * 0.9)} r={6} fill={PAL_ML[1]} />,
+        ]; })()] : []),
+        applied >= total ? <text key="win" x={96} y={34} fill="var(--faint)" fontSize={11} fontFamily="monospace">{clsA} vs {clsB}</text> : null,
       ]);
     } else { // tree & forest
       const rowsAll = pick(n, 260).filter((i) => Number.isFinite(Y[i]) && Number.isFinite(X[i][idxF]) && Number.isFinite(X[i][idxG]));
@@ -1113,17 +1128,19 @@ ${evalBlock}`;
         ];
         const pc: Record<number, number> = {}; rowsAll.forEach((i) => { pc[Y[i]] = (pc[Y[i]] || 0) + 1; }); const shares = Object.values(pc).map((c) => c / (rowsAll.length || 1));
         const featC = names[sp.feat].replace(/[^a-zA-Z0-9 ]/g, " ").slice(0, 12);
-        subSteps = [
+        const plotPts = rowsAll.filter((i) => idx.includes(i));
+        exampleRow = plotPts[0] ?? (idx[0] ?? 0); orderList = plotPts;
+        chainFor = (r) => { const xr = X[r]?.[sp.feat]; const left = xr <= sp.thr; return [
           { sym: `G = ${isReg ? "\\text{var}(y)" : "1 - \\sum_k p_k^2"}`, sub: isReg ? "G = \\text{var}(y)" : `G = 1 - (${shares.map((p) => `${fv(p)}^2`).join(" + ")})`, res: `G = ${fv(sp.parent, 3)}` },
           { sym: "\\text{gain} = G - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", sub: `= ${fv(sp.parent)} - \\tfrac{${sp.nl}}{${sp.nl + sp.nr}}(${fv(sp.gl)}) - \\tfrac{${sp.nr}}{${sp.nl + sp.nr}}(${fv(sp.gr)})`, res: `\\text{gain} = ${fv(sp.gain)}` },
-          { sym: "\\text{split on the max-gain threshold}", sub: `\\text{${featC}} \\le ${fv(sp.thr)}`, res: `\\Rightarrow ${sp.nl}\\,|\\,${sp.nr} \\text{ rows}` },
-        ];
-        const plotPts = rowsAll.filter((i) => idx.includes(i));
+          { sym: `\\text{route the row: } \\text{${featC}} \\le \\text{thr}?`, sub: `${fv(xr)} \\le ${fv(sp.thr)}`, res: `\\Rightarrow \\text{${left ? "left" : "right"}}` },
+        ]; };
         total = plotPts.length; applyNote = "each row falls to its side of the split";
-        viz = (applied) => svg([
+        viz = (applied, curRow) => svg([
           spAxis === "x" ? <line key="cut" x1={sx(thrPos)} y1={PYt} x2={sx(thrPos)} y2={PYb} stroke="#5b7cff" strokeWidth={2} /> : <line key="cut" x1={PX0} y1={sy(thrPos)} x2={PX1} y2={sy(thrPos)} stroke="#5b7cff" strokeWidth={2} />,
           <text key="cutl" x={spAxis === "x" ? sx(thrPos) + 4 : PX0 + 4} y={PYt + 12} fill="var(--faint)" fontSize={11} fontFamily="monospace">{featC} ≤ {fv(sp.thr, 1)}</text>,
-          ...plotPts.slice(0, applied).map((i, k) => { const left = X[i][sp.feat] <= sp.thr; return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={left ? 0.9 : 0.45} />; }),
+          ...plotPts.slice(0, applied).map((i, k) => { const left = X[i][sp.feat] <= sp.thr; return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={i === curRow ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={left ? 0.9 : 0.45} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />; }),
+          applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(f1.z[curRow])} r={7} fill={isReg ? "#5b7cff" : clsColor(curRow)} opacity={X[curRow][sp.feat] <= sp.thr ? 0.95 : 0.5} stroke="var(--text)" strokeWidth={1.5} /> : null,
           applied >= total && sp2 ? (sp2.feat === idxF
             ? <line key="cut2" x1={sx(thrPosOf(sp2.feat, sp2.thr))} y1={PYt} x2={sx(thrPosOf(sp2.feat, sp2.thr))} y2={PYb} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />
             : <line key="cut2" x1={PX0} y1={sy(thrPosOf(sp2.feat, sp2.thr))} x2={PX1} y2={sy(thrPosOf(sp2.feat, sp2.thr))} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />) : null,
@@ -1141,45 +1158,53 @@ ${evalBlock}`;
           { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: isReg ? "ŷ = (1/m) Σᵢ Tᵢ(x)" : "ŷ = mode{T₁…Tₘ}", val: isReg ? "avg" : String(winner) },
         ];
         const winnerC = (isReg ? "mean" : winner).toString().replace(/[^a-zA-Z0-9 ]/g, " ");
-        subSteps = [
-          { sym: "\\text{each } T_i: \\text{bootstrap} + \\text{random features}", sub: `\\text{sample } ${n} \\text{ rows with replacement}`, res: `${m} \\text{ trees}` },
-          { sym: "\\text{every tree predicts}", sub: `T_1..T_{${shown}} \\text{ each cast a vote}`, res: `${shown} \\text{ votes}` },
+        const voteLbl = (t: number) => (classes?.[votes[t]] ?? (votes[t] ? "B" : "A")).toString().replace(/[^a-zA-Z0-9 ]/g, " ");
+        exampleRow = 0; orderList = [...Array(shown).keys()]; total = shown;
+        chainFor = (t) => [
+          { sym: "\\text{each } T_i: \\text{bootstrap} + \\text{random features}", sub: `T_{${t + 1}}: \\text{sample } ${n} \\text{ rows}`, res: `\\text{tree } ${t + 1}` },
+          { sym: "\\text{every tree predicts}", sub: `T_{${t + 1}} \\to \\text{${voteLbl(t)}}`, res: `${shown} \\text{ votes}` },
           isReg
             ? { sym: "\\hat y = \\tfrac1m\\textstyle\\sum_i T_i(\\mathbf x)", sub: "\\text{average the tree outputs}", res: "\\hat y = \\text{mean}" }
             : { sym: "\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", sub: `\\text{majority of } ${shown}`, res: `\\Rightarrow \\text{${winnerC}}` },
         ];
-        total = shown; applyNote = "each tree casts its vote, then they aggregate";
-        viz = (applied) => svg(tx.map((x, i) => [
+        applyNote = "each tree casts its vote, then they aggregate";
+        viz = (applied, curRow, stage) => svg(tx.map((x, i) => { const show = applied > i || (applied === 0 && i === curRow && stage >= 2); const hot = applied === 0 && i === curRow; return [
           <line key={"a" + i} x1={x} y1={70} x2={x - 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
           <line key={"b" + i} x1={x} y1={70} x2={x + 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
-          <circle key={"n" + i} cx={x} cy={70} r={5} fill="#a855f7" />,
+          <circle key={"n" + i} cx={x} cy={70} r={hot ? 7 : 5} fill="#a855f7" stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />,
           <text key={"t" + i} x={x - 8} y={58} fill="var(--faint)" fontSize={11} fontFamily="monospace">T{i + 1}</text>,
-          applied > i ? <circle key={"vl" + i} cx={x - 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
-          applied > i ? <circle key={"vr" + i} cx={x + 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
-          applied > i ? <text key={"vt" + i} x={x - 10} y={150} fill={PAL_ML[votes[i]]} fontSize={11} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
+          show ? <circle key={"vl" + i} cx={x - 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
+          show ? <circle key={"vr" + i} cx={x + 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
+          show ? <text key={"vt" + i} x={x - 10} y={150} fill={PAL_ML[votes[i]]} fontSize={11} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
           applied >= total && i === 1 ? <text key="win" x={x - 44} y={196} fill="#f59e0b" fontSize={13} fontFamily="monospace">ŷ = {isReg ? "mean" : winner} (majority)</text> : null,
-        ]));
+        ]; }));
       }
     }
 
-    const maxStage = subSteps.length;
     const applied = Math.min(modelApplied, total);
+    // curRow: which row's numbers the formula shows — the example row while stepping,
+    // the row currently being applied once "apply to all rows" is running.
+    const curRow = applied > 0 ? (orderList[Math.min(applied, orderList.length) - 1] ?? exampleRow) : exampleRow;
+    const chains = chainFor(curRow);
+    const maxStage = chains.length;
+    const revealAll = applied > 0; // apply-to-all keeps every line visible, updating per row
+    const rowTag = kind === "forest" ? "tree" : "row";
     return mCard(`${label} — how it learns`, <>
       <div className="note" style={{ marginBottom: 10, lineHeight: 1.6 }}>{intro}</div>
       {varLegend(legend)}
       <div className="prep-2col">
         <div className="prep-col">
-          <div className="prep-col-h">the formula, filled in from your data</div>
-          {subSteps.map((s, i) => { const on = st >= i + 1; return <div key={i} className={`fx-chain ${on ? "on" : ""}`}>
+          <div className="prep-col-h">the formula — filled in from {applied > 0 ? `${rowTag} ${applied}` : "one example " + rowTag}</div>
+          {chains.map((s, i) => { const on = revealAll || st >= i + 1; return <div key={i} className={`fx-chain ${on ? "on" : ""}`}>
             <div className="fx-cl"><span className="fx-tag">formula</span><Katex tex={s.sym} /></div>
             {on && s.sub ? <div className="fx-cl"><span className="fx-tag">your numbers</span><Katex tex={s.sub} /></div> : null}
             {on && s.res ? <div className="fx-cl"><span className="fx-tag">result</span><span className="fx-res"><Katex tex={s.res} /></span></div> : null}
           </div>; })}
         </div>
         <div className="prep-col">
-          <div className="prep-col-h">applied across every row</div>
-          {viz(applied)}
-          <div className="note" style={{ marginTop: 8 }}>{applied >= total ? "applied to every row" : `${applyNote} — applied to ${applied} / ${total} rows`}</div>
+          <div className="prep-col-h">{applied > 0 ? "applied across every row" : "this row, executed"}</div>
+          {viz(applied, curRow, st)}
+          <div className="note" style={{ marginTop: 8 }}>{applied >= total ? "applied to every row" : (applied > 0 ? `${applyNote} — ${applied} / ${total} ${rowTag}s` : "step the formula to run this one row, then ▶ apply to all rows")}</div>
         </div>
       </div>
       {modelStageControls(maxStage, total)}
