@@ -38,6 +38,12 @@ export async function POST(req: Request) {
   if (rows.length > MAX_ROWS) return NextResponse.json({ error: `Too many rows to store (${rows.length}). Cap is ${MAX_ROWS} — add a Limit transform first.` }, { status: 413 });
   if (JSON.stringify(rows).length > 4_000_000) return NextResponse.json({ error: "Output is too large to store (over ~4 MB)." }, { status: 413 });
 
+  // Replace mode: overwrite any existing dataset(s) of the same name (upsert-by-name).
+  if (b.mode === "replace") {
+    const dupes = await db.select({ id: etlDatasets.id }).from(etlDatasets).where(and(eq(etlDatasets.userId, user.id), eq(etlDatasets.name, name)));
+    for (const d of dupes) { await db.delete(etlDatasetRows).where(eq(etlDatasetRows.datasetId, d.id)); await db.delete(etlDatasets).where(eq(etlDatasets.id, d.id)); }
+  }
+
   const dsId = uid();
   await db.insert(etlDatasets).values({ id: dsId, userId: user.id, name, cols, rowCount: rows.length });
   // Batch-insert rows.

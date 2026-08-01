@@ -23,10 +23,13 @@ export async function POST(req: Request) {
   const table = String(b.table || "").trim();
   const cols: string[] = Array.isArray(b.cols) ? b.cols.map(String) : [];
   const rows: Record<string, unknown>[] = Array.isArray(b.rows) ? b.rows : [];
+  const mode = b.mode === "upsert" ? "upsert" : "append";
+  const keyCol = String(b.keyCol || "");
 
   if (!/^mysql:\/\//i.test(url)) return NextResponse.json({ error: "Provide a mysql:// connection URL." }, { status: 400 });
   if (!ident(table)) return NextResponse.json({ error: "Table name must be letters/digits/underscore and start with a letter." }, { status: 400 });
   if (!cols.length || !cols.every(ident)) return NextResponse.json({ error: "Column names must be valid SQL identifiers (letters/digits/underscore)." }, { status: 400 });
+  if (mode === "upsert" && (!keyCol || !cols.includes(keyCol))) return NextResponse.json({ error: "Upsert needs a key column that exists in the output." }, { status: 400 });
   if (!rows.length) return NextResponse.json({ error: "Nothing to store — the output is empty." }, { status: 400 });
   if (rows.length > MAX_ROWS) return NextResponse.json({ error: `Too many rows (${rows.length}). Cap is ${MAX_ROWS} — add a Limit first.` }, { status: 413 });
   if (JSON.stringify(rows).length > 4_000_000) return NextResponse.json({ error: "Output is too large (over ~4 MB)." }, { status: 413 });
@@ -50,14 +53,31 @@ export async function POST(req: Request) {
       ssl: u.hostname.includes("tidbcloud.com") ? { minVersion: "TLSv1.2", rejectUnauthorized: true } : undefined,
       connectTimeout: 12000,
     });
-    await conn.query(`CREATE TABLE IF NOT EXISTS \`${table}\` (${colTypes.join(", ")})`);
+    // Schema-drift preflight: if the table already exists, its columns must
+    // cover the output — otherwise the insert would fail confusingly.
+    const [ex] = await conn.query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?", [table]) as [Array<{ COLUMN_NAME: string }>, unknown];
+    const existingCols = (ex || []).map((r) => r.COLUMN_NAME);
+    const tableExisted = existingCols.length > 0;
+    if (tableExisted) {
+      const missing = cols.filter((c) => !existingCols.includes(c));
+      if (missing.length) return NextResponse.json({ error: `Schema drift — the existing table \`${table}\` is missing column(s): ${missing.join(", ")}. Load into a new table, or add those columns first.`, drift: { missing, extra: existingCols.filter((c) => !cols.includes(c)) } }, { status: 409 });
+    } else {
+      await conn.query(`CREATE TABLE \`${table}\` (${colTypes.join(", ")})`);
+    }
+
+    if (mode === "upsert") {
+      // Best-effort unique key on the key column so ON DUPLICATE KEY works.
+      await conn.query(`ALTER TABLE \`${table}\` ADD UNIQUE KEY \`uk_${keyCol}\` (\`${keyCol}\`)`).catch(() => {});
+    }
+
     const colList = cols.map((c) => `\`${c}\``).join(", ");
+    const onDup = mode === "upsert" ? ` ON DUPLICATE KEY UPDATE ${cols.filter((c) => c !== keyCol).map((c) => `\`${c}\`=VALUES(\`${c}\`)`).join(", ")}` : "";
     const toVal = (v: unknown) => (v == null ? null : typeof v === "object" ? JSON.stringify(v) : v);
     for (let i = 0; i < rows.length; i += 500) {
       const batch = rows.slice(i, i + 500).map((r) => cols.map((c) => toVal(r[c])));
-      await conn.query(`INSERT INTO \`${table}\` (${colList}) VALUES ?`, [batch]);
+      await conn.query(`INSERT INTO \`${table}\` (${colList}) VALUES ?${onDup}`, [batch]);
     }
-    return NextResponse.json({ ok: true, table, rowCount: rows.length });
+    return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted });
   } catch (e) {
     return NextResponse.json({ error: `Database error: ${(e as Error).message}` }, { status: 502 });
   } finally {

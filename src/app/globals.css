@@ -259,6 +259,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .qc-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
 .qc-dot.ok{background:var(--good)}
 .qc-dot.bad{background:var(--crit)}
+.qc-dot.warn{background:var(--warn)}
 /* embeddable widget */
 .embed-wrap{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-size:13px}
 .embed-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px}

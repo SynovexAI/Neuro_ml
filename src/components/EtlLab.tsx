@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseRecords, sampleSources, runPipeline, toCSV, toJSON, tableFromRecords, profile, evaluate, lineage,
-  OP_META, RULE_META, ruleDesc,
-  type Table, type EtlOp, type OpType, type Expectation, type RuleType,
+  OP_META, RULE_META, ACTION_META, ruleDesc,
+  type Table, type EtlOp, type OpType, type Expectation, type RuleType, type RuleAction,
 } from "@/lib/etlUtils";
 import { toast, confirmDialog } from "@/lib/toast";
 import { runSql } from "@/lib/sqlEngine";
@@ -93,6 +93,11 @@ export default function EtlLab() {
   const [sqlResult, setSqlResult] = useState<Table | null>(null);
   const [sqlErr, setSqlErr] = useState("");
   const [sqlBusy, setSqlBusy] = useState(false);
+  const [storeMode, setStoreMode] = useState<"new" | "replace">("new");
+  const [extMode, setExtMode] = useState<"append" | "upsert">("append");
+  const [extKey, setExtKey] = useState("");
+  const [models, setModels] = useState<{ name: string; sql: string }[]>([]);
+  const [modelName, setModelName] = useState("");
 
   const fileRef = useRef<HTMLInputElement>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -117,6 +122,8 @@ export default function EtlLab() {
       if (c.mode) setMode(c.mode);
       if (Array.isArray(c.ops)) setOps(c.ops.map((o: EtlOp) => ({ ...o, id: rid() })));
       if (Array.isArray(c.rules)) setRules(c.rules.map((r: Expectation) => ({ ...r, id: rid() })));
+      if (Array.isArray(c.models)) setModels(c.models);
+      if (c.pipeMode === "elt" || c.pipeMode === "etl") setPipeMode(c.pipeMode);
     }).catch(() => {});
   }, []);
   function loadJson(text: string, name: string) {
@@ -219,9 +226,9 @@ export default function EtlLab() {
   async function storePlatform(t: Table) {
     setStoreBusy(true);
     try {
-      const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: storeName || srcName || "ETL output", cols: t.cols, rows: t.rows }) });
+      const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: storeName || srcName || "ETL output", cols: t.cols, rows: t.rows, mode: storeMode }) });
       const j = await r.json().catch(() => null);
-      if (r.ok) { toast(`Stored ${j.rowCount} rows to the platform database`, "success"); setStoreName(""); loadStored(); }
+      if (r.ok) { toast(`${storeMode === "replace" ? "Replaced" : "Stored"} ${j.rowCount} rows in the platform database`, "success"); setStoreName(""); loadStored(); }
       else toast(j?.error || "Store failed", "error");
     } catch (e) { toast((e as Error).message, "error"); }
     setStoreBusy(false);
@@ -229,20 +236,35 @@ export default function EtlLab() {
   async function storeExternal(t: Table) {
     setStoreBusy(true);
     try {
-      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: extUrl, table: extTable, cols: t.cols, rows: t.rows }) });
+      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: extUrl, table: extTable, cols: t.cols, rows: t.rows, mode: extMode, keyCol: extKey || t.cols[0] }) });
       const j = await r.json().catch(() => null);
-      if (r.ok) toast(`Loaded ${j.rowCount} rows into \`${j.table}\` on your database`, "success");
+      if (r.ok) toast(`${extMode === "upsert" ? "Upserted" : "Loaded"} ${j.rowCount} rows into \`${j.table}\` on your database`, "success");
       else toast(j?.error || "Load failed", "error");
     } catch (e) { toast((e as Error).message, "error"); }
     setStoreBusy(false);
   }
+  // Compute all saved ELT models in order (each can query the earlier ones).
+  async function computeModels(): Promise<{ name: string; table: Table }[]> {
+    if (!srcTable) return [];
+    const acc: { name: string; table: Table }[] = [];
+    for (const m of models) { acc.push({ name: m.name, table: await runSql(m.sql, srcTable, srcTableB, acc) }); }
+    return acc;
+  }
   async function runSqlNow() {
     if (!srcTable) return;
     setSqlBusy(true); setSqlErr("");
-    try { setSqlResult(await runSql(sqlText, srcTable, srcTableB)); }
+    try { const ms = await computeModels(); setSqlResult(await runSql(sqlText, srcTable, srcTableB, ms)); }
     catch (e) { setSqlErr((e as Error).message); setSqlResult(null); }
     setSqlBusy(false);
   }
+  function saveModel() {
+    const nm = modelName.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(nm)) { toast("Model name must be a valid identifier (letters/digits/underscore).", "error"); return; }
+    if (nm === "raw" || nm === "b") { toast("“raw” and “b” are reserved.", "error"); return; }
+    setModels((ms) => [...ms.filter((x) => x.name !== nm), { name: nm, sql: sqlText }]);
+    setModelName(""); toast(`Saved model “${nm}”`, "success");
+  }
+  const removeModel = (i: number) => setModels((ms) => ms.filter((_, j) => j !== i));
   async function downloadStored(id: string, name: string) {
     const j = await fetch(`/api/etl/store?id=${id}`).then((r) => r.json()).catch(() => null);
     if (!j?.dataset) { toast("Could not load dataset", "error"); return; }
@@ -304,7 +326,7 @@ ${mode === "stream"
   }
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
   async function saveProject() {
-    const config = { srcName, mode, ops, rules };
+    const config = { srcName, mode, ops, rules, models, pipeMode };
     try { const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "etl", name: srcName || "ETL pipeline", config }) }); setSavedMsg(r.ok ? "Saved ✓" : "Save failed"); }
     catch { setSavedMsg("Save failed"); }
     setTimeout(() => setSavedMsg(""), 2000);
@@ -347,6 +369,7 @@ ${mode === "stream"
         <button className={storeTarget === "external" ? "on" : ""} onClick={() => setStoreTarget("external")}>External DB</button>
       </div>
       {storeTarget === "platform" ? (<>
+        <div className="seg" style={{ maxWidth: 280, marginBottom: 8 }}><button className={storeMode === "new" ? "on" : ""} onClick={() => setStoreMode("new")}>New snapshot</button><button className={storeMode === "replace" ? "on" : ""} onClick={() => setStoreMode("replace")}>Replace same name</button></div>
         <div className="row" style={{ gap: 8 }}><input type="text" placeholder="dataset name" value={storeName} onChange={(e) => setStoreName(e.target.value)} /><button className="btn sm" onClick={() => storePlatform(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Storing…" : "🗄 Store"}</button></div>
         <div className="row" style={{ alignItems: "center", marginTop: 14 }}><label className="fld" style={{ margin: 0 }}>Stored datasets</label><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadStored}>↻ Refresh</button></div>
         {stored.length === 0 ? <div className="note" style={{ marginTop: 8 }}>None yet.</div> : (
@@ -364,8 +387,11 @@ ${mode === "stream"
         <label className="fld">Your MySQL / TiDB connection URL</label>
         <input type="text" value={extUrl} onChange={(e) => setExtUrl(e.target.value)} placeholder="mysql://user:pass@host:4000/db" />
         <label className="fld" style={{ marginTop: 10 }}>Target table name</label>
-        <div className="row" style={{ gap: 8 }}><input type="text" value={extTable} onChange={(e) => setExtTable(e.target.value)} /><button className="btn sm" onClick={() => storeExternal(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Loading…" : "🛢 Load to my DB"}</button></div>
-        <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">🔒</span><span>Connects to <b>your</b> database, creates the table if needed (types inferred), and appends the rows. Credentials are used only for this request. Private/internal hosts are blocked.</span></div>
+        <input type="text" value={extTable} onChange={(e) => setExtTable(e.target.value)} />
+        <div className="seg" style={{ maxWidth: 280, margin: "10px 0" }}><button className={extMode === "append" ? "on" : ""} onClick={() => setExtMode("append")}>Append</button><button className={extMode === "upsert" ? "on" : ""} onClick={() => setExtMode("upsert")}>Upsert</button></div>
+        {extMode === "upsert" && <div className="insp-field" style={{ marginBottom: 10 }}><div className="k">Key column (insert new / update existing on this)</div><select value={extKey || t.cols[0]} onChange={(e) => setExtKey(e.target.value)}>{t.cols.map((c) => <option key={c}>{c}</option>)}</select></div>}
+        <button className="btn sm" onClick={() => storeExternal(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Loading…" : "🛢 Load to my DB"}</button>
+        <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">🔒</span><span>Connects to <b>your</b> database, creates the table if missing (types inferred), then {extMode === "upsert" ? "inserts new rows and updates existing ones on the key" : "appends the rows"}. Warns on <b>schema drift</b>. Credentials are used only for this request; private/internal hosts are blocked.</span></div>
       </>)}
     </div>
   );
@@ -628,7 +654,7 @@ ${mode === "stream"
             <div className="card">
               <div className="card-h"><span className="t">Data-quality expectations</span><div className="r"><button className="btn ghost sm" onClick={addRule}>+ Add rule</button></div></div>
               <div className="card-b">
-                <div className="note" style={{ marginBottom: 10 }}>Rows failing any rule are routed to a <b>rejects</b> sink (dead-letter) with reasons; the rest flow on to Deliver.</div>
+                <div className="note" style={{ marginBottom: 10 }}>Each rule has an action — <b>Reject</b> (quarantine to dead-letter), <b>Drop</b>, <b>Fix</b> (auto-repair: fill / clamp / dedupe), or <b>Warn</b>. Clean rows flow on to Deliver.</div>
                 {rules.length === 0 && <div className="note">No rules yet — add one to validate the output.</div>}
                 {rules.map((r) => (
                   <div key={r.id} className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -636,21 +662,25 @@ ${mode === "stream"
                     <select value={r.type} onChange={(e) => patchRule(r.id, { type: e.target.value as RuleType })} style={{ maxWidth: 150 }}>{(Object.keys(RULE_META) as RuleType[]).map((t) => <option key={t} value={t}>{RULE_META[t].label}</option>)}</select>
                     {r.type === "in_range" && <><input type="text" placeholder="min" value={r.min ?? ""} onChange={(e) => patchRule(r.id, { min: e.target.value })} style={{ maxWidth: 80 }} /><input type="text" placeholder="max" value={r.max ?? ""} onChange={(e) => patchRule(r.id, { max: e.target.value })} style={{ maxWidth: 80 }} /></>}
                     {r.type === "regex" && <input type="text" placeholder="pattern" value={r.pattern ?? ""} onChange={(e) => patchRule(r.id, { pattern: e.target.value })} style={{ maxWidth: 180 }} />}
-                    {r.type === "in_set" && <input type="text" placeholder="a, b, c" value={r.set ?? ""} onChange={(e) => patchRule(r.id, { set: e.target.value })} style={{ maxWidth: 180 }} />}
-                    <span className="note" style={{ flex: 1 }}>{RULE_META[r.type].hint}</span>
+                    {r.type === "in_set" && <input type="text" placeholder="a, b, c" value={r.set ?? ""} onChange={(e) => patchRule(r.id, { set: e.target.value })} style={{ maxWidth: 150 }} />}
+                    <span className="note">→</span>
+                    <select value={r.action || "reject"} onChange={(e) => patchRule(r.id, { action: e.target.value as RuleAction })} style={{ maxWidth: 120 }} title={ACTION_META[r.action || "reject"].hint}>{(Object.keys(ACTION_META) as RuleAction[]).map((a) => <option key={a} value={a}>{ACTION_META[a].label}</option>)}</select>
+                    {r.action === "fix" && r.type !== "unique" && r.type !== "in_range" && <input type="text" placeholder="fill value" value={r.fix ?? ""} onChange={(e) => patchRule(r.id, { fix: e.target.value })} style={{ maxWidth: 100 }} />}
+                    <span className="note" style={{ flex: 1 }} />
                     <button className="btn ghost sm" onClick={() => removeRule(r.id)}>×</button>
                   </div>
                 ))}
                 {rules.length > 0 && (<>
                   <div className="etl-metrics" style={{ margin: "14px 0" }}>
                     <div className="m">rules<b>{rules.length}</b></div>
-                    <div className="m">passed<b style={{ color: "var(--good)" }}>{qc.clean.rows.length}</b></div>
+                    <div className="m">clean out<b style={{ color: "var(--good)" }}>{qc.clean.rows.length}</b></div>
+                    <div className="m">fixed<b style={{ color: qc.fixedCells ? "var(--sky)" : undefined }}>{qc.fixedCells}</b></div>
+                    <div className="m">dropped<b>{qc.dropped}</b></div>
                     <div className="m">rejected<b style={{ color: qc.rejects.length ? "var(--crit)" : undefined }}>{qc.rejects.length}</b></div>
-                    <div className="m">pass rate<b>{pipe.final.rows.length ? Math.round((qc.clean.rows.length / pipe.final.rows.length) * 100) : 100}%</b></div>
                   </div>
                   <label className="fld">Report</label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
-                    {qc.report.map((rp) => <div key={rp.id} className="qc-row"><span className={`qc-dot ${rp.ok ? "ok" : "bad"}`} />{rp.desc}<span className="r mono" style={{ marginLeft: "auto", color: rp.ok ? "var(--good)" : "var(--crit)" }}>{rp.ok ? "PASS" : `${rp.fails} failed`}</span></div>)}
+                    {qc.report.map((rp) => <div key={rp.id} className="qc-row"><span className={`qc-dot ${rp.ok ? "ok" : rp.action === "reject" ? "bad" : "warn"}`} />{rp.desc}<span className="badge" style={{ marginLeft: 8 }}>{ACTION_META[rp.action].label}</span><span className="r mono" style={{ marginLeft: "auto", color: rp.ok ? "var(--good)" : rp.action === "reject" ? "var(--crit)" : "var(--warn)" }}>{rp.ok ? "PASS" : `${rp.fails} hit${rp.action === "fix" ? ` · ${rp.fixed} fixed` : rp.action === "drop" ? " · dropped" : rp.action === "warn" ? " · warned" : ""}`}</span></div>)}
                   </div>
                   {qc.rejects.length > 0 && (<>
                     <div className="row" style={{ alignItems: "center" }}><label className="fld" style={{ margin: 0 }}>Rejects (dead-letter) — {qc.rejects.length} rows</label><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => download(toCSV({ cols: [...pipe.final.cols, "_reasons"], rows: qc.rejects.map((rj) => ({ ...rj.row, _reasons: rj.reasons.join("; ") })) }), "rejects.csv", "text/csv")}>⬇ Download rejects</button></div>
@@ -727,8 +757,13 @@ ${mode === "stream"
           <div className="card">
             <div className="card-h"><span className="t">Transform with SQL</span><div className="r"><button className="btn sm" onClick={runSqlNow} disabled={sqlBusy}>{sqlBusy ? <><span className="busy-dot" />running…</> : "▶ Run SQL"}</button></div></div>
             <div className="card-b">
-              <div className="note" style={{ marginBottom: 8 }}>Real SQL over the landed data (dbt-style). Tables: <code>raw</code>{srcTableB ? <> and <code>b</code> (Source B)</> : ""}. Supports SELECT / WHERE / JOIN / GROUP BY / aggregates / ORDER BY / LIMIT.</div>
+              <div className="note" style={{ marginBottom: 8 }}>Real SQL over the landed data (dbt-style). Tables: <code>raw</code>{srcTableB ? <>, <code>b</code></> : ""}{models.length ? <> + your models ({models.map((m) => m.name).join(", ")})</> : ""}. Supports SELECT / WHERE / JOIN / GROUP BY / aggregates / ORDER BY / LIMIT.</div>
               <textarea rows={8} value={sqlText} onChange={(e) => setSqlText(e.target.value)} spellCheck={false} />
+              <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                <label className="fld">Models <span className="note">— save a query as a named table; later models &amp; the editor can query it (mini-dbt)</span></label>
+                <div className="row" style={{ gap: 8 }}><input type="text" placeholder="model name (e.g. paid_orders)" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ maxWidth: 240 }} /><button className="btn ghost sm" onClick={saveModel} disabled={!modelName.trim()}>+ Save current SQL as model</button></div>
+                {models.length > 0 && <div className="chips" style={{ marginTop: 8 }}>{models.map((m, i) => <span key={i} className="chip" style={{ cursor: "pointer" }} onClick={() => setSqlText(m.sql)} title="click to load into the editor">{m.name} <b onClick={(e) => { e.stopPropagation(); removeModel(i); }} style={{ color: "var(--faint)" }}>×</b></span>)}</div>}
+              </div>
               {sqlErr && <div className="err" style={{ marginTop: 10 }}>{sqlErr}</div>}
               {sqlResult && (<>
                 <label className="fld" style={{ marginTop: 14 }}>Result — {sqlResult.rows.length} rows × {sqlResult.cols.length} cols</label>

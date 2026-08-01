@@ -320,9 +320,10 @@ export function runPipeline(src: Table, ops: EtlOp[], ctx?: OpCtx): { stages: { 
   return { stages, final: cur };
 }
 
-// ── Data-quality expectations (Great-Expectations-style) ──
+// ── Data-quality expectations (Great-Expectations-style) with remediation ──
 export type RuleType = "not_null" | "unique" | "in_range" | "regex" | "in_set";
-export interface Expectation { id: string; col: string; type: RuleType; min?: string; max?: string; pattern?: string; set?: string; }
+export type RuleAction = "reject" | "drop" | "fix" | "warn";
+export interface Expectation { id: string; col: string; type: RuleType; min?: string; max?: string; pattern?: string; set?: string; action?: RuleAction; fix?: string; }
 export const RULE_META: Record<RuleType, { label: string; hint: string }> = {
   not_null: { label: "Not null", hint: "every value must be present" },
   unique: { label: "Unique", hint: "no duplicate values in the column" },
@@ -330,43 +331,71 @@ export const RULE_META: Record<RuleType, { label: string; hint: string }> = {
   regex: { label: "Matches regex", hint: "text value must match the pattern" },
   in_set: { label: "In set", hint: "value must be one of a comma-separated list" },
 };
+export const ACTION_META: Record<RuleAction, { label: string; hint: string }> = {
+  reject: { label: "Reject", hint: "quarantine the row to the rejects sink with reasons" },
+  drop: { label: "Drop", hint: "remove the row entirely" },
+  fix: { label: "Fix", hint: "auto-repair the value (fill / clamp / default; dedupe for unique)" },
+  warn: { label: "Warn only", hint: "keep the row, just count the violation" },
+};
 export function ruleDesc(r: Expectation): string {
   if (r.type === "in_range") return `${r.col} in [${r.min ?? "-∞"}, ${r.max ?? "∞"}]`;
   if (r.type === "regex") return `${r.col} ~ /${r.pattern ?? ""}/`;
   if (r.type === "in_set") return `${r.col} ∈ {${r.set ?? ""}}`;
   return `${r.col} — ${RULE_META[r.type].label}`;
 }
-function rowPassesRule(v: Cell, r: Expectation, dupValues: Set<string>): boolean {
+// Non-unique pass check (unique is stateful → handled in the loop for keep-first).
+function passesSingle(v: Cell, r: Expectation): boolean {
   switch (r.type) {
     case "not_null": return v != null && v !== "";
-    case "unique": return !dupValues.has(String(v));
     case "in_range": { const n = numify(v); if (isNaN(n)) return false; if (r.min != null && r.min !== "" && n < Number(r.min)) return false; if (r.max != null && r.max !== "" && n > Number(r.max)) return false; return true; }
     case "regex": { try { return new RegExp(r.pattern || "").test(String(v ?? "")); } catch { return true; } }
     case "in_set": { const set = (r.set || "").split(",").map((s) => s.trim()); return set.includes(String(v)); }
+    default: return true;
+  }
+}
+function fixCell(r: Expectation, cur: Cell): Cell {
+  const raw = r.fix ?? "";
+  const coerced: Cell = raw !== "" && !isNaN(Number(raw)) ? Number(raw) : raw;
+  switch (r.type) {
+    case "not_null": return raw === "" ? 0 : coerced;
+    case "in_range": { let n = numify(cur); if (isNaN(n)) return r.min != null && r.min !== "" ? Number(r.min) : (coerced || 0); if (r.min != null && r.min !== "" && n < Number(r.min)) n = Number(r.min); if (r.max != null && r.max !== "" && n > Number(r.max)) n = Number(r.max); return n; }
+    case "in_set": { if (raw !== "") return coerced; const first = (r.set || "").split(",").map((s) => s.trim()).filter(Boolean)[0]; return first ?? cur; }
+    case "regex": return raw === "" ? "" : coerced;
+    default: return cur;
   }
 }
 export function evaluate(t: Table, rules: Expectation[]): {
-  report: { id: string; desc: string; ok: boolean; fails: number }[];
+  report: { id: string; desc: string; ok: boolean; fails: number; action: RuleAction; fixed: number }[];
   clean: Table; rejects: { row: Rec; reasons: string[] }[];
+  dropped: number; warned: number; fixedCells: number;
 } {
-  // Precompute duplicate value sets for any 'unique' rule.
-  const dupByRule = new Map<string, Set<string>>();
-  rules.filter((r) => r.type === "unique").forEach((r) => {
-    const counts = new Map<string, number>();
-    t.rows.forEach((row) => { const k = String(row[r.col]); counts.set(k, (counts.get(k) || 0) + 1); });
-    dupByRule.set(r.id, new Set([...counts.entries()].filter(([, c]) => c > 1).map(([k]) => k)));
-  });
   const fails = new Map<string, number>(rules.map((r) => [r.id, 0]));
+  const fixedBy = new Map<string, number>(rules.map((r) => [r.id, 0]));
+  const seenByRule = new Map<string, Set<string>>(); // unique → values seen (keep-first)
   const clean: Rec[] = []; const rejects: { row: Rec; reasons: string[] }[] = [];
+  let dropped = 0, warned = 0, fixedCells = 0;
   for (const row of t.rows) {
-    const reasons: string[] = [];
+    const work: Rec = { ...row };
+    let reject = false, drop = false; const reasons: string[] = [];
     for (const r of rules) {
-      if (!rowPassesRule(row[r.col], r, dupByRule.get(r.id) || new Set())) { reasons.push(ruleDesc(r)); fails.set(r.id, (fails.get(r.id) || 0) + 1); }
+      const cur = work[r.col];
+      let pass: boolean;
+      if (r.type === "unique") { const s = seenByRule.get(r.id) || new Set<string>(); const k = String(cur); pass = !s.has(k); if (pass) s.add(k); seenByRule.set(r.id, s); }
+      else pass = passesSingle(cur, r);
+      if (pass) continue;
+      fails.set(r.id, (fails.get(r.id) || 0) + 1);
+      const action = r.action || "reject";
+      if (action === "warn") warned++;
+      else if (action === "drop") drop = true;
+      else if (action === "fix") { if (r.type === "unique") { drop = true; } else { work[r.col] = fixCell(r, cur); fixedCells++; fixedBy.set(r.id, (fixedBy.get(r.id) || 0) + 1); } }
+      else { reject = true; reasons.push(ruleDesc(r)); }
     }
-    if (reasons.length) rejects.push({ row, reasons }); else clean.push(row);
+    if (reject) rejects.push({ row: work, reasons });
+    else if (drop) dropped++;
+    else clean.push(work);
   }
-  const report = rules.map((r) => ({ id: r.id, desc: ruleDesc(r), ok: (fails.get(r.id) || 0) === 0, fails: fails.get(r.id) || 0 }));
-  return { report, clean: { cols: t.cols, rows: clean }, rejects };
+  const report = rules.map((r) => ({ id: r.id, desc: ruleDesc(r), ok: (fails.get(r.id) || 0) === 0, fails: fails.get(r.id) || 0, action: r.action || "reject", fixed: fixedBy.get(r.id) || 0 }));
+  return { report, clean: { cols: t.cols, rows: clean }, rejects, dropped, warned, fixedCells };
 }
 
 // ── Column-level lineage: which source columns feed each output column ──
