@@ -10,6 +10,19 @@ const nextConfig: NextConfig = {
   // Document parsers are heavy Node libs — keep them out of the bundle so the
   // /api/rag/extract route requires them at runtime (avoids pdfjs bundling issues).
   serverExternalPackages: ["pdf-parse", "mammoth", "xlsx"],
+  webpack: (config) => {
+    // alasql (ELT SQL engine) optionally requires React-Native / fs modules for
+    // its Node file APIs. We only run in-memory SQL, so stub them out to keep the
+    // browser bundle clean.
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "react-native-fs": false,
+      "react-native-fetch-blob": false,
+      "react-native": false,
+    };
+    config.resolve.fallback = { ...config.resolve.fallback, fs: false, path: false };
+    return config;
+  },
 };
 
 export default nextConfig;

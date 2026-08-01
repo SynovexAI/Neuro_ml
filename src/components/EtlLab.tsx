@@ -7,8 +7,10 @@ import {
   type Table, type EtlOp, type OpType, type Expectation, type RuleType,
 } from "@/lib/etlUtils";
 import { toast, confirmDialog } from "@/lib/toast";
+import { runSql } from "@/lib/sqlEngine";
 
 type Step = "extract" | "transform" | "load";
+type PipeMode = "etl" | "elt";
 type LoadTab = "run" | "quality" | "deliver" | "schedule" | "lineage";
 const rid = () => Math.random().toString(36).slice(2, 9);
 
@@ -44,6 +46,7 @@ function download(text: string, filename: string, mime: string) {
 
 export default function EtlLab() {
   const [step, setStep] = useState<Step>("extract");
+  const [pipeMode, setPipeMode] = useState<PipeMode>("etl");
   const [srcTable, setSrcTable] = useState<Table | null>(null);
   const [srcName, setSrcName] = useState("");
   const [srcTab, setSrcTab] = useState<"sample" | "upload" | "json" | "db">("sample");
@@ -81,6 +84,15 @@ export default function EtlLab() {
   const [schedEvery, setSchedEvery] = useState(5);
   const [schedOn, setSchedOn] = useState(false);
   const [schedRuns, setSchedRuns] = useState<{ t: string; inn: number; out: number; rej: number }[]>([]);
+
+  // store target (both ETL + ELT) + ELT SQL transform
+  const [storeTarget, setStoreTarget] = useState<"platform" | "external">("platform");
+  const [extUrl, setExtUrl] = useState("mysql://user:pass@host:4000/db");
+  const [extTable, setExtTable] = useState("etl_output");
+  const [sqlText, setSqlText] = useState("SELECT region,\n       COUNT(*) AS orders,\n       ROUND(SUM(amount), 2) AS revenue\nFROM raw\nWHERE status = 'paid'\nGROUP BY region\nORDER BY revenue DESC");
+  const [sqlResult, setSqlResult] = useState<Table | null>(null);
+  const [sqlErr, setSqlErr] = useState("");
+  const [sqlBusy, setSqlBusy] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -204,16 +216,32 @@ export default function EtlLab() {
   async function loadStored() { try { const j = await fetch("/api/etl/store").then((r) => r.json()); setStored(j.datasets || []); } catch { setStored([]); } }
   useEffect(() => { if (step === "load" && loadTab === "deliver") loadStored(); }, [step, loadTab]);
 
-  async function storeToDb() {
-    if (!deliver) return;
+  async function storePlatform(t: Table) {
     setStoreBusy(true);
     try {
-      const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: storeName || srcName || "ETL output", cols: deliver.cols, rows: deliver.rows }) });
+      const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: storeName || srcName || "ETL output", cols: t.cols, rows: t.rows }) });
       const j = await r.json().catch(() => null);
-      if (r.ok) { toast(`Stored ${j.rowCount} rows to the database`, "success"); setStoreName(""); loadStored(); }
+      if (r.ok) { toast(`Stored ${j.rowCount} rows to the platform database`, "success"); setStoreName(""); loadStored(); }
       else toast(j?.error || "Store failed", "error");
     } catch (e) { toast((e as Error).message, "error"); }
     setStoreBusy(false);
+  }
+  async function storeExternal(t: Table) {
+    setStoreBusy(true);
+    try {
+      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: extUrl, table: extTable, cols: t.cols, rows: t.rows }) });
+      const j = await r.json().catch(() => null);
+      if (r.ok) toast(`Loaded ${j.rowCount} rows into \`${j.table}\` on your database`, "success");
+      else toast(j?.error || "Load failed", "error");
+    } catch (e) { toast((e as Error).message, "error"); }
+    setStoreBusy(false);
+  }
+  async function runSqlNow() {
+    if (!srcTable) return;
+    setSqlBusy(true); setSqlErr("");
+    try { setSqlResult(await runSql(sqlText, srcTable, srcTableB)); }
+    catch (e) { setSqlErr((e as Error).message); setSqlResult(null); }
+    setSqlBusy(false);
   }
   async function downloadStored(id: string, name: string) {
     const j = await fetch(`/api/etl/store?id=${id}`).then((r) => r.json()).catch(() => null);
@@ -311,6 +339,37 @@ ${mode === "stream"
     </tbody></table></div>
   );
 
+  // Shared "load to a database" box — platform DB or the user's own external DB.
+  const storeBox = (t: Table) => (
+    <div>
+      <div className="seg" style={{ maxWidth: 320, marginBottom: 10 }}>
+        <button className={storeTarget === "platform" ? "on" : ""} onClick={() => setStoreTarget("platform")}>Platform DB</button>
+        <button className={storeTarget === "external" ? "on" : ""} onClick={() => setStoreTarget("external")}>External DB</button>
+      </div>
+      {storeTarget === "platform" ? (<>
+        <div className="row" style={{ gap: 8 }}><input type="text" placeholder="dataset name" value={storeName} onChange={(e) => setStoreName(e.target.value)} /><button className="btn sm" onClick={() => storePlatform(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Storing…" : "🗄 Store"}</button></div>
+        <div className="row" style={{ alignItems: "center", marginTop: 14 }}><label className="fld" style={{ margin: 0 }}>Stored datasets</label><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadStored}>↻ Refresh</button></div>
+        {stored.length === 0 ? <div className="note" style={{ marginTop: 8 }}>None yet.</div> : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+            {stored.map((d) => (
+              <div key={d.id} className="row" style={{ alignItems: "center", gap: 10, border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px" }}>
+                <span>🗄</span><b style={{ fontSize: 13 }}>{d.name}</b><span className="note">{d.rowCount} rows</span><span style={{ flex: 1 }} />
+                <button className="btn ghost sm" onClick={() => downloadStored(d.id, d.name)}>Download</button>
+                <button className="btn ghost sm danger" onClick={() => deleteStored(d.id)}>Delete</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </>) : (<>
+        <label className="fld">Your MySQL / TiDB connection URL</label>
+        <input type="text" value={extUrl} onChange={(e) => setExtUrl(e.target.value)} placeholder="mysql://user:pass@host:4000/db" />
+        <label className="fld" style={{ marginTop: 10 }}>Target table name</label>
+        <div className="row" style={{ gap: 8 }}><input type="text" value={extTable} onChange={(e) => setExtTable(e.target.value)} /><button className="btn sm" onClick={() => storeExternal(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Loading…" : "🛢 Load to my DB"}</button></div>
+        <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">🔒</span><span>Connects to <b>your</b> database, creates the table if needed (types inferred), and appends the rows. Credentials are used only for this request. Private/internal hosts are blocked.</span></div>
+      </>)}
+    </div>
+  );
+
   return (
     <>
       <div className="lab-head">
@@ -318,12 +377,22 @@ ${mode === "stream"
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{savedMsg || "💾 Save"}</button><button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code (PySpark)</button></div>
       </div>
       {msg && <div className="err">{msg}</div>}
-      <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> Transforms run for real on your rows in the browser so you can watch each stage. For production scale, use the <b>Get code (PySpark)</b> export.</span></div>
+
+      <div className="row" style={{ alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <div className="seg" style={{ width: 260 }}>
+          <button className={pipeMode === "etl" ? "on" : ""} onClick={() => { setPipeMode("etl"); setStep("extract"); }}>ETL</button>
+          <button className={pipeMode === "elt" ? "on" : ""} onClick={() => { setPipeMode("elt"); setStep("extract"); }}>ELT</button>
+        </div>
+        <span className="note" style={{ flex: 1, minWidth: 220 }}>{pipeMode === "elt"
+          ? "ELT — load raw first, then transform in SQL. The modern default (Snowflake / BigQuery + dbt)."
+          : "ETL — transform before load. Best for streaming, PII masking, or constrained targets."}</span>
+      </div>
+      <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> {pipeMode === "elt" ? <>Raw data lands first, then you transform it with <b>real SQL</b> in-browser. </> : <>Transforms run for real on your rows so you can watch each stage. </>}For production scale, use the <b>Get code (PySpark)</b> export.</span></div>
 
       <div className="stepper">
         <button className={step === "extract" ? "on" : ""} onClick={() => setStep("extract")}><b>1</b>Extract</button>
-        <button className={step === "transform" ? "on" : ""} disabled={!srcTable} onClick={() => setStep("transform")}><b>2</b>Transform</button>
-        <button className={step === "load" ? "on" : ""} disabled={!srcTable} onClick={() => setStep("load")}><b>3</b>Load &amp; Run</button>
+        <button className={step === "transform" ? "on" : ""} disabled={!srcTable} onClick={() => setStep("transform")}><b>2</b>{pipeMode === "elt" ? "Load raw" : "Transform"}</button>
+        <button className={step === "load" ? "on" : ""} disabled={!srcTable} onClick={() => setStep("load")}><b>3</b>{pipeMode === "elt" ? "Transform (SQL)" : "Load & Run"}</button>
       </div>
 
       {/* STEP 1 — EXTRACT */}
@@ -388,8 +457,22 @@ ${mode === "stream"
         </div>
       )}
 
-      {/* STEP 2 — TRANSFORM */}
-      {step === "transform" && srcTable && (
+      {/* STEP 2 (ELT) — LOAD RAW */}
+      {step === "transform" && srcTable && pipeMode === "elt" && (
+        <div className="card">
+          <div className="card-h"><span className="t">Load raw → landing zone</span><span className="mono r">{srcTable.rows.length} rows</span></div>
+          <div className="card-b">
+            <div className="teach-note"><span className="ic">📥</span><span>In <b>ELT</b> the raw data lands <b>untransformed</b> first — this preserves the original so you can re-transform it any time. Optionally persist the raw table below, then move on to transform it in SQL.</span></div>
+            <div style={{ maxHeight: 220, overflowY: "auto" }}>{dtable(srcTable, 10)}</div>
+            <label className="fld" style={{ marginTop: 14 }}>Persist the raw data (optional)</label>
+            {storeBox(srcTable)}
+            <div className="stepnav"><button className="btn ghost" onClick={() => setStep("extract")}>← Extract</button><button className="btn" onClick={() => setStep("load")}>Next: Transform (SQL) →</button></div>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2 (ETL) — TRANSFORM */}
+      {step === "transform" && srcTable && pipeMode === "etl" && (
         <div className="split" style={{ gridTemplateColumns: "1fr 300px" }}>
           <div className="card">
             <div className="card-h"><span className="t">Transform — build the DAG</span>
@@ -502,8 +585,8 @@ ${mode === "stream"
         </div>
       )}
 
-      {/* STEP 3 — LOAD & RUN */}
-      {step === "load" && srcTable && pipe && deliver && qc && (
+      {/* STEP 3 (ETL) — LOAD & RUN */}
+      {step === "load" && srcTable && pipe && deliver && qc && pipeMode === "etl" && (
         <>
           <div className="seg" style={{ maxWidth: 620, marginBottom: 14 }}>
             <button className={loadTab === "run" ? "on" : ""} onClick={() => setLoadTab("run")}>Run</button>
@@ -590,23 +673,8 @@ ${mode === "stream"
                   <button className="btn ghost sm" onClick={() => download(toJSON(deliver), "etl_output.json", "application/json")}>⬇ Export JSON</button>
                 </div>
                 <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-                  <label className="fld">Store to database <span className="note">— persists the output as a real table (usable later / by agents)</span></label>
-                  <div className="row" style={{ gap: 8 }}><input type="text" placeholder="dataset name" value={storeName} onChange={(e) => setStoreName(e.target.value)} /><button className="btn sm" onClick={storeToDb} disabled={storeBusy || !deliver.rows.length}>{storeBusy ? "Storing…" : "🗄 Store to DB"}</button></div>
-                </div>
-                <div style={{ marginTop: 16 }}>
-                  <div className="row" style={{ alignItems: "center" }}><label className="fld" style={{ margin: 0 }}>Stored datasets</label><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadStored}>↻ Refresh</button></div>
-                  {stored.length === 0 ? <div className="note" style={{ marginTop: 8 }}>None yet. Store an output above.</div> : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
-                      {stored.map((d) => (
-                        <div key={d.id} className="row" style={{ alignItems: "center", gap: 10, border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px" }}>
-                          <span>🗄</span><b style={{ fontSize: 13 }}>{d.name}</b><span className="note">{d.rowCount} rows</span>
-                          <span style={{ flex: 1 }} />
-                          <button className="btn ghost sm" onClick={() => downloadStored(d.id, d.name)}>Download</button>
-                          <button className="btn ghost sm danger" onClick={() => deleteStored(d.id)}>Delete</button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <label className="fld">Load to a database <span className="note">— the platform DB, or your own external database</span></label>
+                  {storeBox(deliver)}
                 </div>
               </div>
             </div>
@@ -648,6 +716,32 @@ ${mode === "stream"
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* STEP 3 (ELT) — TRANSFORM WITH SQL */}
+      {step === "load" && srcTable && pipeMode === "elt" && (
+        <>
+          <div className="card">
+            <div className="card-h"><span className="t">Transform with SQL</span><div className="r"><button className="btn sm" onClick={runSqlNow} disabled={sqlBusy}>{sqlBusy ? <><span className="busy-dot" />running…</> : "▶ Run SQL"}</button></div></div>
+            <div className="card-b">
+              <div className="note" style={{ marginBottom: 8 }}>Real SQL over the landed data (dbt-style). Tables: <code>raw</code>{srcTableB ? <> and <code>b</code> (Source B)</> : ""}. Supports SELECT / WHERE / JOIN / GROUP BY / aggregates / ORDER BY / LIMIT.</div>
+              <textarea rows={8} value={sqlText} onChange={(e) => setSqlText(e.target.value)} spellCheck={false} />
+              {sqlErr && <div className="err" style={{ marginTop: 10 }}>{sqlErr}</div>}
+              {sqlResult && (<>
+                <label className="fld" style={{ marginTop: 14 }}>Result — {sqlResult.rows.length} rows × {sqlResult.cols.length} cols</label>
+                {dtable(sqlResult, 14)}
+                {sqlResult.rows.length > 14 && <div className="note" style={{ marginTop: 8 }}>+ {sqlResult.rows.length - 14} more rows</div>}
+              </>)}
+              <div className="stepnav"><button className="btn ghost" onClick={() => setStep("transform")}>← Load raw</button></div>
+            </div>
+          </div>
+          {sqlResult && sqlResult.rows.length > 0 && (
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Deliver transformed table</span><div className="r"><button className="btn ghost sm" onClick={() => download(toCSV(sqlResult), "elt_output.csv", "text/csv")}>⬇ CSV</button><button className="btn ghost sm" onClick={() => download(toJSON(sqlResult), "elt_output.json", "application/json")}>⬇ JSON</button></div></div>
+              <div className="card-b"><label className="fld">Load to a database</label>{storeBox(sqlResult)}</div>
             </div>
           )}
         </>
