@@ -611,24 +611,53 @@ export function rootSplitMath(model: Model, X: number[][], y: number[], nClasses
 
 // Full numeric-column values after EACH preprocessing step (cumulative) — powers
 // the maths-mode step-by-step animation of a numeric feature transforming.
-export interface PrepColStep { label: string; op: string; method: string; changed: boolean; values: (number | null)[]; }
+export type PrepCell = number | string | null;
+export interface PrepColStep { label: string; op: string; method: string; changed: boolean; values: PrepCell[]; }
 export function prepColTrace(ds: Dataset, steps: PrepStep[], colName: string): PrepColStep[] {
   const col = ds.columns.find((c) => c.name === colName);
-  if (!col || col.type !== "num") return [];
-  let cur: (number | null)[] = col.values.map((v) => (v == null ? null : Number(v)));
+  if (!col) return [];
+  const num = col.type === "num";
+  let cur: PrepCell[] = num ? col.values.map((v) => (v == null ? null : Number(v))) : col.values.map((v) => (v == null ? null : String(v)));
   const out: PrepColStep[] = [{ label: "raw", op: "raw", method: "source", changed: true, values: [...cur] }];
   for (const s of steps) {
     let changed = false;
     if (s.cols.includes(colName)) {
-      if (s.op === "Impute missing") { cur = imputeNumCol(cur, s.method); changed = true; }
-      else if (s.op === "Scale / normalize") { cur = scaleNumCol(cur, s.method); changed = true; }
-      else if (s.op === "Handle outliers") { cur = outlierNumCol(cur, s.method); changed = true; }
-      else if (s.op === "Transform") { cur = transformNumCol(cur, s.method); changed = true; }
-      else if (s.op === "Bin / discretize") { cur = binNumCol(cur, s.method); changed = true; }
+      if (num) {
+        const n = cur as (number | null)[];
+        if (s.op === "Impute missing") { cur = imputeNumCol(n, s.method); changed = true; }
+        else if (s.op === "Scale / normalize") { cur = scaleNumCol(n, s.method); changed = true; }
+        else if (s.op === "Handle outliers") { cur = outlierNumCol(n, s.method); changed = true; }
+        else if (s.op === "Transform") { cur = transformNumCol(n, s.method); changed = true; }
+        else if (s.op === "Bin / discretize") { cur = binNumCol(n, s.method); changed = true; }
+      } else if (s.op === "Impute missing") {
+        const present = (cur as (string | null)[]).filter((v): v is string => v != null);
+        const fill = s.method === "Constant" ? "missing" : modeStr(present);
+        cur = (cur as (string | null)[]).map((v) => (v == null ? fill : v)); changed = true;
+      }
     }
     out.push({ label: `${s.op} · ${s.method}`, op: s.op, method: s.method, changed, values: [...cur] });
   }
   return out;
+}
+// Per-method fill values for an Impute step (what each method WOULD fill).
+export function imputeMethodFills(before: PrepCell[], numeric: boolean): { name: string; fill: string }[] {
+  const present = before.filter((v) => v != null);
+  if (numeric) {
+    const nums = present as number[]; if (!nums.length) return [];
+    const sorted = [...nums].sort((a, b) => a - b); const med = sorted[Math.floor((sorted.length - 1) / 2)];
+    const counts = new Map<number, number>(); nums.forEach((x) => counts.set(x, (counts.get(x) || 0) + 1));
+    const modeN = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return [
+      { name: "Mean", fill: (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2) },
+      { name: "Median", fill: String(med) },
+      { name: "Most frequent", fill: String(modeN) },
+      { name: "Constant", fill: "0" },
+    ];
+  }
+  const strs = present as string[]; if (!strs.length) return [];
+  const counts = new Map<string, number>(); strs.forEach((x) => counts.set(x, (counts.get(x) || 0) + 1));
+  const modeS = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  return [{ name: "Most frequent", fill: modeS }, { name: "Constant", fill: "missing" }];
 }
 
 export function mean(a: number[]): number { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0; }

@@ -266,6 +266,11 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .col-ov-card.tgt{border-color:var(--accent);background:var(--accent-weak)}
 .math-card{border-color:color-mix(in srgb,var(--accent) 35%,var(--border))}
 .math-card .card-h{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.impute-anim{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.ia-cell{border:1px solid var(--border);border-radius:8px;min-width:78px;text-align:center;overflow:hidden}
+.ia-cell.tgt{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-weak)}
+.ia-h{font-size:10px;color:var(--muted);padding:4px 8px;border-bottom:1px solid var(--border);background:var(--panel);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ia-v{padding:9px 10px;font-family:var(--mono);font-size:13px;min-height:20px}
 .mathrow{overflow-x:auto;padding:4px 0;margin:2px 0}
 .kx-block{display:block;margin:2px 0}
 .kx{white-space:nowrap}
