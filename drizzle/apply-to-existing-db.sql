@@ -129,3 +129,23 @@ CREATE TABLE IF NOT EXISTS `channels` (
 );
 CREATE INDEX IF NOT EXISTS `channels_project_idx` ON `channels` (`project_id`);
 ALTER TABLE `channels` ADD COLUMN IF NOT EXISTS `daily_limit` int;
+
+-- ── ETL "Load to database": persisted pipeline outputs ──
+CREATE TABLE IF NOT EXISTS `etl_datasets` (
+	`id` varchar(36) NOT NULL,
+	`user_id` varchar(36) NOT NULL,
+	`name` varchar(160) NOT NULL,
+	`cols` json,
+	`row_count` int NOT NULL DEFAULT 0,
+	`created_at` timestamp DEFAULT (now()),
+	CONSTRAINT `etl_datasets_id` PRIMARY KEY(`id`)
+);
+CREATE TABLE IF NOT EXISTS `etl_dataset_rows` (
+	`id` varchar(36) NOT NULL,
+	`dataset_id` varchar(36) NOT NULL,
+	`idx` int NOT NULL DEFAULT 0,
+	`data` json,
+	CONSTRAINT `etl_dataset_rows_id` PRIMARY KEY(`id`)
+);
+CREATE INDEX IF NOT EXISTS `etl_ds_user_idx` ON `etl_datasets` (`user_id`);
+CREATE INDEX IF NOT EXISTS `etl_rows_ds_idx` ON `etl_dataset_rows` (`dataset_id`);

@@ -171,6 +171,25 @@ export type Project = typeof projects.$inferSelect;
 export type Usage = typeof usage.$inferSelect;
 export type McpServer = typeof mcpServers.$inferSelect;
 export type AgentRun = typeof agentRuns.$inferSelect;
+// ETL "Load to database" target: a real persisted output of a pipeline run.
+// The rows are stored as JSON in etl_dataset_rows, scoped to the user.
+export const etlDatasets = mysqlTable("etl_datasets", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  name: varchar("name", { length: 160 }).notNull(),
+  cols: json("cols"),                       // string[]
+  rowCount: int("row_count").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [index("etl_ds_user_idx").on(t.userId)]);
+
+export const etlDatasetRows = mysqlTable("etl_dataset_rows", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  datasetId: varchar("dataset_id", { length: 36 }).notNull(),
+  idx: int("idx").notNull().default(0),
+  data: json("data"),                       // one record
+}, (t) => [index("etl_rows_ds_idx").on(t.datasetId)]);
+
 export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
 export type KbChunk = typeof kbChunks.$inferSelect;
 export type Channel = typeof channels.$inferSelect;
+export type EtlDataset = typeof etlDatasets.$inferSelect;
