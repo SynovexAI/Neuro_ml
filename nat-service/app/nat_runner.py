@@ -15,6 +15,7 @@ import yaml
 from nat.runtime.loader import load_workflow
 
 from . import profiler
+from . import tools  # noqa: F401 — importing registers our custom calculator group
 
 
 async def run_workflow(config: dict[str, Any], input_message: str) -> dict[str, Any]:
