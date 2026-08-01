@@ -9,7 +9,7 @@ const nextConfig: NextConfig = {
   ...(process.env.BUILD_DIST_DIR ? { distDir: process.env.BUILD_DIST_DIR } : {}),
   // Document parsers are heavy Node libs — keep them out of the bundle so the
   // /api/rag/extract route requires them at runtime (avoids pdfjs bundling issues).
-  serverExternalPackages: ["pdf-parse", "mammoth", "xlsx"],
+  serverExternalPackages: ["pdf-parse", "mammoth", "xlsx", "@dsnp/parquetjs"],
   webpack: (config) => {
     // alasql (ELT SQL engine) optionally requires React-Native / fs modules for
     // its Node file APIs. We only run in-memory SQL, so stub them out to keep the

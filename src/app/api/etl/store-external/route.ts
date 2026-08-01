@@ -9,6 +9,9 @@ export const dynamic = "force-dynamic";
 
 const MAX_ROWS = 5000;
 const ident = (s: string) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(s);
+// Overrides come from a dropdown, but validate against an allowlist anyway
+// (these get interpolated into DDL).
+const ALLOWED_TYPES = new Set(["TEXT", "BIGINT", "DOUBLE", "VARCHAR(255)", "DATE", "DATETIME", "BOOLEAN"]);
 
 // Loads a pipeline output into a table in the USER'S OWN external MySQL/TiDB
 // (they supply the connection). SSRF-guarded; identifiers validated; values
@@ -25,6 +28,7 @@ export async function POST(req: Request) {
   const rows: Record<string, unknown>[] = Array.isArray(b.rows) ? b.rows : [];
   const mode = b.mode === "upsert" ? "upsert" : "append";
   const keyCol = String(b.keyCol || "");
+  const typeOverrides: Record<string, string> = b.types && typeof b.types === "object" ? b.types : {};
 
   if (!/^mysql:\/\//i.test(url)) return NextResponse.json({ error: "Provide a mysql:// connection URL." }, { status: 400 });
   if (!ident(table)) return NextResponse.json({ error: "Table name must be letters/digits/underscore and start with a letter." }, { status: 400 });
@@ -40,7 +44,7 @@ export async function POST(req: Request) {
     for (const r of rows) { const v = r[c]; if (v == null || v === "") continue; any = true; const n = Number(v); if (typeof v === "number" || (!isNaN(n) && String(v).trim() !== "")) { if (!Number.isInteger(n)) allInt = false; } else { allNum = false; break; } }
     if (!any) return "TEXT"; return allNum ? (allInt ? "BIGINT" : "DOUBLE") : "TEXT";
   };
-  const colTypes = cols.map((c) => `\`${c}\` ${typeOf(c)}`);
+  const colTypes = cols.map((c) => { const ov = typeOverrides[c]; const ty = ov && ov !== "auto" && ALLOWED_TYPES.has(ov) ? ov : typeOf(c); return `\`${c}\` ${ty}`; });
 
   let conn: mysql.Connection | null = null;
   try {

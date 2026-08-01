@@ -15,6 +15,7 @@
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
+    "@dsnp/parquetjs": "^1.8.8",
     "alasql": "^4.17.3",
     "drizzle-orm": "^0.45.2",
     "mammoth": "^1.12.0",

@@ -43,6 +43,18 @@ function opSummary(o: EtlOp): string {
 function download(text: string, filename: string, mime: string) {
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: mime })); a.download = filename; a.click(); URL.revokeObjectURL(a.href);
 }
+function downloadBlob(blob: Blob, filename: string) {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename; a.click(); URL.revokeObjectURL(a.href);
+}
+// Referenced table names (raw / b / other models) in a SQL string — for the DAG.
+function refsOf(sql: string, known: string[]): string[] {
+  const found = new Set<string>();
+  const re = /\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql))) { if (known.includes(m[1])) found.add(m[1]); }
+  return [...found];
+}
+const EXT_TYPES = ["auto", "TEXT", "BIGINT", "DOUBLE", "VARCHAR(255)", "DATE", "DATETIME", "BOOLEAN"];
 
 export default function EtlLab() {
   const [step, setStep] = useState<Step>("extract");
@@ -102,6 +114,8 @@ export default function EtlLab() {
   const [extUser, setExtUser] = useState("");
   const [extPass, setExtPass] = useState("");
   const [extDb, setExtDb] = useState("");
+  const [extTypes, setExtTypes] = useState<Record<string, string>>({});
+  const [extTypesOpen, setExtTypesOpen] = useState(false);
   const [models, setModels] = useState<{ name: string; sql: string }[]>([]);
   const [modelName, setModelName] = useState("");
 
@@ -245,7 +259,7 @@ export default function EtlLab() {
       : extUrl;
     setStoreBusy(true);
     try {
-      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, table: extTable, cols: t.cols, rows: t.rows, mode: extMode, keyCol: extKey || t.cols[0] }) });
+      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, table: extTable, cols: t.cols, rows: t.rows, mode: extMode, keyCol: extKey || t.cols[0], types: extTypes }) });
       const j = await r.json().catch(() => null);
       if (r.ok) toast(`${extMode === "upsert" ? "Upserted" : "Loaded"} ${j.rowCount} rows into \`${j.table}\` on your database`, "success");
       else toast(j?.error || "Load failed", "error");
@@ -274,6 +288,53 @@ export default function EtlLab() {
     setModelName(""); toast(`Saved model “${nm}”`, "success");
   }
   const removeModel = (i: number) => setModels((ms) => ms.filter((_, j) => j !== i));
+  async function downloadParquet(t: Table) {
+    try {
+      const res = await fetch("/api/etl/parquet", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cols: t.cols, rows: t.rows }) });
+      if (!res.ok) { const j = await res.json().catch(() => null); toast(j?.error || "Parquet export failed", "error"); return; }
+      downloadBlob(await res.blob(), "etl_output.parquet");
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  // Layered dependency graph of the ELT models: sources (raw/b) → models → query.
+  function modelDag() {
+    const known = ["raw", ...(srcTableB ? ["b"] : []), ...models.map((m) => m.name)];
+    const depth: Record<string, number> = { raw: 0 };
+    if (srcTableB) depth.b = 0;
+    const edges: { from: string; to: string }[] = [];
+    models.forEach((m) => {
+      const refs = refsOf(m.sql, known).filter((n) => n !== m.name);
+      depth[m.name] = refs.length ? 1 + Math.max(...refs.map((r) => depth[r] ?? 0)) : 1;
+      refs.forEach((r) => edges.push({ from: r, to: m.name }));
+    });
+    depth.__out = 1 + Math.max(0, ...models.map((m) => depth[m.name] ?? 1));
+    refsOf(sqlText, known).forEach((r) => edges.push({ from: r, to: "__out" }));
+    const nodes = [
+      { id: "raw", label: "raw", cls: "type-trigger" },
+      ...(srcTableB ? [{ id: "b", label: "b", cls: "type-trigger" }] : []),
+      ...models.map((m) => ({ id: m.name, label: m.name, cls: "type-tool" })),
+      { id: "__out", label: "query ▶", cls: "type-output" },
+    ];
+    const byDepth: Record<number, string[]> = {};
+    nodes.forEach((n) => { const d = depth[n.id] ?? 1; (byDepth[d] = byDepth[d] || []).push(n.id); });
+    const W = 104, H = 38, GX = 64, GY = 14;
+    const pos: Record<string, { x: number; y: number }> = {};
+    Object.entries(byDepth).forEach(([d, ids]) => ids.forEach((id, i) => { pos[id] = { x: 12 + Number(d) * (W + GX), y: 10 + i * (H + GY) }; }));
+    const maxD = Math.max(...Object.keys(byDepth).map(Number));
+    const maxRows = Math.max(...Object.values(byDepth).map((a) => a.length));
+    const cw = 24 + (maxD + 1) * (W + GX), chh = 20 + maxRows * (H + GY);
+    const label: Record<string, string> = Object.fromEntries(nodes.map((n) => [n.id, n.label]));
+    return (
+      <div style={{ overflowX: "auto", marginTop: 10 }}>
+        <div style={{ position: "relative", width: cw, height: chh }}>
+          <svg className="wires2" width={cw} height={chh} style={{ position: "absolute", inset: 0 }}>
+            {edges.map((e, i) => { const a = pos[e.from], b2 = pos[e.to]; if (!a || !b2) return null; const x1 = a.x + W, y1 = a.y + H / 2, x2 = b2.x, y2 = b2.y + H / 2; const dx = GX / 2; return <path key={i} className="active" d={`M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`} />; })}
+          </svg>
+          {nodes.map((n) => { const p = pos[n.id]; return <div key={n.id} className={`anode ${n.cls}`} style={{ position: "absolute", left: p.x, top: p.y, width: W, height: H }}><div className="ah" style={{ padding: "0 9px", height: "100%" }}><div className="atitle" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label[n.id]}</div></div></div>; })}
+        </div>
+      </div>
+    );
+  }
   async function downloadStored(id: string, name: string) {
     const j = await fetch(`/api/etl/store?id=${id}`).then((r) => r.json()).catch(() => null);
     if (!j?.dataset) { toast("Could not load dataset", "error"); return; }
@@ -406,6 +467,17 @@ ${mode === "stream"
         <input type="text" value={extTable} onChange={(e) => setExtTable(e.target.value)} />
         <div className="seg" style={{ maxWidth: 280, margin: "10px 0" }}><button className={extMode === "append" ? "on" : ""} onClick={() => setExtMode("append")}>Append</button><button className={extMode === "upsert" ? "on" : ""} onClick={() => setExtMode("upsert")}>Upsert</button></div>
         {extMode === "upsert" && <div className="insp-field" style={{ marginBottom: 10 }}><div className="k">Key column (insert new / update existing on this)</div><select value={extKey || t.cols[0]} onChange={(e) => setExtKey(e.target.value)}>{t.cols.map((c) => <option key={c}>{c}</option>)}</select></div>}
+        <button className="btn ghost sm" style={{ marginBottom: 8 }} onClick={() => setExtTypesOpen((o) => !o)}>{extTypesOpen ? "Hide column types" : "⚙ Column types (advanced)"}</button>
+        {extTypesOpen && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
+            {t.cols.map((c) => (
+              <div key={c} className="row" style={{ gap: 6, alignItems: "center" }}>
+                <span className="note" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={c}>{c}</span>
+                <select value={extTypes[c] || "auto"} onChange={(e) => setExtTypes((m) => ({ ...m, [c]: e.target.value }))} style={{ maxWidth: 120 }}>{EXT_TYPES.map((ty) => <option key={ty} value={ty}>{ty}</option>)}</select>
+              </div>
+            ))}
+          </div>
+        )}
         <button className="btn sm" onClick={() => storeExternal(t)} disabled={storeBusy || !t.rows.length}>{storeBusy ? "Loading…" : "🛢 Load to my DB"}</button>
         <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">🔒</span><span>Connects to <b>your</b> database, creates the table if missing (types inferred), then {extMode === "upsert" ? "inserts new rows and updates existing ones on the key" : "appends the rows"}. Warns on <b>schema drift</b>. Credentials are used only for this request; private/internal hosts are blocked.</span></div>
       </>)}
@@ -717,6 +789,7 @@ ${mode === "stream"
                 <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                   <button className="btn ghost sm" onClick={() => download(toCSV(deliver), "etl_output.csv", "text/csv")}>⬇ Export CSV</button>
                   <button className="btn ghost sm" onClick={() => download(toJSON(deliver), "etl_output.json", "application/json")}>⬇ Export JSON</button>
+                  <button className="btn ghost sm" onClick={() => downloadParquet(deliver)}>⬇ Parquet</button>
                 </div>
                 <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
                   <label className="fld">Load to a database <span className="note">— the platform DB, or your own external database</span></label>
@@ -779,6 +852,7 @@ ${mode === "stream"
                 <label className="fld">Models <span className="note">— save a query as a named table; later models &amp; the editor can query it (mini-dbt)</span></label>
                 <div className="row" style={{ gap: 8 }}><input type="text" placeholder="model name (e.g. paid_orders)" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ maxWidth: 240 }} /><button className="btn ghost sm" onClick={saveModel} disabled={!modelName.trim()}>+ Save current SQL as model</button></div>
                 {models.length > 0 && <div className="chips" style={{ marginTop: 8 }}>{models.map((m, i) => <span key={i} className="chip" style={{ cursor: "pointer" }} onClick={() => setSqlText(m.sql)} title="click to load into the editor">{m.name} <b onClick={(e) => { e.stopPropagation(); removeModel(i); }} style={{ color: "var(--faint)" }}>×</b></span>)}</div>}
+                {models.length > 0 && (<><label className="fld" style={{ marginTop: 12 }}>Dependency graph</label>{modelDag()}</>)}
               </div>
               {sqlErr && <div className="err" style={{ marginTop: 10 }}>{sqlErr}</div>}
               {sqlResult && (<>
@@ -791,7 +865,7 @@ ${mode === "stream"
           </div>
           {sqlResult && sqlResult.rows.length > 0 && (
             <div className="card" style={{ marginTop: 16 }}>
-              <div className="card-h"><span className="t">Deliver transformed table</span><div className="r"><button className="btn ghost sm" onClick={() => download(toCSV(sqlResult), "elt_output.csv", "text/csv")}>⬇ CSV</button><button className="btn ghost sm" onClick={() => download(toJSON(sqlResult), "elt_output.json", "application/json")}>⬇ JSON</button></div></div>
+              <div className="card-h"><span className="t">Deliver transformed table</span><div className="r"><button className="btn ghost sm" onClick={() => download(toCSV(sqlResult), "elt_output.csv", "text/csv")}>⬇ CSV</button><button className="btn ghost sm" onClick={() => download(toJSON(sqlResult), "elt_output.json", "application/json")}>⬇ JSON</button><button className="btn ghost sm" onClick={() => downloadParquet(sqlResult)}>⬇ Parquet</button></div></div>
               <div className="card-b"><label className="fld">Load to a database</label>{storeBox(sqlResult)}</div>
             </div>
           )}
