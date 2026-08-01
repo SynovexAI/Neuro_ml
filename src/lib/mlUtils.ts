@@ -9,19 +9,30 @@ export type Task = "classification" | "regression";
 export interface PrepStep { op: string; cols: string[]; method: string; }
 
 // ── parsing ──
-export function parseCSV(text: string): Dataset {
+export function parseCSV(text: string, opts: { header?: boolean } = {}): Dataset {
+  const hasHeader = opts.header !== false; // default: first row is a header
   const clean = text.replace(/\r\n?/g, "\n").trim();
-  const delim = (clean.split("\n")[0].match(/;/g)?.length || 0) > (clean.split("\n")[0].match(/,/g)?.length || 0) ? ";" : (clean.includes("\t") && !clean.split("\n")[0].includes(",") ? "\t" : ",");
-  const rows = clean.split("\n").map((line) => splitLine(line, delim));
-  const header = rows[0];
-  const body = rows.slice(1).filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
-  const cols: Column[] = header.map((name, ci) => {
+  const line0 = clean.split("\n")[0] || "";
+  const nSemi = (line0.match(/;/g)?.length || 0), nComma = (line0.match(/,/g)?.length || 0), nTab = (line0.match(/\t/g)?.length || 0);
+  // delimiter: prefer explicit separators, fall back to whitespace (many UCI .data files)
+  let delim: string;
+  if (nSemi > nComma && nSemi > 0) delim = ";";
+  else if (nComma > 0) delim = ",";
+  else if (nTab > 0) delim = "\t";
+  else if (line0.trim().split(/\s+/).length > 1) delim = " "; // whitespace sentinel
+  else delim = ",";
+  const rows = clean.split("\n").map((line) => (delim === " " ? line.trim().split(/\s+/) : splitLine(line, delim)));
+  const ncol = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const header = hasHeader ? rows[0] : Array.from({ length: ncol }, (_, i) => `col${i + 1}`);
+  const body = (hasHeader ? rows.slice(1) : rows).filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
+  const cols: Column[] = Array.from({ length: ncol }, (_, ci) => {
+    const name = (header[ci] ?? "").trim() || `col${ci + 1}`;
     const raw = body.map((r) => (r[ci] ?? "").trim());
     const nonEmpty = raw.filter((v) => v !== "");
     const numeric = nonEmpty.length > 0 && nonEmpty.every((v) => v !== "" && !isNaN(Number(v)));
     const type: ColType = numeric ? "num" : "cat";
     const values = raw.map((v) => (v === "" ? null : (type === "num" ? Number(v) : v)));
-    return { name: name.trim() || `col${ci}`, type, values };
+    return { name, type, values };
   });
   return { columns: cols, nrows: body.length };
 }
@@ -233,7 +244,7 @@ function softmax(z: number[]): number[] { const m = Math.max(...z); const e = z.
 
 // ── models ──
 export type TreeNode =
-  | { leaf: true; value: number; n: number }
+  | { leaf: true; value: number; n: number; dist?: number[] }
   | { leaf: false; feat: number; thr: number; n: number; left: TreeNode; right: TreeNode };
 export type Model =
   | { kind: "logreg"; W: number[][]; classes: number; loss?: number[] }
@@ -313,11 +324,13 @@ function gini(y: number[], nClasses: number): number { if (!y.length) return 0; 
 function variance(y: number[]): number { if (!y.length) return 0; const m = y.reduce((a, b) => a + b, 0) / y.length; return y.reduce((a, b) => a + (b - m) ** 2, 0) / y.length; }
 function leafValue(y: number[], task: Task, nClasses: number): number { if (task === "regression") return y.reduce((a, b) => a + b, 0) / (y.length || 1); const c = new Array(nClasses).fill(0); y.forEach((v) => c[v]++); return c.indexOf(Math.max(...c)); }
 interface TreeOpts { maxDepth: number; minSplit: number; maxFeatures: number; }
+function leafDist(y: number[], nClasses: number): number[] { const c = new Array(nClasses).fill(0); y.forEach((v) => c[v]++); const n = y.length || 1; return c.map((x) => x / n); }
 function buildTree(X: number[][], y: number[], task: Task, nClasses: number, opts: TreeOpts, imp: number[], depth: number, rnd: () => number): TreeNode {
   const n = y.length;
+  const mkLeaf = (yy: number[]): TreeNode => (task === "regression" ? { leaf: true, value: leafValue(yy, task, nClasses), n: yy.length } : { leaf: true, value: leafValue(yy, task, nClasses), n: yy.length, dist: leafDist(yy, nClasses) });
   const nodeImp = task === "regression" ? variance(y) : gini(y, nClasses);
   const pure = task === "regression" ? nodeImp < 1e-9 : new Set(y).size <= 1;
-  if (depth >= opts.maxDepth || n < opts.minSplit || pure) return { leaf: true, value: leafValue(y, task, nClasses), n };
+  if (depth >= opts.maxDepth || n < opts.minSplit || pure) return mkLeaf(y);
   const d = X[0]?.length || 0;
   let feats = Array.from({ length: d }, (_, i) => i);
   if (opts.maxFeatures < d) { for (let i = feats.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [feats[i], feats[j]] = [feats[j], feats[i]]; } feats = feats.slice(0, opts.maxFeatures); }
@@ -338,13 +351,14 @@ function buildTree(X: number[][], y: number[], task: Task, nClasses: number, opt
       if (gain > best.gain) best = { gain, feat: f, thr };
     }
   }
-  if (best.feat < 0) return { leaf: true, value: leafValue(y, task, nClasses), n };
+  if (best.feat < 0) return mkLeaf(y);
   imp[best.feat] += best.gain * n;
   const Xl: number[][] = [], yl: number[] = [], Xr: number[][] = [], yr: number[] = [];
   for (let i = 0; i < n; i++) { if (X[i][best.feat] <= best.thr) { Xl.push(X[i]); yl.push(y[i]); } else { Xr.push(X[i]); yr.push(y[i]); } }
   return { leaf: false, feat: best.feat, thr: best.thr, n, left: buildTree(Xl, yl, task, nClasses, opts, imp, depth + 1, rnd), right: buildTree(Xr, yr, task, nClasses, opts, imp, depth + 1, rnd) };
 }
 function predictTreeOne(node: TreeNode, x: number[]): number { let cur = node; while (!cur.leaf) cur = x[cur.feat] <= cur.thr ? cur.left : cur.right; return cur.value; }
+function treeProbaOne(node: TreeNode, x: number[], nClasses: number): number[] { let cur = node; while (!cur.leaf) cur = x[cur.feat] <= cur.thr ? cur.left : cur.right; if (cur.dist) return cur.dist; const one = new Array(nClasses).fill(0); one[cur.value] = 1; return one; }
 export function trainTree(X: number[][], y: number[], task: Task, nClasses: number, p: { maxDepth: number; minSplit: number }): Model {
   const d = X[0]?.length || 0; const imp = new Array(d).fill(0);
   const root = buildTree(X, y, task, nClasses, { maxDepth: p.maxDepth, minSplit: Math.max(2, p.minSplit), maxFeatures: d }, imp, 0, mulberry32(42));
@@ -374,6 +388,39 @@ export function predict(m: Model, X: number[][]): number[] {
   if (m.kind === "tree") return X.map((x) => predictTreeOne(m.root, x));
   if (m.kind === "forest") return X.map((x) => predictForestOne(m, x));
   return X.map((x) => knnPredictOne(m, x));
+}
+// Per-class probabilities (predict_proba) for classifiers — used for ROC/PR and threshold tuning.
+export function predictProba(m: Model, X: number[][]): number[][] {
+  if (m.kind === "logreg") { const Xb = X.map((r) => [1, ...r]); return Xb.map((r) => softmax(m.W.map((w) => dot(w, r)))); }
+  if (m.kind === "gnb") return X.map((x) => { const lls: number[] = []; for (let k = 0; k < m.classes; k++) { let ll = Math.log(m.priors[k] || 1e-9); for (let j = 0; j < x.length; j++) { const v = m.vars[k][j]; ll += -0.5 * Math.log(2 * Math.PI * v) - ((x[j] - m.means[k][j]) ** 2) / (2 * v); } lls.push(ll); } const mx = Math.max(...lls); const ex = lls.map((l) => Math.exp(l - mx)); const s = ex.reduce((a, b) => a + b, 0) || 1; return ex.map((e) => e / s); });
+  if (m.kind === "knn") return X.map((x) => { const dists = m.X.map((row, i) => ({ d: Math.sqrt(row.reduce((a, v, j) => a + (v - x[j]) ** 2, 0)), y: m.y[i] })); dists.sort((a, b) => a.d - b.d); const near = dists.slice(0, m.k); const votes = new Array(m.classes).fill(0); near.forEach((p) => { votes[p.y] += m.weights === "distance" ? 1 / (p.d + 1e-6) : 1; }); const s = votes.reduce((a: number, b: number) => a + b, 0) || 1; return votes.map((v: number) => v / s); });
+  if (m.kind === "tree") return X.map((x) => treeProbaOne(m.root, x, m.classes));
+  if (m.kind === "forest") return X.map((x) => { const acc = new Array(m.classes).fill(0); for (const t of m.trees) { const pr = treeProbaOne(t, x, m.classes); for (let k = 0; k < m.classes; k++) acc[k] += pr[k]; } return acc.map((v) => v / (m.trees.length || 1)); });
+  return X.map(() => []); // linear regression has no class probabilities
+}
+
+// ── threshold / ROC / PR (one-vs-rest for a chosen positive class) ──
+export interface RocPoint { fpr: number; tpr: number; }
+export function rocCurve(yTrue01: number[], scores: number[]): { points: RocPoint[]; auc: number } {
+  const pairs = scores.map((s, i) => ({ s, y: yTrue01[i] })).sort((a, b) => b.s - a.s);
+  const P = yTrue01.reduce((a, y) => a + y, 0), N = yTrue01.length - P;
+  const points: RocPoint[] = [{ fpr: 0, tpr: 0 }]; let tp = 0, fp = 0, auc = 0, pf = 0, pt = 0;
+  for (const p of pairs) { if (p.y === 1) tp++; else fp++; const tpr = tp / (P || 1), fpr = fp / (N || 1); points.push({ fpr, tpr }); auc += (fpr - pf) * (tpr + pt) / 2; pf = fpr; pt = tpr; }
+  return { points, auc };
+}
+export interface PrPoint { recall: number; precision: number; }
+export function prCurve(yTrue01: number[], scores: number[]): { points: PrPoint[]; ap: number } {
+  const pairs = scores.map((s, i) => ({ s, y: yTrue01[i] })).sort((a, b) => b.s - a.s);
+  const P = yTrue01.reduce((a, y) => a + y, 0);
+  const points: PrPoint[] = []; let tp = 0, fp = 0, ap = 0, prevRec = 0;
+  for (const p of pairs) { if (p.y === 1) tp++; else fp++; const recall = tp / (P || 1), precision = tp / (tp + fp || 1); points.push({ recall, precision }); ap += (recall - prevRec) * precision; prevRec = recall; }
+  return { points, ap };
+}
+export function metricsAtThreshold(yTrue01: number[], scores: number[], thr: number): { tp: number; fp: number; fn: number; tn: number; precision: number; recall: number; f1: number; accuracy: number } {
+  let tp = 0, fp = 0, fn = 0, tn = 0;
+  for (let i = 0; i < yTrue01.length; i++) { const pred = scores[i] >= thr ? 1 : 0; if (yTrue01[i] === 1) { if (pred) tp++; else fn++; } else { if (pred) fp++; else tn++; } }
+  const precision = tp / (tp + fp || 1), recall = tp / (tp + fn || 1);
+  return { tp, fp, fn, tn, precision, recall, f1: 2 * precision * recall / (precision + recall || 1), accuracy: (tp + tn) / (yTrue01.length || 1) };
 }
 export function featureImportance(m: Model, names: string[]): { name: string; w: number }[] | null {
   if (m.kind === "logreg") { const imp = names.map((_, j) => m.W.reduce((a, w) => a + Math.abs(w[j + 1]), 0)); const mx = Math.max(...imp, 1e-9); return names.map((n, j) => ({ name: n, w: imp[j] / mx })).sort((a, b) => b.w - a.w).slice(0, 8); }
@@ -444,6 +491,222 @@ export function crossValDetailed(cfg: TrainConfig, X: number[][], y: number[], n
 export function crossVal(cfg: TrainConfig, X: number[][], y: number[], nClasses: number): number[] {
   return crossValDetailed(cfg, X, y, nClasses).map((f) => f.score);
 }
+// Decision boundary over TWO numeric features (trains a 2-feature model of the
+// same type, predicts a grid, returns it + the data points). Classification only.
+export function decisionSurface(ds: Dataset, targetName: string, f1: string, f2: string, cfg: TrainConfig, res = 46):
+  { xs: number[]; ys: number[]; z: number[][]; points: { x: number; y: number; c: number }[]; classes: string[]; acc: number } | null {
+  const c1 = ds.columns.find((c) => c.name === f1), c2 = ds.columns.find((c) => c.name === f2), ty = ds.columns.find((c) => c.name === targetName);
+  if (!c1 || !c2 || !ty || c1.type !== "num" || c2.type !== "num" || f1 === f2) return null;
+  const raw: [number, number, string][] = [];
+  for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], b = c2.values[i], t = ty.values[i]; if (a == null || b == null || t == null) continue; raw.push([Number(a), Number(b), String(t)]); }
+  if (raw.length < 4) return null;
+  const classes = Array.from(new Set(raw.map((r) => r[2])));
+  if (classes.length < 2 || classes.length > 8) return null;
+  const cmap = new Map(classes.map((c, i) => [c, i]));
+  const xs0 = raw.map((r) => r[0]), ys0 = raw.map((r) => r[1]);
+  const m1 = mean(xs0), s1 = std(xs0) || 1, m2 = mean(ys0), s2 = std(ys0) || 1;
+  const X = raw.map((r) => [(r[0] - m1) / s1, (r[1] - m2) / s2]);
+  const y = raw.map((r) => cmap.get(r[2])!);
+  const model = makeModel({ ...cfg, task: "classification" }, X, y, classes.length);
+  const min1 = Math.min(...xs0), max1 = Math.max(...xs0), min2 = Math.min(...ys0), max2 = Math.max(...ys0);
+  const xs: number[] = [], ys: number[] = [];
+  for (let i = 0; i < res; i++) xs.push(min1 + ((max1 - min1) * i) / (res - 1));
+  for (let j = 0; j < res; j++) ys.push(min2 + ((max2 - min2) * j) / (res - 1));
+  const flat: number[][] = [];
+  for (const gy of ys) for (const gx of xs) flat.push([(gx - m1) / s1, (gy - m2) / s2]);
+  const preds = predict(model, flat);
+  const z: number[][] = [];
+  for (let j = 0; j < res; j++) z.push(preds.slice(j * res, j * res + res).map((p) => Math.round(p)));
+  const points = raw.map((r, i) => ({ x: r[0], y: r[1], c: y[i] }));
+  const yp = predict(model, X);
+  const acc = y.reduce((a, t, i) => a + (Math.round(yp[i]) === t ? 1 : 0), 0) / y.length;
+  return { xs, ys, z, points, classes, acc };
+}
+
+// Learning curve: train on growing fractions of the training set; return train vs
+// hold-out score at each size (teaches over/under-fitting).
+export function learningCurve(X: number[][], y: number[], cfg: TrainConfig, nClasses: number):
+  { n: number; train: number; test: number }[] {
+  const { Xtr, ytr, Xte, yte } = split(X, y, cfg.testSize || 0.2);
+  const acc = (yt: number[], yp: number[]) => yt.reduce((a, t, i) => a + (Math.round(yp[i]) === t ? 1 : 0), 0) / (yt.length || 1);
+  const r2 = (yt: number[], yp: number[]) => { const m = mean(yt); let ss = 0, st = 0; for (let i = 0; i < yt.length; i++) { ss += (yt[i] - yp[i]) ** 2; st += (yt[i] - m) ** 2; } return st ? 1 - ss / st : 0; };
+  const score = cfg.task === "classification" ? acc : r2;
+  const fracs = [0.1, 0.2, 0.35, 0.5, 0.7, 0.85, 1];
+  return fracs.map((f) => {
+    const n = Math.max(2, Math.round(Xtr.length * f));
+    const xs = Xtr.slice(0, n), ys = ytr.slice(0, n);
+    const model = makeModel(cfg, xs, ys, nClasses);
+    return { n, train: score(ys, predict(model, xs)), test: score(yte, predict(model, Xte)) };
+  });
+}
+
+// ── maths-mode instrumentation: expose the intermediate numbers the training math
+// produces (a faithful mirror of trainLogReg / trainLinear, recording snapshots) ──
+export interface GdTrace { kind: "logreg" | "linear"; d: number; lr: number; grad0: number[]; snaps: { ep: number; loss: number; gnorm: number; w: number[] }[]; }
+export function gdTrace(cfg: TrainConfig, X: number[][], y: number[], nClasses: number): GdTrace | null {
+  const isLog = cfg.algo === "LogisticRegression";
+  const isLin = cfg.algo === "LinearRegression" || cfg.algo === "Ridge";
+  if (!isLog && !isLin) return null;
+  const n = X.length, d = X[0]?.length || 0;
+  const Xb = X.map((r) => [1, ...r]);
+  const epochs = isLog ? Math.max(1, Math.round(Number(cfg.params.max_iter) || 300)) : 400;
+  const lr = isLog ? (Number(cfg.params.learning_rate) || 0.2) : 0.05;
+  const want = new Set<number>([0, 1, 2]); for (let i = 0; i <= 10; i++) want.add(Math.round((epochs - 1) * i / 10));
+  const snaps: GdTrace["snaps"] = []; let grad0: number[] = [];
+  if (isLin) {
+    const w = new Array(d + 1).fill(0); const alpha = cfg.algo === "Ridge" ? 0.01 * (Number(cfg.params.alpha) || 1) : 0;
+    for (let ep = 0; ep < epochs; ep++) {
+      const grad = new Array(d + 1).fill(0);
+      for (let i = 0; i < n; i++) { const pred = dot(w, Xb[i]); const err = pred - y[i]; for (let j = 0; j <= d; j++) grad[j] += err * Xb[i][j]; }
+      const gn = grad.map((g) => g / n);
+      for (let j = 0; j <= d; j++) { let g = gn[j]; if (j > 0) g += alpha * w[j]; w[j] -= lr * g; }
+      if (ep === 0) grad0 = gn;
+      if (want.has(ep)) { let L = 0; for (let i = 0; i < n; i++) L += (dot(w, Xb[i]) - y[i]) ** 2; snaps.push({ ep, loss: L / n, gnorm: Math.sqrt(gn.reduce((a, g) => a + g * g, 0)), w: [...w] }); }
+    }
+    return { kind: "linear", d, lr, grad0, snaps };
+  }
+  const W = Array.from({ length: nClasses }, () => new Array(d + 1).fill(0)); const l2 = 0.01 / (Number(cfg.params.C) || 1);
+  const cls = Math.min(1, nClasses - 1);
+  for (let ep = 0; ep < epochs; ep++) {
+    const grad = Array.from({ length: nClasses }, () => new Array(d + 1).fill(0));
+    for (let i = 0; i < n; i++) { const probs = softmax(W.map((w) => dot(w, Xb[i]))); for (let k = 0; k < nClasses; k++) { const err = probs[k] - (y[i] === k ? 1 : 0); for (let j = 0; j <= d; j++) grad[k][j] += err * Xb[i][j]; } }
+    const gn = grad[cls].map((g) => g / n);
+    for (let k = 0; k < nClasses; k++) for (let j = 0; j <= d; j++) { let g = grad[k][j] / n; if (j > 0) g += l2 * W[k][j]; W[k][j] -= lr * g; }
+    if (ep === 0) grad0 = gn;
+    if (want.has(ep)) { let L = 0; for (let i = 0; i < n; i++) { const pr = softmax(W.map((w) => dot(w, Xb[i]))); L += -Math.log(Math.max(1e-9, pr[y[i]])); } snaps.push({ ep, loss: L / n, gnorm: Math.sqrt(gn.reduce((a, g) => a + g * g, 0)), w: [...W[cls]] }); }
+  }
+  return { kind: "logreg", d, lr, grad0, snaps };
+}
+// Animated gradient descent on a *visualisable* problem: 2 features → a decision
+// boundary that improves per epoch (classification), or 1 feature → a line that
+// fits (regression). Returns frames so the UI can play the training.
+export interface GdAnim {
+  reg: boolean; xs: number[]; ys?: number[]; classes: string[];
+  points: { x: number; y: number; c: number }[];
+  frames: { ep: number; loss: number; z?: number[][]; line?: number[] }[];
+}
+export function gdAnim(ds: Dataset, targetName: string, f1: string, f2: string, cfg: TrainConfig, res = 34): GdAnim | null {
+  const ty = ds.columns.find((c) => c.name === targetName);
+  const c1 = ds.columns.find((c) => c.name === f1);
+  if (!ty || !c1 || c1.type !== "num") return null;
+  const reg = cfg.task === "regression";
+  const epList = [0, 1, 2, 3, 5, 8, 12, 18, 26, 40, 70, 120, 200, 299];
+
+  if (!reg) {
+    const c2 = ds.columns.find((c) => c.name === f2);
+    if (!c2 || c2.type !== "num" || f1 === f2) return null;
+    const raw: [number, number, string][] = [];
+    for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], b = c2.values[i], t = ty.values[i]; if (a == null || b == null || t == null) continue; raw.push([Number(a), Number(b), String(t)]); }
+    if (raw.length < 6) return null;
+    const classes = Array.from(new Set(raw.map((r) => r[2]))); if (classes.length < 2 || classes.length > 6) return null;
+    const cmap = new Map(classes.map((c, i) => [c, i]));
+    const xs0 = raw.map((r) => r[0]), ys0 = raw.map((r) => r[1]);
+    const m1 = mean(xs0), s1 = std(xs0) || 1, m2 = mean(ys0), s2 = std(ys0) || 1;
+    const X = raw.map((r) => [(r[0] - m1) / s1, (r[1] - m2) / s2]); const y = raw.map((r) => cmap.get(r[2])!);
+    const K = classes.length, n = X.length, Xb = X.map((r) => [1, ...r]);
+    const W = Array.from({ length: K }, () => [0, 0, 0]); const lr = Number(cfg.params.learning_rate) || 0.3, l2 = 0.01 / (Number(cfg.params.C) || 1);
+    const mn1 = Math.min(...xs0), mx1 = Math.max(...xs0), mn2 = Math.min(...ys0), mx2 = Math.max(...ys0);
+    const gx: number[] = [], gy: number[] = [];
+    for (let i = 0; i < res; i++) gx.push(mn1 + ((mx1 - mn1) * i) / (res - 1));
+    for (let j = 0; j < res; j++) gy.push(mn2 + ((mx2 - mn2) * j) / (res - 1));
+    const frames: GdAnim["frames"] = [];
+    const snapSet = new Set(epList);
+    const total = 300;
+    for (let ep = 0; ep < total; ep++) {
+      if (snapSet.has(ep)) {
+        const z: number[][] = [];
+        for (const vy of gy) { const rowz: number[] = []; for (const vx of gx) { const xb = [1, (vx - m1) / s1, (vy - m2) / s2]; const sc = W.map((w) => w[0] * xb[0] + w[1] * xb[1] + w[2] * xb[2]); const p = softmax(sc); rowz.push(p.indexOf(Math.max(...p))); } z.push(rowz); }
+        let L = 0; for (let i = 0; i < n; i++) { const p = softmax(W.map((w) => dot(w, Xb[i]))); L += -Math.log(Math.max(1e-9, p[y[i]])); }
+        frames.push({ ep, loss: L / n, z });
+      }
+      const G = Array.from({ length: K }, () => [0, 0, 0]);
+      for (let i = 0; i < n; i++) { const p = softmax(W.map((w) => dot(w, Xb[i]))); for (let k = 0; k < K; k++) { const e = p[k] - (y[i] === k ? 1 : 0); for (let j = 0; j < 3; j++) G[k][j] += e * Xb[i][j]; } }
+      for (let k = 0; k < K; k++) for (let j = 0; j < 3; j++) { let g = G[k][j] / n; if (j > 0) g += l2 * W[k][j]; W[k][j] -= lr * g; }
+    }
+    return { reg: false, xs: gx, ys: gy, classes, points: raw.map((r, i) => ({ x: r[0], y: r[1], c: y[i] })), frames };
+  }
+
+  // regression: fit y = w0 + w1·x on ONE feature (f1 vs target)
+  const raw: [number, number][] = [];
+  for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], t = ty.values[i]; if (a == null || t == null) continue; raw.push([Number(a), Number(t)]); }
+  if (raw.length < 6) return null;
+  const xs0 = raw.map((r) => r[0]); const m1 = mean(xs0), s1 = std(xs0) || 1;
+  const X = raw.map((r) => (r[0] - m1) / s1), y = raw.map((r) => r[1]);
+  const n = X.length; let w0 = 0, w1 = 0; const lr = 0.1;
+  const mn = Math.min(...xs0), mx = Math.max(...xs0); const gx: number[] = [];
+  for (let i = 0; i < res; i++) gx.push(mn + ((mx - mn) * i) / (res - 1));
+  const frames: GdAnim["frames"] = []; const snapSet = new Set(epList);
+  for (let ep = 0; ep < 300; ep++) {
+    if (snapSet.has(ep)) { const line = gx.map((xv) => w0 + w1 * ((xv - m1) / s1)); let L = 0; for (let i = 0; i < n; i++) L += (w0 + w1 * X[i] - y[i]) ** 2; frames.push({ ep, loss: L / n, line }); }
+    let g0 = 0, g1 = 0; for (let i = 0; i < n; i++) { const e = w0 + w1 * X[i] - y[i]; g0 += e; g1 += e * X[i]; }
+    w0 -= lr * g0 / n; w1 -= lr * g1 / n;
+  }
+  return { reg: true, xs: gx, classes: [], points: raw.map((r) => ({ x: r[0], y: r[1], c: 0 })), frames };
+}
+export interface SplitMath { feat: number; thr: number; parent: number; left: number; right: number; gain: number; nL: number; nR: number; metric: "gini" | "variance"; }
+export function rootSplitMath(model: Model, X: number[][], y: number[], nClasses: number): SplitMath | null {
+  if (model.kind !== "tree" && model.kind !== "forest") return null;
+  const root = model.kind === "tree" ? model.root : model.trees[0];
+  if (root.leaf) return null;
+  const reg = model.task === "regression";
+  const imp = (yy: number[]) => (reg ? variance(yy) : gini(yy, nClasses));
+  const yl: number[] = [], yr: number[] = [];
+  for (let i = 0; i < X.length; i++) (X[i][root.feat] <= root.thr ? yl : yr).push(y[i]);
+  const parent = imp(y), left = imp(yl), right = imp(yr);
+  return { feat: root.feat, thr: root.thr, parent, left, right, gain: parent - (yl.length / y.length) * left - (yr.length / y.length) * right, nL: yl.length, nR: yr.length, metric: reg ? "variance" : "gini" };
+}
+
+// Full numeric-column values after EACH preprocessing step (cumulative) — powers
+// the maths-mode step-by-step animation of a numeric feature transforming.
+export type PrepCell = number | string | null;
+export interface PrepColStep { label: string; op: string; method: string; changed: boolean; values: PrepCell[]; }
+export function prepColTrace(ds: Dataset, steps: PrepStep[], colName: string): PrepColStep[] {
+  const col = ds.columns.find((c) => c.name === colName);
+  if (!col) return [];
+  const num = col.type === "num";
+  let cur: PrepCell[] = num ? col.values.map((v) => (v == null ? null : Number(v))) : col.values.map((v) => (v == null ? null : String(v)));
+  const out: PrepColStep[] = [{ label: "raw", op: "raw", method: "source", changed: true, values: [...cur] }];
+  for (const s of steps) {
+    let changed = false;
+    if (s.cols.includes(colName)) {
+      if (num) {
+        const n = cur as (number | null)[];
+        if (s.op === "Impute missing") { cur = imputeNumCol(n, s.method); changed = true; }
+        else if (s.op === "Scale / normalize") { cur = scaleNumCol(n, s.method); changed = true; }
+        else if (s.op === "Handle outliers") { cur = outlierNumCol(n, s.method); changed = true; }
+        else if (s.op === "Transform") { cur = transformNumCol(n, s.method); changed = true; }
+        else if (s.op === "Bin / discretize") { cur = binNumCol(n, s.method); changed = true; }
+      } else if (s.op === "Impute missing") {
+        const present = (cur as (string | null)[]).filter((v): v is string => v != null);
+        const fill = s.method === "Constant" ? "missing" : modeStr(present);
+        cur = (cur as (string | null)[]).map((v) => (v == null ? fill : v)); changed = true;
+      }
+    }
+    out.push({ label: `${s.op} · ${s.method}`, op: s.op, method: s.method, changed, values: [...cur] });
+  }
+  return out;
+}
+// Per-method fill values for an Impute step (what each method WOULD fill).
+export function imputeMethodFills(before: PrepCell[], numeric: boolean): { name: string; fill: string }[] {
+  const present = before.filter((v) => v != null);
+  if (numeric) {
+    const nums = present as number[]; if (!nums.length) return [];
+    const sorted = [...nums].sort((a, b) => a - b); const med = sorted[Math.floor((sorted.length - 1) / 2)];
+    const counts = new Map<number, number>(); nums.forEach((x) => counts.set(x, (counts.get(x) || 0) + 1));
+    const modeN = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return [
+      { name: "Mean", fill: (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2) },
+      { name: "Median", fill: String(med) },
+      { name: "Most frequent", fill: String(modeN) },
+      { name: "Constant", fill: "0" },
+    ];
+  }
+  const strs = present as string[]; if (!strs.length) return [];
+  const counts = new Map<string, number>(); strs.forEach((x) => counts.set(x, (counts.get(x) || 0) + 1));
+  const modeS = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  return [{ name: "Most frequent", fill: modeS }, { name: "Constant", fill: "missing" }];
+}
+
 export function mean(a: number[]): number { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0; }
 export function std(a: number[]): number { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); }
 

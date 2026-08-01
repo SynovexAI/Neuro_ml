@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { toast, confirmDialog } from "@/lib/toast";
 
-type Project = { id: string; lab: string; name: string; updatedAt?: string | null; createdAt?: string | null };
+type Project = { id: string; lab: string; name: string; published?: boolean; updatedAt?: string | null; createdAt?: string | null };
 
 const LAB_META: Record<string, { label: string; href: string; icon: string }> = {
   prompting: { label: "Prompting", href: "/labs/prompting", icon: "✎" },
@@ -44,12 +45,21 @@ export default function MyProjects() {
     setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, name: name.trim() } : x)));
     setBusy("");
   }
+  async function togglePublish(p: Project) {
+    const next = !p.published;
+    setBusy(p.id);
+    const res = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id, published: next }) }).catch(() => null);
+    if (res?.ok) { setProjects((ps) => ps.map((x) => (x.id === p.id ? { ...x, published: next } : x))); toast(next ? `Published “${p.name}” to the Workroom` : "Unpublished", "success"); }
+    else toast("Could not update", "error");
+    setBusy("");
+  }
   async function remove(p: Project) {
-    if (!window.confirm(`Delete "${p.name}"? This can't be undone.`)) return;
+    if (!(await confirmDialog(`Delete “${p.name}”? This can't be undone.`, { confirmLabel: "Delete", danger: true }))) return;
     setBusy(p.id);
     await fetch(`/api/projects?id=${encodeURIComponent(p.id)}`, { method: "DELETE" }).catch(() => {});
     setProjects((ps) => ps.filter((x) => x.id !== p.id));
     setBusy("");
+    toast("Project deleted", "success");
   }
 
   const labs = Array.from(new Set(projects.map((p) => p.lab)));
@@ -86,12 +96,18 @@ export default function MyProjects() {
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                       <span className="proj-ic">{m.icon}</span>
                       <span className="badge">{m.label}</span>
+                      {p.published && <span className="badge" style={{ color: "#3b9e5f", borderColor: "#3b9e5f55" }}>● published</span>}
                       <span className="spacer" style={{ flex: 1 }} />
                       <span className="note">{when(p)}</span>
                     </div>
                     <div className="proj-name" title={p.name}>{p.name}</div>
-                    <div className="acts" style={{ marginTop: 12 }}>
+                    <div className="acts" style={{ marginTop: 12, flexWrap: "wrap" }}>
                       <Link className="btn sm" href={`${m.href}?project=${p.id}`}>Open</Link>
+                      {(p.lab === "agent" || p.lab === "agent-nat") && (
+                        p.published
+                          ? <><Link className="btn ghost sm" href={`/workroom/${p.id}`}>Open in Workroom</Link><button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>Unpublish</button></>
+                          : <button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>🚀 Publish</button>
+                      )}
                       <button className="btn ghost sm" disabled={busy === p.id} onClick={() => rename(p)}>Rename</button>
                       <button className="btn ghost sm danger" disabled={busy === p.id} onClick={() => remove(p)}>Delete</button>
                     </div>

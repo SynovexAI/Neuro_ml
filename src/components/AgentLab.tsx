@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
 import type { RagIndex } from "@/lib/ragUtils";
+import NatAgentPanel from "./NatAgentPanel";
+import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
 type Step = "type" | "build" | "run";
@@ -52,6 +55,7 @@ const toolDefault = (i: number) => ({ x: 344 + i * 158, y: 300 });
 export default function AgentLab() {
   const [step, setStep] = useState<Step>("type");
   const [agentType, setAgentType] = useState<AgentType>("react");
+  const [runtime, setRuntime] = useState<"browser" | "nat">("browser");
   const [buildMode, setBuildMode] = useState<"visual" | "manual" | "prompt">("visual");
 
   // providers / models
@@ -96,7 +100,10 @@ export default function AgentLab() {
   const [connectFrom, setConnectFrom] = useState<{ id: string; kind: "tool" | "agent" } | null>(null);
   const [connectXY, setConnectXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [saved, setSaved] = useState(false);
-  const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown> }[]>([]);
+  const [savedProjectId, setSavedProjectId] = useState("");
+  const [publishing, setPublishing] = useState(false);
+  const [published, setPublished] = useState(false);
+  const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown>; published?: boolean }[]>([]);
   const [loadOpen, setLoadOpen] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -281,8 +288,11 @@ export default function AgentLab() {
     const push = (t: TraceItem) => setTrace((tr) => [...tr, t]);
     const est = (s: string) => Math.round(s.length / 4);
     let calls = 0, toolsUsed = 0, tokens = 0; const t0 = performance.now();
+    const toolCounts: Record<string, number> = {};
+    let iterations = 0, outcome = "max_iters", errorMsg = "";
     try {
       for (let iter = 0; iter < maxIters; iter++) {
+        iterations = iter + 1;
         push({ kind: "thought", text: "thinking…", state: "active" });
         setNodeStatus((s) => ({ ...s, agent: "running" }));
         tokens += messages.reduce((a, m) => a + est(m.content), 0); calls++;
@@ -290,10 +300,10 @@ export default function AgentLab() {
         tokens += est(resp);
         const p = parseReAct(resp);
         setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" }; return c; });
-        if (p.final || (!p.action && !p.final)) { const ans = p.final || resp; setFinalOut(ans); push({ kind: "final", text: ans, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); break; }
+        if (p.final || (!p.action && !p.final)) { const ans = p.final || resp; setFinalOut(ans); push({ kind: "final", text: ans, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); outcome = "success"; break; }
         const tool = tools.find((t) => t.name.toLowerCase() === (p.action || "").toLowerCase());
         push({ kind: "action", text: p.input || "", tool: p.action, state: "active" });
-        if (tool) { toolsUsed++; setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "running" })); }
+        if (tool) { toolsUsed++; toolCounts[tool.name] = (toolCounts[tool.name] || 0) + 1; setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "running" })); }
         const obs = tool ? await tool.run(p.input || "", ctx) : `Unknown tool "${p.action}". Available: ${tools.map((t) => t.name).join(", ")}.`;
         if (tool) setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "done" }));
         setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { ...c[c.length - 1], state: "done" }; return c; });
@@ -301,13 +311,23 @@ export default function AgentLab() {
         messages.push({ role: "assistant", content: resp }); messages.push({ role: "user", content: `Observation: ${obs}` });
         if (iter === maxIters - 1) { push({ kind: "error", text: `Reached the ${maxIters}-step limit without a final answer.`, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); }
       }
-    } catch (e) { push({ kind: "error", text: (e as Error).message, state: "done" }); }
-    setMetrics({ calls, tools: toolsUsed, ms: Math.round(performance.now() - t0), tokens });
+    } catch (e) { outcome = "error"; errorMsg = (e as Error).message; push({ kind: "error", text: (e as Error).message, state: "done" }); }
+    const ms = Math.round(performance.now() - t0);
+    setMetrics({ calls, tools: toolsUsed, ms, tokens });
+    logAgentRun({
+      agentName: name, agentType: "react", runtime: "browser", provider: providerLabel, model,
+      iterations, toolCalls: Object.entries(toolCounts).map(([tool, count]) => ({ tool, count })),
+      toolCallCount: toolsUsed, totalTokens: tokens, latencyMs: ms, outcome, errorMsg,
+    });
     setPendingApproval(null); setRunning(false);
+  }
+  // Fire-and-forget: persist a run summary for the agent analytics dashboard.
+  function logAgentRun(payload: Record<string, unknown>) {
+    fetch("/api/agent/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) }).catch(() => {});
   }
   async function runWorkflow() {
     setRunning(true); setMsg(""); setFinalOut(""); setWfOutputs(steps.map((s) => ({ name: s.name, text: "", state: "" })));
-    let prev = task;
+    let prev = task; let outcome = "success", errorMsg = "", tokens = Math.round(task.length / 4); const t0 = performance.now();
     try {
       for (let k = 0; k < steps.length; k++) {
         setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], state: "active" }; return n; });
@@ -317,10 +337,11 @@ export default function AgentLab() {
         const reader = res.body.getReader(); const dec = new TextDecoder(); let acc = "";
         for (; ;) { const { done, value } = await reader.read(); if (done) break; acc += dec.decode(value, { stream: true }); setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], text: acc }; return n; }); }
         setWfOutputs((o) => { const n = [...o]; n[k] = { ...n[k], state: "done" }; return n; });
-        prev = acc;
+        prev = acc; tokens += Math.round(acc.length / 4);
       }
       setFinalOut(prev);
-    } catch (e) { setMsg("Workflow error: " + (e as Error).message); }
+    } catch (e) { outcome = "error"; errorMsg = (e as Error).message; setMsg("Workflow error: " + errorMsg); }
+    logAgentRun({ agentName: name, agentType: "workflow", runtime: "browser", provider: providerLabel, model, iterations: steps.length, toolCalls: [], toolCallCount: 0, totalTokens: tokens, latencyMs: Math.round(performance.now() - t0), outcome, errorMsg });
     setRunning(false);
   }
   function startRun() { setStep("run"); if (agentType === "react") runReact(); else runWorkflow(); }
@@ -498,12 +519,43 @@ if __name__ == "__main__":
       steps: agentType === "workflow" ? steps.map((s) => ({ name: s.name, instruction: s.instruction })) : undefined, task,
     };
   }
+  // Create-or-update the saved project, returning its id (or "" on failure).
+  async function persist(): Promise<string> {
+    if (savedProjectId) {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedProjectId, name: name || "agent", config: agentConfig() }) });
+      return r.ok ? savedProjectId : "";
+    }
+    const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent", name: name || "agent", config: agentConfig() }) });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j?.id) { setSavedProjectId(j.id); return j.id; }
+    return "";
+  }
   async function saveAgent() {
     setMsg("");
     try {
-      const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent", name: name || "agent", config: agentConfig() }) });
-      if (r.ok) { setSaved(true); setTimeout(() => setSaved(false), 1600); } else { const j = await r.json().catch(() => ({})); setMsg(j.error || "Could not save the agent."); }
+      const id = await persist();
+      if (id) { setSaved(true); setTimeout(() => setSaved(false), 1600); } else setMsg("Could not save the agent.");
     } catch (e) { setMsg((e as Error).message); }
+  }
+  async function publishAgent() {
+    setPublishing(true); setMsg("");
+    try {
+      const id = await persist();
+      if (!id) { toast("Publish failed", "error"); return; }
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      if (r.ok) setPublished(true);
+      toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
+    } catch { toast("Publish failed", "error"); }
+    finally { setPublishing(false); }
+  }
+  async function unpublishAgent() {
+    if (!savedProjectId) { setPublished(false); return; }
+    setPublishing(true);
+    try {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedProjectId, published: false }) });
+      if (r.ok) { setPublished(false); toast("Removed from the Workroom", "success"); } else toast("Could not unpublish", "error");
+    } catch { toast("Could not unpublish", "error"); }
+    finally { setPublishing(false); }
   }
   function exportJson() { const blob = new Blob([JSON.stringify(agentConfig(), null, 2)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.json`; a.click(); URL.revokeObjectURL(a.href); }
   async function loadAgents() {
@@ -512,8 +564,10 @@ if __name__ == "__main__":
     setLoadOpen(true);
   }
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  function applyConfig(cfg: any) {
+  function applyConfig(cfg: any, id?: string, pub?: boolean) {
     if (!cfg) return;
+    setSavedProjectId(id || "");
+    setPublished(!!pub);
     setAgentType(cfg.type === "workflow" ? "workflow" : "react");
     if (cfg.name) setName(String(cfg.name));
     if (cfg.description) setDescription(String(cfg.description));
@@ -534,7 +588,7 @@ if __name__ == "__main__":
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("project");
     if (!id) return;
-    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config); }).catch(() => {});
+    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id, project.published); }).catch(() => {});
   }, []);
 
   const curType = TYPES.find((t) => t.id === agentType)!;
@@ -546,13 +600,23 @@ if __name__ == "__main__":
       <div className="lab-head">
         <div><div className="eyebrow">Lab 03 · orchestration</div><h2 className="page-h">Agent Lab</h2><p className="page-sub" style={{ margin: 0 }}>Pick an agent type, wire it up on a node canvas (or by form / from a prompt), then run it and watch every step.</p></div>
         <div className="acts" style={{ position: "relative" }}>
-          <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
-          <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
-          <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
-          <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
-          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config)}>{a.name}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
+          <div className="seg" style={{ width: 210, marginRight: 6 }}>
+            <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>In-browser</button>
+            <button className={runtime === "nat" ? "on" : ""} onClick={() => setRuntime("nat")}>NVIDIA NAT</button>
+          </div>
+          {runtime === "browser" && <>
+            <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
+            <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
+            <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
+            <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
+            {published
+              ? <><Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f" }}>● Published</Link><button className="btn ghost sm" onClick={unpublishAgent} disabled={publishing} title="Remove from the Workroom">Unpublish</button></>
+              : <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>}
+          </>}
+          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>{a.name}{a.published ? " ●" : ""}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
         </div>
       </div>
+      {runtime === "nat" ? <NatAgentPanel /> : <>
       {provKnown && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before you can run an agent.</div>}
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
@@ -784,6 +848,7 @@ if __name__ == "__main__":
       <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
         <div className="modal"><div className="mh"><b>Agent code · {curType.label}</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadCode}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="note" style={{ marginBottom: 10 }}>Where to use it: run this Python (<code>pip install openai</code>, set <code>OPENAI_BASE_URL</code> &amp; <code>OPENAI_API_KEY</code>) · or <b>💾 Save</b> to My Projects · or <b>⬇ Export JSON</b> to load the config into your own app.</div><div className="code">{buildCode()}</div></div></div>
       </div>
+      </>}
     </>
   );
 }

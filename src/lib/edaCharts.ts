@@ -210,7 +210,8 @@ function buildSingle(ds: Dataset, spec: EdaSpec, theme: Theme): ChartFig {
   }
 
   if (chart === "Strip / jitter") {
-    const y = present.map(() => Math.random());
+    // deterministic pseudo-random jitter (seeded by index) so the plot is stable across redraws
+    const y = present.map((_, i) => { const t = Math.sin(i * 12.9898) * 43758.5453; return t - Math.floor(t); });
     return { data: [{ type: "scatter", x: present, y, mode: "markers", marker: { color: theme.accent, size: 5, opacity: 0.5 } }], layout: base(theme, `${col.name} — strip plot`, { yaxis: { visible: false, range: [-0.2, 1.2] } }) };
   }
 

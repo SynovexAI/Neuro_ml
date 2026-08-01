@@ -1,0 +1,97 @@
+// Small, hand-authored labeled text sets — genuine example sentences (honestly labeled),
+// vectorized with TF-IDF so the from-scratch MLP can classify them like IMDB / AG News.
+export interface TextDataset { key: string; label: string; desc: string; texts: string[]; labels: string[]; classes: string[]; }
+
+// Signal words recur across examples (as they do in real reviews) so bag-of-words generalizes.
+const SENTIMENT: [string, string][] = [
+  ["I loved this movie, it was a great and wonderful film", "positive"],
+  ["A great story with excellent acting, I really loved it", "positive"],
+  ["Wonderful and beautiful, one of the best films I have seen", "positive"],
+  ["I enjoyed every minute, a brilliant and excellent movie", "positive"],
+  ["Great performances and a wonderful script, I highly recommend it", "positive"],
+  ["An amazing film, I loved the beautiful and brilliant ending", "positive"],
+  ["The best movie this year, excellent and truly enjoyable", "positive"],
+  ["I really loved it, a great and amazing experience", "positive"],
+  ["Wonderful acting and a great plot, I enjoyed it a lot", "positive"],
+  ["Beautiful, brilliant and excellent, my new favorite film", "positive"],
+  ["A great and wonderful movie that I loved from start to end", "positive"],
+  ["Excellent and amazing, I really enjoyed this brilliant film", "positive"],
+  ["I loved the wonderful characters and the great music", "positive"],
+  ["One of the best, a beautiful and excellent story", "positive"],
+  ["Great, brilliant and enjoyable, I highly recommend this movie", "positive"],
+  ["A wonderful and amazing film, I loved every single scene", "positive"],
+  ["Excellent acting and a great, beautiful movie I enjoyed", "positive"],
+  ["I loved it, brilliant and wonderful, simply the best film", "positive"],
+  ["A great film with amazing and excellent performances", "positive"],
+  ["Beautiful and wonderful, I really enjoyed this great movie", "positive"],
+  ["A terrible movie, boring and a complete waste of time", "negative"],
+  ["I hated this film, awful acting and a bad, weak plot", "negative"],
+  ["Boring and dull, one of the worst movies I have seen", "negative"],
+  ["Terrible and disappointing, poor acting all the way through", "negative"],
+  ["A bad film, awful and boring from start to end", "negative"],
+  ["I hated it, the worst and most boring movie this year", "negative"],
+  ["Poor script and terrible acting, a real waste of time", "negative"],
+  ["Dull, weak and disappointing, avoid this awful film", "negative"],
+  ["The worst movie, boring and terrible, I hated every scene", "negative"],
+  ["A bad and awful film, poor and disappointing acting", "negative"],
+  ["Terrible and boring, I hated the weak and dull plot", "negative"],
+  ["An awful movie, the worst and most boring I have watched", "negative"],
+  ["Bad, dull and disappointing, a complete waste of time", "negative"],
+  ["I hated this terrible film, poor acting and a weak story", "negative"],
+  ["Boring, awful and bad, easily the worst movie this year", "negative"],
+  ["A disappointing and terrible film, dull and poorly made", "negative"],
+  ["The worst movie ever, boring and awful, avoid it completely", "negative"],
+  ["Terrible, weak and boring, I hated this bad film", "negative"],
+  ["A poor and awful movie, dull and very disappointing", "negative"],
+  ["Bad acting and a boring plot, a terrible waste of time", "negative"],
+];
+
+const TOPICS: [string, string][] = [
+  ["The team won the game with a late goal from their best player", "sports"],
+  ["The player scored twice to help the team win the match", "sports"],
+  ["A great game as the team fought hard to win the match", "sports"],
+  ["The coach praised the players after the team won the game", "sports"],
+  ["The player kicked the ball and scored to win the match", "sports"],
+  ["The team lost the game but the player scored a fine goal", "sports"],
+  ["A close match as both teams fought hard for the win", "sports"],
+  ["The coach picked his best players for the big game", "sports"],
+  ["The team scored early and held on to win the match", "sports"],
+  ["The player passed the ball and the team scored to win", "sports"],
+  ["Fans cheered as the team won the championship game", "sports"],
+  ["The match ended as the player scored the winning goal", "sports"],
+  ["The new phone runs faster software and stores more data", "technology"],
+  ["The app uses data from the internet to update the software", "technology"],
+  ["Engineers released a software update for the computer and phone", "technology"],
+  ["The device connects to the internet and syncs all your data", "technology"],
+  ["A new app lets the phone process data with faster software", "technology"],
+  ["The computer stores your data and runs the latest software", "technology"],
+  ["The phone and the computer share data over the internet", "technology"],
+  ["Developers built an app and updated the device software", "technology"],
+  ["The software update improved the phone and fixed the app", "technology"],
+  ["The device uses the internet to back up your data", "technology"],
+  ["A faster computer runs the new software and the app", "technology"],
+  ["The phone app collects data and sends it over the internet", "technology"],
+  ["The recipe uses fresh food to cook a tasty dish", "food"],
+  ["She cooked a delicious meal with great flavor and taste", "food"],
+  ["The dish had rich flavor, a wonderful meal to cook", "food"],
+  ["The recipe calls for fresh food to make a tasty dish", "food"],
+  ["He cooked the meal in the kitchen with lots of flavor", "food"],
+  ["A tasty dish with fresh food and a rich, deep flavor", "food"],
+  ["The recipe makes a delicious meal that is full of flavor", "food"],
+  ["She cooked fresh food into a tasty and flavorful dish", "food"],
+  ["The kitchen smelled great as the meal began to cook", "food"],
+  ["A simple recipe to cook a tasty dish with good flavor", "food"],
+  ["The chef cooked a meal with fresh food and bold flavor", "food"],
+  ["Taste the dish after you cook the recipe in the kitchen", "food"],
+];
+
+export function textDatasets(): TextDataset[] {
+  const pack = (rows: [string, string][]): { texts: string[]; labels: string[]; classes: string[] } => {
+    const texts = rows.map((r) => r[0]), labels = rows.map((r) => r[1]);
+    return { texts, labels, classes: [...new Set(labels)] };
+  };
+  return [
+    { key: "sentiment", label: "Movie sentiment", desc: "Positive vs negative reviews · binary", ...pack(SENTIMENT) },
+    { key: "topics", label: "News topics", desc: "Sports / technology / food · 3 classes", ...pack(TOPICS) },
+  ];
+}

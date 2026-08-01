@@ -59,7 +59,9 @@ export function safeCalc(expr: string): number {
 }
 
 // ── tool executors ──
-function dateTool(input: string): string {
+// dateTool/statsTool/unitTool/jsonExtractTool are pure (no browser APIs) and are
+// reused by the server-side agent runner (src/lib/serverAgent.ts).
+export function dateTool(input: string): string {
   const now = new Date();
   const m = (input || "").match(/(\d{4}-\d{1,2}-\d{1,2})/);
   if (m) {
@@ -104,7 +106,7 @@ async function approvalTool(input: string, ctx: ToolCtx): Promise<string> {
   if (!ctx.requestApproval) return "Auto-approved (no human approver connected).";
   return await ctx.requestApproval(input || "Approve this action?");
 }
-function statsTool(input: string): string {
+export function statsTool(input: string): string {
   const nums = (input.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
   if (!nums.length) return "Error: provide a list of numbers.";
   const n = nums.length, sum = nums.reduce((a, b) => a + b, 0), mean = sum / n;
@@ -112,7 +114,7 @@ function statsTool(input: string): string {
   const std = Math.sqrt(nums.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
   return `count=${n} sum=${sum} mean=${mean.toFixed(3)} median=${median} min=${Math.min(...nums)} max=${Math.max(...nums)} stdev=${std.toFixed(3)}`;
 }
-function unitTool(input: string): string {
+export function unitTool(input: string): string {
   const m = input.toLowerCase().match(/(-?\d+(?:\.\d+)?)\s*°?\s*([a-z]+)\s*(?:to|in|->|→)\s*°?\s*([a-z]+)/);
   if (!m) return 'Error: use like "10 km to mi" or "100 f to c".';
   const val = parseFloat(m[1]), from = m[2], to = m[3];
@@ -124,7 +126,7 @@ function unitTool(input: string): string {
   if (!isNaN(out)) return `${val}°${from.toUpperCase()} = ${out.toFixed(2)}°${to.toUpperCase()}`;
   return `Error: cannot convert "${from}" to "${to}".`;
 }
-function jsonExtractTool(input: string): string {
+export function jsonExtractTool(input: string): string {
   const nl = input.indexOf("\n");
   let path = "", body = input;
   if (nl > 0) { path = input.slice(0, nl).trim(); body = input.slice(nl + 1); }

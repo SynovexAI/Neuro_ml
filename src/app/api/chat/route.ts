@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { getActiveProvider, getProviderById } from "@/lib/providers";
-import { rateLimit } from "@/lib/net";
+import { rateLimitDb } from "@/lib/ratelimit";
+import { checkQuota, recordUsage, estimateTokens } from "@/lib/usage";
+import { audit } from "@/lib/monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +13,14 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  if (!rateLimit(`chat:${user.id}`, 60, 60_000)) return NextResponse.json({ error: "You're sending requests too fast — wait a moment and try again." }, { status: 429 });
+  if (!(await rateLimitDb("chat", user.id, 60, 60_000))) return NextResponse.json({ error: "You're sending requests too fast — wait a moment and try again." }, { status: 429 });
+
+  // Cost guardrail: block once the user's monthly token budget is spent.
+  const quota = await checkQuota(user);
+  if (!quota.ok) {
+    await audit("quota_exceeded", user.id, { used: quota.used, limit: quota.limit });
+    return NextResponse.json({ error: `Monthly token limit reached (${quota.used.toLocaleString()} / ${quota.limit.toLocaleString()}). Ask an admin to raise your quota.` }, { status: 429 });
+  }
 
   const body = await req.json().catch(() => ({}));
   let prov: Awaited<ReturnType<typeof getActiveProvider>>;
@@ -29,6 +38,8 @@ export async function POST(req: Request) {
   if (!model) return NextResponse.json({ error: "No model selected for the active provider." }, { status: 400 });
 
   const isStreaming = body.streaming !== false;
+  const lab: string | null = body.lab ? String(body.lab) : "chat";
+  const promptText = (body.messages || []).map((m: { content?: unknown }) => String(m?.content ?? "")).join(" ");
 
   const payload = {
     model,
@@ -41,6 +52,8 @@ export async function POST(req: Request) {
     ...(Array.isArray(body.stop) && body.stop.length ? { stop: body.stop } : {}),
     ...(body.responseFormat && body.responseFormat !== "text" ? { response_format: { type: body.responseFormat as string } } : {}),
     stream: isStreaming,
+    // Ask OpenAI-compatible providers to report token usage on the final chunk.
+    ...(isStreaming ? { stream_options: { include_usage: true } } : {}),
   };
 
   let upstream: Response;
@@ -62,8 +75,15 @@ export async function POST(req: Request) {
 
   // Non-streaming: return the full completion text.
   if (!isStreaming) {
-    const j = await upstream.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }> } | null;
+    const j = await upstream.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } } | null;
     const text = j?.choices?.[0]?.message?.content ?? "";
+    const u = j?.usage;
+    void recordUsage({
+      userId: user.id, lab, model,
+      promptTokens: u?.prompt_tokens ?? estimateTokens(promptText),
+      completionTokens: u?.completion_tokens ?? estimateTokens(text),
+      estimated: !u,
+    });
     return new Response(text, { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 
@@ -73,20 +93,33 @@ export async function POST(req: Request) {
   let buf = "";
 
   // Eager reader (avoids pull-backpressure stalls) that ALWAYS terminates:
-  // closes on finish_reason (OpenAI-standard), [DONE], upstream end, or an idle timeout.
+  // closes on [DONE], upstream end, or an idle timeout. After finish_reason we
+  // keep reading briefly to capture the provider's usage chunk for metering.
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
+      let graced = false;
       let idle: ReturnType<typeof setTimeout>;
+      // token metering (real usage from the provider, else estimated from text)
+      let completionChars = 0;
+      let promptTok: number | undefined;
+      let complTok: number | undefined;
       const finish = () => {
         if (closed) return;
         closed = true;
         clearTimeout(idle);
+        void recordUsage({
+          userId: user.id, lab, model,
+          promptTokens: promptTok ?? estimateTokens(promptText),
+          completionTokens: complTok ?? Math.ceil(completionChars / 4),
+          estimated: promptTok == null || complTok == null,
+        });
         try { controller.close(); } catch { /* already closed */ }
         reader.cancel().catch(() => {});
       };
-      // Safety net: close after 8s with no new data if the provider never signals completion.
-      const armIdle = () => { clearTimeout(idle); idle = setTimeout(finish, 8000); };
+      // Safety net: close if no new data arrives. Short grace once generation is
+      // done (just waiting for the trailing usage chunk), long before that.
+      const armIdle = () => { clearTimeout(idle); idle = setTimeout(finish, graced ? 800 : 8000); };
 
       const emit = (line: string): boolean => {
         const l = line.trim();
@@ -100,10 +133,12 @@ export async function POST(req: Request) {
             controller.enqueue(enc.encode(`\n⚠ ${msg}`));
             return true;
           }
+          const usg = (j as { usage?: { prompt_tokens?: number; completion_tokens?: number } | null }).usage;
+          if (usg) { if (usg.prompt_tokens != null) promptTok = usg.prompt_tokens; if (usg.completion_tokens != null) complTok = usg.completion_tokens; }
           const choice = (j as { choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }> }).choices?.[0];
           const tok = choice?.delta?.content;
-          if (tok) controller.enqueue(enc.encode(tok));
-          if (choice?.finish_reason) return true; // generation complete
+          if (tok) { completionChars += tok.length; controller.enqueue(enc.encode(tok)); }
+          if (choice?.finish_reason) { graced = true; armIdle(); } // done; briefly await usage chunk
         } catch { /* keepalive / partial line */ }
         return false;
       };
