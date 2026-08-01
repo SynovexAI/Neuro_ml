@@ -5,7 +5,7 @@ import Link from "next/link";
 import { toast, confirmDialog } from "@/lib/toast";
 
 type Agent = { id: string; name: string };
-type Channel = { id: string; type: string; agentName: string; enabled: boolean; hasSecret: boolean };
+type Channel = { id: string; type: string; agentName: string; enabled: boolean; dailyLimit: number | null; hasSecret: boolean };
 type Kind = "telegram" | "widget" | "api";
 type Result = { type: Kind; id: string; apiKey?: string; botUsername?: string; webhookUrl?: string };
 
@@ -23,6 +23,7 @@ export default function ChannelsManager() {
   const [projectId, setProjectId] = useState("");
   const [token, setToken] = useState("");
   const [publicUrl, setPublicUrl] = useState("");
+  const [cap, setCap] = useState(200);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
@@ -37,7 +38,7 @@ export default function ChannelsManager() {
 
   function openKind(k: Kind) {
     if (agents.length === 0) { toast("Publish an agent first — deploy it from here after.", "info"); return; }
-    setKind(k); setProjectId(agents[0].id); setToken(""); setResult(null);
+    setKind(k); setProjectId(agents[0].id); setToken(""); setCap(200); setResult(null);
   }
 
   async function create() {
@@ -46,6 +47,7 @@ export default function ChannelsManager() {
     try {
       const body: Record<string, unknown> = { type: kind, projectId };
       if (kind === "telegram") { body.token = token.trim(); body.publicUrl = publicUrl.trim(); }
+      if (kind === "widget" || kind === "api") body.dailyLimit = cap;
       const res = await fetch("/api/channels", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const j = await res.json().catch(() => null);
       if (!res.ok) { toast(j?.error || "Deploy failed", "error"); return; }
@@ -55,6 +57,24 @@ export default function ChannelsManager() {
       load();
     } catch (e) { toast((e as Error).message, "error"); }
     finally { setBusy(false); }
+  }
+
+  async function patch(id: string, body: Record<string, unknown>) {
+    const res = await fetch("/api/channels", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, ...body }) });
+    if (!res.ok) { toast("Update failed", "error"); return; }
+    load();
+  }
+  async function toggleEnabled(c: Channel) {
+    await patch(c.id, { enabled: !c.enabled });
+    toast(c.enabled ? "Paused" : "Resumed", "success");
+  }
+  async function editCap(c: Channel) {
+    const cur = c.dailyLimit ?? 200;
+    const v = window.prompt(`Daily message cap for this ${c.type} (max runs/day):`, String(cur));
+    if (v == null) return;
+    const n = Math.max(1, Math.min(100_000, Math.round(Number(v) || cur)));
+    await patch(c.id, { dailyLimit: n });
+    toast(`Daily cap set to ${n}`, "success");
   }
 
   async function remove(c: Channel) {
@@ -89,13 +109,15 @@ export default function ChannelsManager() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {channels.map((c) => (
-            <div key={c.id} className="row" style={{ alignItems: "center", gap: 12, border: "1px solid var(--border)", borderRadius: 10, padding: "11px 14px" }}>
+            <div key={c.id} className="row" style={{ alignItems: "center", gap: 12, border: "1px solid var(--border)", borderRadius: 10, padding: "11px 14px", opacity: c.enabled ? 1 : 0.6 }}>
               <span className="agent-ic">{kindMeta(c.type)?.icon || "🔌"}</span>
-              <div style={{ flex: 1 }}><b style={{ fontSize: 13.5 }}>{c.agentName}</b><div className="note">{kindMeta(c.type)?.label || c.type}</div></div>
+              <div style={{ flex: 1 }}><b style={{ fontSize: 13.5 }}>{c.agentName}</b><div className="note">{kindMeta(c.type)?.label || c.type}{(c.type === "widget" || c.type === "api") ? ` · cap ${c.dailyLimit ?? 200}/day` : ""}</div></div>
               {c.type === "widget" && <Link href={`/embed/${c.id}`} target="_blank" className="btn ghost sm">Open</Link>}
               {c.type === "widget" && <button className="btn ghost sm" onClick={() => copy(embedSnippet(c.id))}>Copy embed</button>}
               {c.type === "api" && <button className="btn ghost sm" onClick={() => copy(`${origin}/api/agent/public/${c.id}`)}>Copy URL</button>}
-              <span className="badge" style={{ color: c.enabled ? "#3b9e5f" : "var(--faint)" }}>{c.enabled ? "live" : "off"}</span>
+              {(c.type === "widget" || c.type === "api") && <button className="btn ghost sm" onClick={() => editCap(c)}>Cap</button>}
+              <button className="btn ghost sm" onClick={() => toggleEnabled(c)}>{c.enabled ? "Pause" : "Resume"}</button>
+              <span className="badge" style={{ color: c.enabled ? "#3b9e5f" : "var(--faint)" }}>{c.enabled ? "live" : "paused"}</span>
               <button className="iconbtn" title="Remove" onClick={() => remove(c)}>🗑</button>
             </div>
           ))}
@@ -118,7 +140,11 @@ export default function ChannelsManager() {
                 <input type="text" placeholder="https://your-app.com" value={publicUrl} onChange={(e) => setPublicUrl(e.target.value)} />
                 <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">ℹ️</span><span>Telegram must reach a public HTTPS URL to deliver messages. On localhost, use a tunnel (e.g. ngrok) and paste that URL here.</span></div>
               </>)}
-              {kind === "widget" && <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">💬</span><span>You’ll get an <code>&lt;iframe&gt;</code> snippet to paste on any site. Anyone with the link can chat with this agent.</span></div>}
+              {(kind === "widget" || kind === "api") && (<>
+                <label className="fld" style={{ marginTop: 12 }}>Daily message cap <span className="note">runs/day before it pauses — protects your token budget</span></label>
+                <input type="number" min={1} max={100000} value={cap} onChange={(e) => setCap(Math.max(1, Math.round(Number(e.target.value) || 200)))} />
+              </>)}
+              {kind === "widget" && <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">💬</span><span>You’ll get an <code>&lt;iframe&gt;</code> snippet to paste on any site. Anyone with the link can chat with this agent — runs use <b>your</b> provider quota, so keep the cap sensible.</span></div>}
               {kind === "api" && <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">🔑</span><span>You’ll get an API key shown <b>once</b>. Store it safely — it authorizes agent runs billed to your account.</span></div>}
 
               <div className="row" style={{ marginTop: 16, justifyContent: "flex-end", gap: 8 }}>

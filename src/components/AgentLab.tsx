@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct,
   type AgentTool, type ToolCtx,
@@ -101,7 +102,8 @@ export default function AgentLab() {
   const [saved, setSaved] = useState(false);
   const [savedProjectId, setSavedProjectId] = useState("");
   const [publishing, setPublishing] = useState(false);
-  const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown> }[]>([]);
+  const [published, setPublished] = useState(false);
+  const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown>; published?: boolean }[]>([]);
   const [loadOpen, setLoadOpen] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -541,8 +543,18 @@ if __name__ == "__main__":
       const id = await persist();
       if (!id) { toast("Publish failed", "error"); return; }
       const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      if (r.ok) setPublished(true);
       toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
     } catch { toast("Publish failed", "error"); }
+    finally { setPublishing(false); }
+  }
+  async function unpublishAgent() {
+    if (!savedProjectId) { setPublished(false); return; }
+    setPublishing(true);
+    try {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedProjectId, published: false }) });
+      if (r.ok) { setPublished(false); toast("Removed from the Workroom", "success"); } else toast("Could not unpublish", "error");
+    } catch { toast("Could not unpublish", "error"); }
     finally { setPublishing(false); }
   }
   function exportJson() { const blob = new Blob([JSON.stringify(agentConfig(), null, 2)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.json`; a.click(); URL.revokeObjectURL(a.href); }
@@ -552,9 +564,10 @@ if __name__ == "__main__":
     setLoadOpen(true);
   }
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  function applyConfig(cfg: any, id?: string) {
+  function applyConfig(cfg: any, id?: string, pub?: boolean) {
     if (!cfg) return;
     setSavedProjectId(id || "");
+    setPublished(!!pub);
     setAgentType(cfg.type === "workflow" ? "workflow" : "react");
     if (cfg.name) setName(String(cfg.name));
     if (cfg.description) setDescription(String(cfg.description));
@@ -575,7 +588,7 @@ if __name__ == "__main__":
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("project");
     if (!id) return;
-    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id); }).catch(() => {});
+    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id, project.published); }).catch(() => {});
   }, []);
 
   const curType = TYPES.find((t) => t.id === agentType)!;
@@ -596,9 +609,11 @@ if __name__ == "__main__":
             <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
             <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
             <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
-            <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>
+            {published
+              ? <><Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f" }}>● Published</Link><button className="btn ghost sm" onClick={unpublishAgent} disabled={publishing} title="Remove from the Workroom">Unpublish</button></>
+              : <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>}
           </>}
-          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id)}>{a.name}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
+          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>{a.name}{a.published ? " ●" : ""}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
         </div>
       </div>
       {runtime === "nat" ? <NatAgentPanel /> : <>

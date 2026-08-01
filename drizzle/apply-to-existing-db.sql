@@ -128,3 +128,4 @@ CREATE TABLE IF NOT EXISTS `channels` (
 	CONSTRAINT `channels_id` PRIMARY KEY(`id`)
 );
 CREATE INDEX IF NOT EXISTS `channels_project_idx` ON `channels` (`project_id`);
+ALTER TABLE `channels` ADD COLUMN IF NOT EXISTS `daily_limit` int;

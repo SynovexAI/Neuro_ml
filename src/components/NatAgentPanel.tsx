@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { estCostUsd, fmtUsd } from "@/lib/pricing";
 import { toast } from "@/lib/toast";
 import Markdown from "@/components/Markdown";
@@ -11,7 +12,7 @@ type KbOpt = { id: string; name: string; status: string; chunkCount: number };
 type Step = { name: string; type: string; ms: number | null; tokens: number };
 type NatResult = { answer: string; latency_ms: number; model: string; tool_names: string[]; unsupported_tools: string[]; context_used?: boolean; profiler?: { total_ms?: number; steps?: Step[] }; usage?: { total_tokens?: number } };
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Saved = { id: string; name: string; config: any };
+type Saved = { id: string; name: string; config: any; published?: boolean };
 
 const SUPPORTED = [
   { id: "calculator", label: "Calculator", icon: "🧮", sub: "arithmetic" },
@@ -52,6 +53,7 @@ export default function NatAgentPanel() {
   const [saved, setSaved] = useState<Saved[]>([]);
   const [savedId, setSavedId] = useState("");
   const [publishing, setPublishing] = useState(false);
+  const [published, setPublished] = useState(false);
 
   // chat + test
   const [chat, setChat] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
@@ -146,9 +148,18 @@ export default function NatAgentPanel() {
       const id = await persist();
       if (!id) { toast("Publish failed", "error"); return; }
       const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
-      if (r.ok) toast(`Published “${agentName}” — open it in the Workroom`, "success");
+      if (r.ok) { setPublished(true); toast(`Published “${agentName}” — open it in the Workroom`, "success"); }
       else toast("Publish failed", "error");
     } catch { toast("Publish failed", "error"); }
+    finally { setPublishing(false); }
+  }
+  async function unpublish() {
+    if (!savedId) { setPublished(false); return; }
+    setPublishing(true);
+    try {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedId, published: false }) });
+      if (r.ok) { setPublished(false); toast("Removed from the Workroom", "success"); } else toast("Could not unpublish", "error");
+    } catch { toast("Could not unpublish", "error"); }
     finally { setPublishing(false); }
   }
   async function openLoad() {
@@ -156,9 +167,10 @@ export default function NatAgentPanel() {
     try { const j = await fetch("/api/projects?lab=agent-nat").then((r) => r.json()); setSaved(j.projects || []); } catch { setSaved([]); }
     setLoadOpen(true);
   }
-  function applyConfig(c: any, id?: string) {
+  function applyConfig(c: any, id?: string, pub?: boolean) {
     if (!c) return;
     setSavedId(id || "");
+    setPublished(!!pub);
     if (c.agentName) setAgentName(c.agentName);
     if (c.agentType) setAgentType(c.agentType);
     if (c.providerId) setProviderId(c.providerId);
@@ -202,9 +214,11 @@ export default function NatAgentPanel() {
         <button className="btn ghost sm" onClick={save}>💾 Save</button>
         <div style={{ position: "relative" }}>
           <button className="btn ghost sm" onClick={openLoad}>📂 Load</button>
-          {loadOpen && <div className="menu-pop"><div className="menu-hd">Saved agents</div>{saved.length ? saved.map((s) => <div key={s.id} className="menu-item" onClick={() => applyConfig(s.config, s.id)}>{s.name}</div>) : <div className="menu-item" style={{ color: "var(--faint)" }}>none saved</div>}</div>}
+          {loadOpen && <div className="menu-pop"><div className="menu-hd">Saved agents</div>{saved.length ? saved.map((s) => <div key={s.id} className="menu-item" onClick={() => applyConfig(s.config, s.id, s.published)}>{s.name}{s.published ? " ●" : ""}</div>) : <div className="menu-item" style={{ color: "var(--faint)" }}>none saved</div>}</div>}
         </div>
-        <button className="btn sm" onClick={publish} disabled={publishing || !providerId || !model} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>
+        {published
+          ? <><Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f" }}>● Published</Link><button className="btn ghost sm" onClick={unpublish} disabled={publishing} title="Remove from the Workroom">Unpublish</button></>
+          : <button className="btn sm" onClick={publish} disabled={publishing || !providerId || !model} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>

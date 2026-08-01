@@ -23,6 +23,20 @@ export default function WorkroomChat({ agentId, agentName, cfg }: { agentId: str
 
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }, [msgs, busy]);
 
+  // Reveals the final answer word-by-word (both runtimes return it whole, so this
+  // is a client-side reveal, not token streaming — but it reads the same).
+  async function reveal(full: string, ms: number) {
+    setMsgs((m) => [...m, { role: "assistant", text: "", ms }]);
+    const words = full.split(/(\s+)/);
+    const step = Math.max(1, Math.ceil(words.length / 140));
+    for (let w = 0; w < words.length; w += step) {
+      const partial = words.slice(0, w + step).join("");
+      setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], text: partial }; return c; });
+      await new Promise((r) => setTimeout(r, 16));
+    }
+    setMsgs((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], text: full }; return c; });
+  }
+
   async function send(text?: string) {
     const q = (text ?? input).trim();
     if (!q || busy) return;
@@ -38,11 +52,13 @@ export default function WorkroomChat({ agentId, agentName, cfg }: { agentId: str
       });
       const j = await res.json().catch(() => null);
       const ms = Math.round(performance.now() - started);
-      setMsgs((m) => [...m, { role: "assistant", text: res.ok ? (j?.answer || "(no answer)") : `⚠ ${j?.error || `Failed (${res.status})`}`, ms }]);
+      setBusy(false);
+      if (res.ok) await reveal(j?.answer || "(no answer)", ms);
+      else setMsgs((m) => [...m, { role: "assistant", text: `⚠ ${j?.error || `Failed (${res.status})`}`, ms }]);
     } catch (e) {
+      setBusy(false);
       setMsgs((m) => [...m, { role: "assistant", text: `⚠ ${(e as Error).message}` }]);
     }
-    setBusy(false);
   }
 
   const starters = ["What can you help me with?", "Give me a quick example of what you do.", "Summarize your instructions in one line."];

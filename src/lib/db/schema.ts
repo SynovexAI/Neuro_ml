@@ -59,6 +59,7 @@ export const channels = mysqlTable("channels", {
   type: varchar("type", { length: 24 }).notNull(),   // telegram | api | widget
   secretEnc: text("secret_enc"),                     // encrypted bot token / API key
   enabled: boolean("enabled").notNull().default(true),
+  dailyLimit: int("daily_limit"),                    // max runs/day for public channels (NULL = default)
   createdAt: timestamp("created_at").defaultNow(),
 }, (t) => [index("channels_project_idx").on(t.projectId)]);
 

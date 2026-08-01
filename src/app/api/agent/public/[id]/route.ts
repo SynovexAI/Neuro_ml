@@ -28,6 +28,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "anon";
   if (!(await rateLimitDb(`pub:${id}`, ip, 30, 60_000))) return NextResponse.json({ error: "Rate limit — slow down." }, { status: 429, headers: CORS });
+  // Per-channel daily cap so a public link can't run up the owner's bill.
+  const cap = ch.dailyLimit ?? 200;
+  if (!(await rateLimitDb(`pubday:${id}`, id, cap, 24 * 60 * 60_000))) return NextResponse.json({ error: "This assistant has reached its daily message limit. Try again tomorrow." }, { status: 429, headers: CORS });
 
   const b = await req.json().catch(() => ({}));
   const task = String(b.message || b.task || "").trim();
