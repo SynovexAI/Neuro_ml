@@ -3,10 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   genDataset, initNet, newOpt, trainEpoch, fullEval, predictVec, predictClass,
-  fitScaler, applyScaler, scaleRow, dlSurface,
-  type Net, type OptState, type DlTask, type Optimizer, type DlEval,
+  fitScaler, applyScaler, scaleRow, dlSurface, classWeights,
+  type Net, type OptState, type DlTask, type Optimizer, type DlEval, type ScaleMethod,
 } from "@/lib/dlUtils";
-import { parseCSV, buildMatrix, type Dataset } from "@/lib/mlUtils";
+import { parseCSV, buildMatrix, type Dataset, type PrepStep } from "@/lib/mlUtils";
 import { pca2 } from "@/lib/ragUtils";
 import { plotlyTheme } from "@/lib/edaCharts";
 import Plot from "@/components/Plot";
@@ -47,7 +47,10 @@ export default function DlLab() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [data, setData] = useState<Resolved | null>(null);
-  const [testFrac] = useState(0.25);
+  const [testFrac, setTestFrac] = useState(0.25);
+  const [scaleMethod, setScaleMethod] = useState<ScaleMethod>("standard");
+  const [encMethod, setEncMethod] = useState<"One-Hot" | "Ordinal" | "Frequency" | "Binary">("One-Hot");
+  const [balanceClasses, setBalanceClasses] = useState(false);
   const [exFx, setExFx] = useState(0);
   const [exFy, setExFy] = useState(1);
   const [exMode, setExMode] = useState<"scatter" | "pca" | "dist">("scatter");
@@ -96,18 +99,39 @@ export default function DlLab() {
     if (col.type === "num" && uniq > 12) return "regression";
     return uniq <= 2 ? "binary" : "multiclass";
   }
+  // Encoding steps for the categorical feature columns, using the chosen method.
+  function encSteps(d: Dataset, fcols: string[]): PrepStep[] {
+    return d.columns.filter((c) => c.type === "cat" && fcols.includes(c.name) && c.name !== target).map((c) => ({ op: "Encode categorical", cols: [c.name], method: encMethod }));
+  }
+  function deriveCsv(): Resolved | null {
+    if (!ds || !feats.length || !target) return null;
+    const fcols = feats.filter((f) => f !== target);
+    const dlTask = detectTask(ds, target);
+    const b = buildMatrix(ds, fcols, target, dlTask === "regression" ? "regression" : "classification", encSteps(ds, fcols));
+    if (!b.X.length) return null;
+    const classes = b.classes ?? [];
+    const task: DlTask = dlTask === "regression" ? "regression" : (classes.length <= 2 ? "binary" : "multiclass");
+    return { X: b.X, y: b.y, task, classes, featNames: b.featureNames, source: dsName || "uploaded.csv" };
+  }
   function buildFromCsv() {
     if (!ds || !feats.length || !target) { setMsg("Pick at least one feature and a target."); return; }
     try {
-      const dlTask = detectTask(ds, target);
-      const b = buildMatrix(ds, feats.filter((f) => f !== target), target, dlTask === "regression" ? "regression" : "classification", []);
-      if (!b.X.length) { setMsg("No usable rows."); return; }
-      const classes = b.classes ?? [];
-      const task: DlTask = dlTask === "regression" ? "regression" : (classes.length <= 2 ? "binary" : "multiclass");
-      setData({ X: b.X, y: b.y, task, classes, featNames: b.featureNames, source: dsName || "uploaded.csv" });
-      resetTraining(); setStep("explore"); setMsg("");
+      const d = deriveCsv();
+      if (!d) { setMsg("No usable rows — pick at least one feature and a target."); return; }
+      setData(d); resetTraining(); setStep("explore"); setMsg("");
     } catch (e) { setMsg("Build error: " + (e as Error).message); }
   }
+  // Changing the encoding re-runs buildMatrix → new input columns → reset training.
+  useEffect(() => {
+    if (!data || source !== "csv" || !ds) return;
+    try { const d = deriveCsv(); if (d) { setData(d); resetTraining(); } } catch { /* keep prior matrix */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [encMethod]);
+  // Scaling method, split ratio, and class-balancing all change the matrix/loss → any trained net is stale.
+  useEffect(() => {
+    if (data && netRef.current) resetTraining();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scaleMethod, testFrac, balanceClasses]);
   function resetTraining() { stopTrain(); setEpoch(0); epochRef.current = 0; setHistory([]); setSurface(null); setEvalR(null); netRef.current = null; optRef.current = null; scRef.current = null; splitRef.current = null; }
 
   const outDim = data ? (data.task === "multiclass" ? data.classes.length : 1) : 1;
@@ -116,9 +140,10 @@ export default function DlLab() {
   // ── training ──
   function prepareSplit() {
     if (!data) return null;
-    const sc = fitScaler(data.X); scRef.current = sc;
-    const Xs = applyScaler(data.X, sc);
-    const sp = splitData(Xs, data.y, testFrac); splitRef.current = sp;
+    // Split raw first, then fit the scaler on TRAIN ONLY (no leakage), apply to both.
+    const raw = splitData(data.X, data.y, testFrac);
+    const sc = fitScaler(raw.Xtr, scaleMethod); scRef.current = sc;
+    const sp = { Xtr: applyScaler(raw.Xtr, sc), ytr: raw.ytr, Xte: applyScaler(raw.Xte, sc), yte: raw.yte }; splitRef.current = sp;
     // raw feature ranges (first two) for boundary axes
     const f0 = data.X.map((r) => r[0]); const f1 = data.featNames.length > 1 ? data.X.map((r) => r[1]) : f0;
     rangeRef.current = { lo: [Math.min(...f0), Math.min(...f1)], hi: [Math.max(...f0), Math.max(...f1)] };
@@ -128,10 +153,11 @@ export default function DlLab() {
     if (!data) return; stopTrain();
     const sp = prepareSplit(); if (!sp) return;
     const net = initNet(data.X[0].length, hidden, outDim, act, data.task); netRef.current = net; optRef.current = newOpt(net, optimizer);
+    const cw = balanceClasses && data.task !== "regression" ? classWeights(sp.ytr, K) : undefined;
     setHistory([]); setEpoch(0); setEvalR(null); setRunning(true); epochRef.current = 0;
     timer.current = setInterval(() => {
       const n = netRef.current!, o = optRef.current!, s = splitRef.current!;
-      const stat = trainEpoch(n, s.Xtr, s.ytr, { lr, l2, batchSize }, o);
+      const stat = trainEpoch(n, s.Xtr, s.ytr, { lr, l2, batchSize }, o, cw);
       const veval = fullEval(n, s.Xte, s.yte, data.classes);
       const ep = ++epochRef.current;
       setEpoch(ep);
@@ -335,24 +361,98 @@ export default function DlLab() {
       )}
 
       {step === "prep" && data && (() => {
-        const sc = fitScaler(data.X); const nf = data.featNames.length; const H = 240;
-        const flow = [`${nf} feature${nf === 1 ? "" : "s"}`, "standardize  z = (x−μ)/σ", `split  ${Math.round(data.X.length * (1 - testFrac))} train / ${Math.round(data.X.length * testFrac)} test`, "→ network"];
-        const fj = Math.min(exFx, nf - 1); const raw = data.X.map((r) => r[fj]); const scv = raw.map((v) => (v - sc.mean[fj]) / sc.std[fj]);
+        const nf = data.featNames.length; const H = 210;
+        const isCsv = source === "csv" && !!ds;
+        const scViz = fitScaler(data.X, scaleMethod);
+        const scaleName = ({ standard: "Standard z-score", minmax: "Min-Max [0,1]", robust: "Robust (median/IQR)", none: "None (raw)" } as const)[scaleMethod];
+        const nTest = Math.max(1, Math.round(data.X.length * testFrac)); const nTrain = data.X.length - nTest;
+        // real facts about what the auto-pipeline did to the loaded data
+        let imputed = 0; const catInfo: { name: string; n: number }[] = [];
+        if (isCsv && ds) { const fcols = feats.filter((f) => f !== target); ds.columns.filter((c) => fcols.includes(c.name)).forEach((c) => { if (c.type === "num") imputed += c.values.filter((v) => v == null).length; else catInfo.push({ name: c.name, n: data.featNames.filter((fn) => fn === c.name || fn.startsWith(c.name + "=") || fn.startsWith(c.name + "_b")).length }); }); }
+        const rawCols = isCsv ? feats.filter((f) => f !== target).length : nf;
+        const hasCat = catInfo.length > 0;
+        const cnt = data.task !== "regression" ? (() => { const c = new Array(K).fill(0); data.y.forEach((v) => c[v]++); return c; })() : null;
+        const cw = cnt && balanceClasses ? classWeights(data.y, K) : null;
+        const flowSteps: { l: string; s: string; on: boolean }[] = [
+          { l: "Raw", s: `${rawCols} col${rawCols === 1 ? "" : "s"}`, on: true },
+          { l: "Impute", s: imputed ? `${imputed} filled` : "none", on: imputed > 0 },
+          { l: "Encode", s: hasCat ? encMethod : "none", on: hasCat },
+          { l: "Scale", s: scaleMethod === "none" ? "off" : scaleName, on: scaleMethod !== "none" },
+          { l: "Split", s: `${nTrain}/${nTest}`, on: true },
+          { l: "Network", s: `${nf} in`, on: true },
+        ];
+        const summary: { ic: string; txt: React.ReactNode }[] = [];
+        summary.push({ ic: "🧮", txt: <><b>{nf}</b> model input{nf === 1 ? "" : "s"} from <b>{rawCols}</b> {isCsv ? "selected" : "raw"} column{rawCols === 1 ? "" : "s"}{data.task !== "regression" ? <> · target <b>{data.classes.length}</b> classes</> : <> · numeric target</>}</> });
+        if (isCsv) {
+          summary.push({ ic: "🩹", txt: imputed ? <>Imputed <b>{imputed}</b> missing numeric value{imputed === 1 ? "" : "s"} with the column mean</> : <>No missing values found — nothing imputed</> });
+          if (hasCat) catInfo.forEach((ci) => summary.push({ ic: "🔤", txt: <><b>{encMethod}</b> encoded <b>{ci.name}</b> → <b>{ci.n}</b> column{ci.n === 1 ? "" : "s"}</> }));
+          else summary.push({ ic: "🔤", txt: <>No categorical columns — no encoding needed</> });
+        } else summary.push({ ic: "🔢", txt: <>Built-in <b>{data.source}</b> — all numeric, no missing values or categoricals</> });
+        summary.push({ ic: "📏", txt: <>Scaling: <b>{scaleName}</b>{scaleMethod === "none" ? " — features keep their raw magnitudes" : ", fit on the training split only"}</> });
+        if (cnt) summary.push({ ic: "⚖️", txt: balanceClasses ? <>Class weights <b>on</b> — rarer classes are upweighted in the loss</> : <>Class weights off — classes train in their natural proportion</> });
         const boxRaw = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => r[j]), marker: { color: "#5b7cff" }, boxpoints: false }));
-        const boxScaled = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => (r[j] - sc.mean[j]) / sc.std[j]), marker: { color: "#3ecf7f" }, boxpoints: false }));
-        return <div className="card"><div className="card-h"><span className="t">Preprocess — standardize &amp; split</span></div>
+        const boxScaled = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => (r[j] - scViz.mean[j]) / scViz.std[j]), marker: { color: "#3ecf7f" }, boxpoints: false }));
+        const fj = Math.min(exFx, nf - 1); const raw = data.X.map((r) => r[fj]); const scv = raw.map((v) => (v - scViz.mean[fj]) / scViz.std[fj]);
+        const SCALES: [ScaleMethod, string, string][] = [["standard", "Standard", "z=(x−μ)/σ"], ["minmax", "Min-Max", "→[0,1]"], ["robust", "Robust", "median/IQR"], ["none", "None", "raw"]];
+        const optPanel: React.CSSProperties = { ...panelSt, padding: 14 };
+        return <div className="card"><div className="card-h"><span className="t">Preprocess — turn raw data into a training matrix</span></div>
           <div className="card-b">
-            <div className="teach-note"><span className="ic">📏</span><span>Neural nets train far better on <b>standardized</b> inputs — each feature is rescaled to mean&nbsp;0, std&nbsp;1 with <b>z = (x − μ) / σ</b> — so no large-scale feature dominates the gradients. Then a test set is held out and never trained on.</span></div>
-            <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap", margin: "12px 0" }}>{flow.map((s, i) => <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--panel)", fontFamily: "var(--mono)", fontSize: 12 }}>{s}</span>{i < flow.length - 1 && <span style={{ color: "var(--faint)" }}>→</span>}</span>)}</div>
-            <label className="fld">Feature scales — raw (blue) vs standardized (green). Standardizing pulls every feature onto the same scale.</label>
-            <div className="split col-2e" style={{ gap: 12 }}>
-              <Plot data={boxRaw as never} layout={lay("raw feature ranges", "", "value", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
-              <Plot data={boxScaled as never} layout={lay("standardized (z-score)", "", "z", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+            <div className="teach-note"><span className="ic">🛠️</span><span>Every choice here <b>actually rebuilds the matrix the network trains on</b>: encoding sets the input width, scaling rescales each feature (fit on the train split only, so no leakage), the split holds out a test set, and class weights reshape the loss. Change any of them and the model must retrain.</span></div>
+            <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap", margin: "14px 0 4px" }}>{flowSteps.map((f, i) => <span key={f.l} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ padding: "5px 11px", borderRadius: 8, border: `1px solid ${f.on ? "var(--border-strong)" : "var(--border)"}`, background: f.on ? "var(--surface)" : "var(--panel)", opacity: f.on ? 1 : 0.5, minWidth: 62, textAlign: "center" }}><span style={{ fontWeight: 600, fontSize: 12 }}>{f.l}</span><br /><span className="note" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{f.s}</span></span>{i < flowSteps.length - 1 && <span style={{ color: "var(--faint)" }}>→</span>}</span>)}</div>
+
+            <div className="split col-2e" style={{ gap: 16, alignItems: "start", marginTop: 14 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={optPanel}>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>What happened to your data</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{summary.map((s, i) => <div key={i} className="row" style={{ gap: 8, alignItems: "start", fontSize: 12.5 }}><span style={{ flex: "0 0 auto" }}>{s.ic}</span><span style={{ color: "var(--muted)" }}>{s.txt}</span></div>)}</div>
+                </div>
+                <div style={optPanel}>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Options</div>
+                  <label className="fld">Feature scaling</label>
+                  <div className="chips" style={{ marginBottom: 12 }}>{SCALES.map(([m, l, sub]) => <button key={m} className={`chip ${scaleMethod === m ? "on" : ""}`} onClick={() => setScaleMethod(m)} title={sub}>{l}</button>)}</div>
+                  <label className="fld">Categorical encoding {!hasCat && <span className="note">— no categorical columns</span>}</label>
+                  <select value={encMethod} onChange={(e) => setEncMethod(e.target.value as typeof encMethod)} disabled={!hasCat} style={{ width: "100%", marginBottom: 12, opacity: hasCat ? 1 : 0.5 }}>
+                    {["One-Hot", "Ordinal", "Frequency", "Binary"].map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  <label className="fld">Test split — {Math.round(testFrac * 100)}% held out ({nTest} rows)</label>
+                  <input type="range" min={0.1} max={0.4} step={0.05} value={testFrac} onChange={(e) => setTestFrac(+e.target.value)} style={{ width: "100%", marginBottom: 12 }} />
+                  <label className="row" style={{ gap: 8, alignItems: "center", cursor: data.task === "regression" ? "not-allowed" : "pointer", opacity: data.task === "regression" ? 0.5 : 1 }}>
+                    <input type="checkbox" checked={balanceClasses} disabled={data.task === "regression"} onChange={(e) => setBalanceClasses(e.target.checked)} />
+                    <span style={{ fontSize: 12.5 }}>Balance classes <span className="note">— upweight rare classes in the loss{data.task === "regression" ? " (classification only)" : ""}</span></span>
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div>
+                  <label className="fld">Feature scales — raw (blue) vs {scaleName} (green){scaleMethod === "none" && " — identical: scaling is off"}</label>
+                  <div className="split col-2e" style={{ gap: 10 }}>
+                    <Plot data={boxRaw as never} layout={lay("raw ranges", "", "value", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+                    <Plot data={boxScaled as never} layout={lay(scaleName, "", "scaled", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+                  </div>
+                </div>
+                <div>
+                  <label className="fld">Train / test split</label>
+                  <div style={{ display: "flex", height: 30, borderRadius: 7, overflow: "hidden", border: "1px solid var(--border)" }}>
+                    <div style={{ width: `${(1 - testFrac) * 100}%`, background: "var(--accent)", color: "#fff", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>train · {nTrain}</div>
+                    <div style={{ width: `${testFrac * 100}%`, background: "var(--panel-2)", color: "var(--muted)", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>test · {nTest}</div>
+                  </div>
+                </div>
+                {cnt && (() => { const mx = Math.max(...cnt, 1); return <div>
+                  <label className="fld">Class balance{balanceClasses && " — with training weights"}</label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>{cnt.map((c, i) => <div key={i} className="row" style={{ gap: 8, alignItems: "center", fontSize: 11.5 }}>
+                    <span style={{ flex: "0 0 84px", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.classes[i] ?? `class ${i}`}</span>
+                    <div style={{ flex: 1, height: 14, background: "var(--panel-2)", borderRadius: 4, overflow: "hidden" }}><div style={{ width: `${(c / mx) * 100}%`, height: "100%", background: PAL[i % PAL.length] }} /></div>
+                    <span className="mono" style={{ flex: "0 0 auto", color: "var(--faint)" }}>{c}{cw && <> · ×{cw[i].toFixed(2)}</>}</span>
+                  </div>)}</div>
+                </div>; })()}
+              </div>
             </div>
-            <div className="row" style={{ gap: 8, alignItems: "center", margin: "12px 0 4px" }}><label className="note">one feature, before/after:</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></div>
+
+            <div className="row" style={{ gap: 8, alignItems: "center", margin: "16px 0 4px" }}><label className="note">Inspect one feature before/after scaling:</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></div>
             <div className="split col-2e" style={{ gap: 12 }}>
               <Plot data={[{ type: "histogram", x: raw, marker: { color: "#5b7cff" }, opacity: 0.85 }] as never} layout={lay(`${data.featNames[fj]} — raw`, data.featNames[fj], "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
-              <Plot data={[{ type: "histogram", x: scv, marker: { color: "#3ecf7f" }, opacity: 0.85 }] as never} layout={lay(`${data.featNames[fj]} — standardized`, "z-score", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+              <Plot data={[{ type: "histogram", x: scv, marker: { color: "#3ecf7f" }, opacity: 0.85 }] as never} layout={lay(`${data.featNames[fj]} — ${scaleName}`, "scaled", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
             </div>
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("explore")}>← Back</button><button className="btn" onClick={() => setStep("arch")}>Next: Architecture →</button></div>
           </div>

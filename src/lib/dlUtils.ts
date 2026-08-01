@@ -28,12 +28,17 @@ export function genDataset(kind: string, n = 240, noise = 0.15, seed = 3): DataS
   return { X, y, task: "binary", classes: ["0", "1"], featNames: ["x1", "x2"] };
 }
 
-// ── standardization (neural nets need scaled inputs) ──
-export function fitScaler(X: number[][]): { mean: number[]; std: number[] } {
-  const d = X[0]?.length || 0, n = X.length || 1; const mean = new Array(d).fill(0), std = new Array(d).fill(0);
-  X.forEach((r) => r.forEach((v, j) => { mean[j] += v / n; }));
-  X.forEach((r) => r.forEach((v, j) => { std[j] += (v - mean[j]) ** 2 / n; }));
-  for (let j = 0; j < d; j++) std[j] = Math.sqrt(std[j]) || 1;
+// ── feature scaling (neural nets need scaled inputs) — returns {center, scale} as {mean, std} ──
+export type ScaleMethod = "standard" | "minmax" | "robust" | "none";
+export function fitScaler(X: number[][], method: ScaleMethod = "standard"): { mean: number[]; std: number[] } {
+  const d = X[0]?.length || 0; const mean = new Array(d).fill(0), std = new Array(d).fill(1);
+  for (let j = 0; j < d; j++) {
+    const col = X.map((r) => r[j]).filter((v) => Number.isFinite(v)); if (!col.length) continue;
+    if (method === "none") { mean[j] = 0; std[j] = 1; }
+    else if (method === "minmax") { const mn = Math.min(...col), mx = Math.max(...col); mean[j] = mn; std[j] = (mx - mn) || 1; }
+    else if (method === "robust") { const s = [...col].sort((a, b) => a - b); const q = (p: number) => { const i = (s.length - 1) * p, lo = Math.floor(i); return s[lo] + (s[Math.ceil(i)] - s[lo]) * (i - lo); }; mean[j] = q(0.5); std[j] = (q(0.75) - q(0.25)) || 1; }
+    else { const m = col.reduce((a, b) => a + b, 0) / col.length; mean[j] = m; std[j] = Math.sqrt(col.reduce((a, b) => a + (b - m) ** 2, 0) / col.length) || 1; }
+  }
   return { mean, std };
 }
 export const applyScaler = (X: number[][], s: { mean: number[]; std: number[] }): number[][] => X.map((r) => r.map((v, j) => (v - s.mean[j]) / s.std[j]));
@@ -78,12 +83,13 @@ export function newOpt(net: Net, optimizer: Optimizer): OptState {
 }
 
 // One mini-batch: accumulate gradients over the batch, then apply the optimizer update.
-function trainBatch(net: Net, X: number[][], y: number[], batch: number[], lr: number, l2: number, opt: OptState) {
+function trainBatch(net: Net, X: number[][], y: number[], batch: number[], lr: number, l2: number, opt: OptState, cw?: number[]) {
   const gW = net.W.map((l) => l.map((r) => r.map(() => 0))), gb = net.b.map((l) => l.map(() => 0));
   for (const bi of batch) {
     const { as } = forward(net, X[bi]); const L = net.W.length; const t = target(net, y[bi]);
     const deltas: number[][] = new Array(L);
-    deltas[L - 1] = as[L].map((o, i) => o - t[i]); // pred - target (matched loss/activation)
+    const w = cw && net.task !== "regression" ? (cw[y[bi]] ?? 1) : 1; // class weight scales this sample's gradient
+    deltas[L - 1] = as[L].map((o, i) => (o - t[i]) * w); // pred - target (matched loss/activation)
     for (let l = L - 2; l >= 0; l--) { const dl = new Array(net.sizes[l + 1]).fill(0); for (let j = 0; j < net.sizes[l + 1]; j++) { let s = 0; for (let i = 0; i < net.sizes[l + 2]; i++) s += net.W[l + 1][i][j] * deltas[l + 1][i]; dl[j] = s * actD(net.act, as[l + 1][j]); } deltas[l] = dl; }
     for (let l = 0; l < L; l++) for (let i = 0; i < net.W[l].length; i++) { const row = net.W[l][i]; for (let j = 0; j < row.length; j++) gW[l][i][j] += deltas[l][i] * as[l][j]; gb[l][i] += deltas[l][i]; }
   }
@@ -102,12 +108,18 @@ function trainBatch(net: Net, X: number[][], y: number[], batch: number[], lr: n
 }
 
 export interface EpochStat { loss: number; acc: number }
-export function trainEpoch(net: Net, X: number[][], y: number[], p: { lr: number; l2: number; batchSize: number }, opt: OptState): EpochStat {
+export function trainEpoch(net: Net, X: number[][], y: number[], p: { lr: number; l2: number; batchSize: number }, opt: OptState, cw?: number[]): EpochStat {
   const n = X.length; const idx = [...Array(n).keys()]; const rng = mulberry32(777 + opt.t);
   for (let i = n - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
   const B = Math.max(1, Math.min(p.batchSize || n, n));
-  for (let s = 0; s < n; s += B) trainBatch(net, X, y, idx.slice(s, s + B), p.lr, p.l2, opt);
+  for (let s = 0; s < n; s += B) trainBatch(net, X, y, idx.slice(s, s + B), p.lr, p.l2, opt, cw);
   return evalNet(net, X, y);
+}
+
+// Inverse-frequency class weights (balanced): w_k = N / (K · count_k), mean ≈ 1.
+export function classWeights(y: number[], K: number): number[] {
+  const cnt = new Array(K).fill(0); y.forEach((c) => { if (c >= 0 && c < K) cnt[c]++; });
+  const N = y.length || 1; return cnt.map((c) => (c > 0 ? N / (K * c) : 1));
 }
 
 // Loss + a headline metric (accuracy for classification, R² for regression).
