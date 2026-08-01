@@ -943,24 +943,20 @@ ${evalBlock}`;
     if (!ds || !b || !b.X.length || !b.featureNames.length) return mCard(`${label} — how it learns`, <div className="note">Pick your features &amp; target first — then this walks the model through your actual rows.</div>);
     const X = b.X, Y = b.y, names = b.featureNames, classes = b.classes;
     const n = X.length, nf = names.length, K = classes?.length ?? 0;
-    // plot geometry — every coordinate is clamped to a finite 0…1 so a missing/NaN
-    // cell can never reach an SVG attribute (which would throw "Received NaN").
-    const PX0 = 30, PX1 = 344, PYb = 288, PYt = 22;
-    const clamp01 = (t: number) => (Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0);
-    const sx = (t: number) => PX0 + (PX1 - PX0) * clamp01(t);
-    const sy = (t: number) => PYb + (PYt - PYb) * clamp01(t);
     const fv = (x: number | undefined, dp = 2) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(dp) : "—");
     const pick = (m: number, mx: number) => (m <= mx ? [...Array(m).keys()] : [...Array(mx).keys()].map((k) => Math.floor(k * (m / mx))));
     const colj = (j: number) => X.map((r) => (Number.isFinite(r[j]) ? r[j] : NaN));
-    // Normalise ignoring non-finite values so one missing cell doesn't NaN the whole column.
+    // Normalise ignoring non-finite values (used to sort rows along a feature).
     const nrm = (arr: number[]) => { const f = arr.filter((v) => Number.isFinite(v)); const mn = f.length ? Math.min(...f) : 0, mx = f.length ? Math.max(...f) : 1, d = (mx - mn) || 1; return { mn, mx, z: arr.map((v) => (Number.isFinite(v) ? (v - mn) / d : 0)) }; };
     const idx = pick(n, 46).filter((i) => Number.isFinite(Y[i]));
     const idxF = names.indexOf(dbF1) >= 0 ? names.indexOf(dbF1) : 0;
     const idxG = names.indexOf(dbF2) >= 0 && names.indexOf(dbF2) !== idxF ? names.indexOf(dbF2) : Math.min(nf - 1, idxF + 1);
-    const clsColor = (i: number) => PAL_ML[Y[i] % PAL_ML.length];
     const st = modelStage;
-    const frame = <rect key="fr" x={PX0} y={PYt} width={PX1 - PX0} height={PYb - PYt} fill="none" stroke="var(--border)" />;
-    const svg = (kids: React.ReactNode) => <svg viewBox="0 0 360 310" style={{ width: "100%", borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>{frame}{kids}</svg>;
+    // Rich Plotly graph for the model mechanism (with legend), matching the train step.
+    const th = plotlyTheme();
+    const legendLayout = { showlegend: true, legend: { orientation: "h" as const, y: -0.2, font: { size: 11 } } };
+    const mPlot = (data: Record<string, unknown>[], title: string, xlab: string, ylab: string, extra: Record<string, unknown> = {}): React.ReactNode => <Plot data={data} layout={{ ...chartLayout(th, title, xlab, ylab), ...legendLayout, height: 400, ...extra }} style={{ height: 400, width: "100%" }} />;
+    const xa = (i: number) => X[i]?.[idxF]; const xb = (i: number) => X[i]?.[idxG];
     const metric = (ids: number[]): number => { if (!ids.length) return 0; if (isReg) { const ys = ids.map((i) => Y[i]); const mu = ys.reduce((a, c) => a + c, 0) / ys.length; return ys.reduce((a, c) => a + (c - mu) ** 2, 0) / ys.length; } const c: Record<number, number> = {}; ids.forEach((i) => { c[Y[i]] = (c[Y[i]] || 0) + 1; }); let s = 1; for (const k in c) { const p = c[k] / ids.length; s -= p * p; } return s; };
     const bestSplit = (ids: number[], feats: number[]) => {
       const parent = metric(ids); let best = { gain: -1, feat: feats[0], thr: 0, gl: 0, gr: 0, nl: 0, nr: 0 };
@@ -1004,19 +1000,22 @@ ${evalBlock}`;
         { sym: "\\text{class} = 1 \\text{ if } \\hat y \\ge 0.5", sub: `${fv(pr)} \\ge 0.5`, res: `\\Rightarrow \\text{${pr >= 0.5 ? cls1 : cls0}}` },
       ]; };
       applyNote = "each row's score becomes a probability on the curve";
-      viz = (applied, curRow, stage) => svg([
-        <polyline key="curve" points={order.map((i) => `${sx(f0.z[i])},${sy(pz[i])}`).join(" ")} fill="none" stroke="#3ecf7f" strokeWidth={2} />,
-        <line key="thr" x1={PX0} y1={sy(0.5)} x2={PX1} y2={sy(0.5)} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="5 4" />,
-        <text key="thrl" x={PX0 + 3} y={sy(0.5) - 4} fill="var(--faint)" fontSize={11} fontFamily="monospace">0.5</text>,
-        ...order.slice(0, applied).map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(pz[i])} r={i === curRow ? 6 : 4} fill={clsColor(i)} opacity={0.85} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />),
-        applied === 0 ? <line key="drop" x1={sx(f0.z[curRow])} y1={sy(Y[curRow] ? 0.86 : 0.14)} x2={sx(f0.z[curRow])} y2={sy(stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14))} stroke="var(--faint)" strokeDasharray="3 3" /> : null,
-        applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14))} r={7} fill={clsColor(curRow)} stroke="var(--text)" strokeWidth={1.5} style={{ transition: "cy .4s" }} /> : null,
-      ]);
+      viz = (applied, curRow, stage) => {
+        const shown = order.slice(0, applied);
+        const c0 = shown.filter((i) => Y[i] === 0), c1 = shown.filter((i) => Y[i] === 1);
+        const data: Record<string, unknown>[] = [
+          { type: "scatter", mode: "lines", name: `P(${cls1}) curve`, x: order.map(xa), y: order.map((i) => pz[i]), line: { color: "#3ecf7f", width: 2.5 } },
+          { type: "scatter", mode: "markers", name: cls0, x: c0.map(xa), y: c0.map((i) => pz[i]), marker: { size: 7, color: PAL_ML[0], line: { width: 1, color: th.paper } } },
+          { type: "scatter", mode: "markers", name: cls1, x: c1.map(xa), y: c1.map((i) => pz[i]), marker: { size: 7, color: PAL_ML[1], line: { width: 1, color: th.paper } } },
+        ];
+        if (applied === 0) data.push({ type: "scatter", mode: "markers", name: "this row", x: [xa(curRow)], y: [stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14)], marker: { size: 14, color: PAL_ML[Y[curRow] % PAL_ML.length], line: { width: 2, color: th.text } } });
+        return mPlot(data, "each row → its probability; the 0.5 line splits the class", names[idxF], `P(${cls1})`, { shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 0.5, y1: 0.5, line: { color: "#f59e0b", dash: "dash", width: 1.5 } }] });
+      };
     } else if (kind === "gd" && isReg) { // Linear / Ridge Regression
       let gw: number[] | null = null;
       try { const gt = gdTrace(cfgNow(), X, Y, 0); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
       const pred = (r: number[]) => gw ? gw[0] + r.reduce((a, v, j) => a + (gw![j + 1] || 0) * v, 0) : 0;
-      const f0 = nrm(colj(idxF)); const yn = nrm(Y); const yh = X.map(pred); const yF = Y.filter((v) => Number.isFinite(v)); const yMin = yF.length ? Math.min(...yF) : 0, yRange = ((yF.length ? Math.max(...yF) : 1) - yMin) || 1; const yhn = { z: yh.map((v) => (Number.isFinite(v) ? (v - yMin) / yRange : 0)) };
+      const f0 = nrm(colj(idxF)); const yh = X.map(pred);
       const msePairs = idx.filter((i) => Number.isFinite(yh[i])); const mse = msePairs.length ? msePairs.reduce((a, i) => a + (yh[i] - Y[i]) ** 2, 0) / msePairs.length : NaN;
       const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
       intro = "Fit a straight line so the average squared vertical gap (residual) between the line and your points is as small as possible.";
@@ -1033,23 +1032,24 @@ ${evalBlock}`;
         { sym: "\\mathcal L = \\tfrac1n\\sum r_i^2", sub: `\\mathcal L = \\tfrac1{${msePairs.length}}(${fv(rr * rr)} + \\dots)`, res: `\\mathcal L = ${fv(mse)}` },
       ].concat(algo === "Ridge" ? [{ sym: "\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", sub: "\\text{add the L2 penalty}", res: "\\text{shrinks the weights}" }] : []); };
       applyNote = "each row's prediction lands on the line";
-      viz = (applied, curRow) => svg([
-        <polyline key="ln" points={order.map((i) => `${sx(f0.z[i])},${sy(yhn.z[i])}`).join(" ")} fill="none" stroke="#f59e0b" strokeWidth={2.5} />,
-        ...order.slice(0, applied).map((i, k) => [
-          <line key={"r" + k} x1={sx(f0.z[i])} y1={sy(yn.z[i])} x2={sx(f0.z[i])} y2={sy(yhn.z[i])} stroke="#ef4444" strokeWidth={1} opacity={0.6} />,
-          <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(yn.z[i])} r={i === curRow ? 6 : 4} fill="#5b7cff" opacity={0.8} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />,
-        ]),
-        applied === 0 ? <line key="r0" x1={sx(f0.z[curRow])} y1={sy(yn.z[curRow])} x2={sx(f0.z[curRow])} y2={sy(yhn.z[curRow])} stroke="#ef4444" strokeWidth={1.5} /> : null,
-        applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(yn.z[curRow])} r={7} fill="#5b7cff" stroke="var(--text)" strokeWidth={1.5} /> : null,
-        applied >= total ? <text key="mse" x={140} y={34} fill="var(--faint)" fontSize={12} fontFamily="monospace">MSE = {fv(mse)}</text> : null,
-      ]);
+      viz = (applied, curRow) => {
+        const shown = (applied === 0 ? [curRow] : order.slice(0, applied));
+        const rx: (number | null)[] = [], ry: (number | null)[] = [];
+        shown.forEach((i) => { rx.push(xa(i), xa(i), null); ry.push(Y[i], yh[i], null); });
+        const data: Record<string, unknown>[] = [
+          { type: "scatter", mode: "lines", name: "fitted line ŷ", x: order.map(xa), y: order.map((i) => yh[i]), line: { color: "#f59e0b", width: 2.5 } },
+          { type: "scatter", mode: "lines", name: "residual (ŷ−y)", x: rx, y: ry, line: { color: "#ef4444", width: 1 }, opacity: 0.55, hoverinfo: "skip" },
+          { type: "scatter", mode: "markers", name: "actual y", x: shown.map(xa), y: shown.map((i) => Y[i]), marker: { size: 7, color: "#5b7cff", line: { width: 1, color: th.paper } } },
+        ];
+        if (applied === 0) data.push({ type: "scatter", mode: "markers", name: "this row", x: [xa(curRow)], y: [Y[curRow]], marker: { size: 14, color: "#5b7cff", line: { width: 2, color: th.text } } });
+        return mPlot(data, `${label} — least-squares fit · MSE = ${fv(mse)}`, names[idxF], target);
+      };
     } else if (kind === "knn") {
       const kk = Math.max(1, Math.round(Number(params.n_neighbors) || 5));
       const qi = idx[Math.floor(idx.length / 2)] ?? 0; const q = X[qi];
       const dist = (r: number[]) => Math.hypot(...r.map((v, j) => v - q[j]));
       const others = idx.filter((i) => i !== qi);
       const near = [...others].sort((a, c) => dist(X[a]) - dist(X[c])).slice(0, kk);
-      const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
       const dNear = near.length ? dist(X[near[0]]) : NaN;
       const votes = near.filter((i) => Y[i] === 1).length;
       const yhatNum = isReg && near.length ? near.reduce((a, i) => a + Y[i], 0) / near.length : NaN;
@@ -1071,13 +1071,21 @@ ${evalBlock}`;
           : { sym: "\\hat y = \\text{mode of the labels}", sub: `\\text{votes} = ${votes}\\text{ vs }${kk - votes}`, res: `\\Rightarrow \\text{${yhat.replace(/[^a-zA-Z0-9 ]/g, " ")}}` },
       ]; };
       total = others.length; applyNote = "distance measured to each stored row";
-      viz = (applied, curRow) => svg([
-        ...(applied === 0 ? [<line key="dl" x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[curRow])} y2={sy(f1.z[curRow])} stroke="#a855f7" strokeWidth={1.2} />] : others.slice(0, applied).map((i, k) => <line key={"l" + k} x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[i])} y2={sy(f1.z[i])} stroke="var(--border-strong)" strokeWidth={0.6} opacity={0.5} />)),
-        ...others.map((i, k) => { const done = applied >= total; const isN = near.includes(i); const hot = applied === 0 && i === curRow; return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={hot || (done && isN) ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={applied === 0 && !hot ? 0.4 : (done && !isN ? 0.35 : 0.85)} stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />; }),
-        applied >= total && near.length ? <circle key="ring" cx={sx(f0.z[qi])} cy={sy(f1.z[qi])} r={Math.max(...near.map((i) => Math.hypot(sx(f0.z[i]) - sx(f0.z[qi]), sy(f1.z[i]) - sy(f1.z[qi]))))} fill="none" stroke="#a855f7" strokeWidth={1.5} /> : null,
-        <text key="star" x={sx(f0.z[qi]) - 6} y={sy(f1.z[qi]) + 5} fill="var(--text)" fontSize={16} fontFamily="monospace">★</text>,
-        applied >= total ? <text key="vt" x={110} y={PYb + 2} fill="var(--faint)" fontSize={11} fontFamily="monospace">{isReg ? `mean → ${yhat}` : `vote → ${yhat}`}</text> : null,
-      ]);
+      viz = (applied, curRow) => {
+        const done = applied >= total;
+        const lineRows = applied === 0 ? [curRow] : others.slice(0, applied);
+        const lx: (number | null)[] = [], ly: (number | null)[] = [];
+        lineRows.forEach((i) => { lx.push(xa(qi), xa(i), null); ly.push(xb(qi), xb(i), null); });
+        const data: Record<string, unknown>[] = [
+          { type: "scatter", mode: "lines", name: "distance", x: lx, y: ly, line: { color: "#a855f7", width: applied === 0 ? 1.6 : 0.7 }, opacity: 0.5, hoverinfo: "skip" },
+          ...(isReg
+            ? [{ type: "scatter", mode: "markers", name: "stored rows", x: others.map(xa), y: others.map(xb), marker: { size: 6, color: "#5b7cff", opacity: done ? 0.4 : 0.75 } }]
+            : [0, 1].map((cl) => ({ type: "scatter", mode: "markers", name: String(classes?.[cl] ?? cl), x: others.filter((i) => Y[i] === cl).map(xa), y: others.filter((i) => Y[i] === cl).map(xb), marker: { size: 6, color: PAL_ML[cl], opacity: done ? 0.4 : 0.8 } }))),
+          { type: "scatter", mode: "markers", name: `the k=${kk} nearest`, x: (done ? near : []).map(xa), y: (done ? near : []).map(xb), marker: { size: 12, color: "rgba(0,0,0,0)", line: { width: 2.5, color: "#a855f7" } } },
+          { type: "scatter", mode: "markers", name: "new point ★", x: [xa(qi)], y: [xb(qi)], marker: { size: 16, symbol: "star", color: th.text } },
+        ];
+        return mPlot(data, done ? `k nearest ${isReg ? "averaged" : "voted"} → ${yhat}` : "distance from ★ to each stored row", names[idxF], names[idxG]);
+      };
     } else if (kind === "gnb") {
       const cA = idx.filter((i) => Y[i] === 0), cB = idx.filter((i) => Y[i] === 1);
       const colF = colj(idxF);
@@ -1088,7 +1096,6 @@ ${evalBlock}`;
       const xq = Number.isFinite(X[0]?.[idxF]) ? X[0][idxF] : sA.mu;
       const bell = (x: number, mu: number, va: number) => Math.exp(-((x - mu) ** 2) / (2 * va));
       const likeA = bell(xq, sA.mu, sA.va);
-      const curve = (mu: number, va: number) => { const pts: string[] = []; for (let t = 0; t <= 60; t++) { const x = range[0] + (range[1] - range[0]) * (t / 60); pts.push(`${sx(t / 60)},${sy(bell(x, mu, va) * 0.9)}`); } return pts.join(" "); };
       intro = "Learn one bell curve (mean & variance) per class. A point's class score is that class's prior times the bell heights at the point.";
       legend = [
         { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `sum of ${names[idxF]} ÷ ${cA.length} rows of class ${classes?.[0] ?? 0}`, val: fv(sA.mu) },
@@ -1106,27 +1113,24 @@ ${evalBlock}`;
         { sym: "\\hat y = \\arg\\max_y P(y\\mid x)", sub: `\\max(${fv(pA)},\\ ${fv(pB)})`, res: `\\Rightarrow \\text{${pA >= pB ? clsA : clsB}}` },
       ]; };
       total = idx.length; applyNote = "each row scored under its class bell";
-      const ptOf = (r: number) => { const xr = xOf(r); const xn = (xr - range[0]) / ((range[1] - range[0]) || 1); const h = bell(xr, Y[r] === 0 ? sA.mu : sB.mu, Y[r] === 0 ? sA.va : sB.va); return { xn, h }; };
-      viz = (applied, curRow) => svg([
-        <polyline key="bA" points={curve(sA.mu, sA.va)} fill="none" stroke={PAL_ML[0]} strokeWidth={2} />,
-        <polyline key="bB" points={curve(sB.mu, sB.va)} fill="none" stroke={PAL_ML[1]} strokeWidth={2} />,
-        ...rowOrder.slice(0, applied).map((i, k) => { const p = ptOf(i); return <circle key={"p" + k} cx={sx(p.xn)} cy={sy(p.h * 0.9)} r={i === curRow ? 5.5 : 3.5} fill={PAL_ML[Y[i] % PAL_ML.length]} opacity={0.8} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />; }),
-        ...(applied === 0 ? [(() => { const p = ptOf(curRow); return [
-          <line key="xq" x1={sx(p.xn)} y1={PYt} x2={sx(p.xn)} y2={PYb} stroke="var(--faint)" strokeDasharray="4 4" />,
-          <circle key="oA" cx={sx(p.xn)} cy={sy(bell(xOf(curRow), sA.mu, sA.va) * 0.9)} r={6} fill={PAL_ML[0]} />,
-          <circle key="oB" cx={sx(p.xn)} cy={sy(bell(xOf(curRow), sB.mu, sB.va) * 0.9)} r={6} fill={PAL_ML[1]} />,
-        ]; })()] : []),
-        applied >= total ? <text key="win" x={96} y={34} fill="var(--faint)" fontSize={11} fontFamily="monospace">{clsA} vs {clsB}</text> : null,
-      ]);
+      viz = (applied, curRow) => {
+        const xs: number[] = []; for (let t = 0; t <= 60; t++) xs.push(range[0] + (range[1] - range[0]) * (t / 60));
+        const shown = rowOrder.slice(0, applied); const sA0 = shown.filter((i) => Y[i] === 0), sB0 = shown.filter((i) => Y[i] === 1);
+        const data: Record<string, unknown>[] = [
+          { type: "scatter", mode: "lines", name: `${clsA} bell`, x: xs, y: xs.map((x) => bell(x, sA.mu, sA.va)), line: { color: PAL_ML[0], width: 2.5 } },
+          { type: "scatter", mode: "lines", name: `${clsB} bell`, x: xs, y: xs.map((x) => bell(x, sB.mu, sB.va)), line: { color: PAL_ML[1], width: 2.5 } },
+          { type: "scatter", mode: "markers", name: `${clsA} rows`, x: sA0.map(xOf), y: sA0.map((i) => bell(xOf(i), sA.mu, sA.va)), marker: { size: 6, color: PAL_ML[0] } },
+          { type: "scatter", mode: "markers", name: `${clsB} rows`, x: sB0.map(xOf), y: sB0.map((i) => bell(xOf(i), sB.mu, sB.va)), marker: { size: 6, color: PAL_ML[1] } },
+        ];
+        const extra: Record<string, unknown> = {};
+        if (applied === 0) { const xr = xOf(curRow); data.push({ type: "scatter", mode: "markers", name: "this row under each bell", x: [xr, xr], y: [bell(xr, sA.mu, sA.va), bell(xr, sB.mu, sB.va)], marker: { size: 13, color: th.text, line: { width: 2, color: th.paper } } }); extra.shapes = [{ type: "line", x0: xr, x1: xr, yref: "paper", y0: 0, y1: 1, line: { color: th.muted, dash: "dot", width: 1 } }]; }
+        return mPlot(data, "each row scored under its class bell", names[idxF], "likelihood  P(x | class)", extra);
+      };
     } else { // tree & forest
       const rowsAll = pick(n, 260).filter((i) => Number.isFinite(Y[i]) && Number.isFinite(X[i][idxF]) && Number.isFinite(X[i][idxG]));
       const sp = bestSplit(rowsAll, [idxF, idxG]);
       const leftIds = rowsAll.filter((i) => X[i][sp.feat] <= sp.thr);
       const sp2 = leftIds.length > 3 ? bestSplit(leftIds, [idxF, idxG]) : null;
-      const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
-      const thrPosOf = (feat: number, thr: number) => { const raw = colj(feat).filter((v) => Number.isFinite(v)); const mn = raw.length ? Math.min(...raw) : 0, mx = raw.length ? Math.max(...raw) : 1; return (thr - mn) / ((mx - mn) || 1); };
-      const spAxis = sp.feat === idxF ? "x" : "y";
-      const thrPos = thrPosOf(sp.feat, sp.thr);
       const metricName = isReg ? "variance" : "Gini";
       if (kind === "tree") {
         intro = "Greedily test every feature threshold, keep the split that removes the most impurity, then recurse into if/else rules on each side.";
@@ -1146,19 +1150,25 @@ ${evalBlock}`;
           { sym: `\\text{route the row: } \\text{${featC}} \\le \\text{thr}?`, sub: `${fv(xr)} \\le ${fv(sp.thr)}`, res: `\\Rightarrow \\text{${left ? "left" : "right"}}` },
         ]; };
         total = plotPts.length; applyNote = "each row falls to its side of the split";
-        viz = (applied, curRow) => svg([
-          spAxis === "x" ? <line key="cut" x1={sx(thrPos)} y1={PYt} x2={sx(thrPos)} y2={PYb} stroke="#5b7cff" strokeWidth={2} /> : <line key="cut" x1={PX0} y1={sy(thrPos)} x2={PX1} y2={sy(thrPos)} stroke="#5b7cff" strokeWidth={2} />,
-          <text key="cutl" x={spAxis === "x" ? sx(thrPos) + 4 : PX0 + 4} y={PYt + 12} fill="var(--faint)" fontSize={11} fontFamily="monospace">{featC} ≤ {fv(sp.thr, 1)}</text>,
-          ...plotPts.slice(0, applied).map((i, k) => { const left = X[i][sp.feat] <= sp.thr; return <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={i === curRow ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={left ? 0.9 : 0.45} stroke={i === curRow ? "var(--text)" : undefined} strokeWidth={i === curRow ? 1.5 : undefined} />; }),
-          applied === 0 ? <circle key="one" cx={sx(f0.z[curRow])} cy={sy(f1.z[curRow])} r={7} fill={isReg ? "#5b7cff" : clsColor(curRow)} opacity={X[curRow][sp.feat] <= sp.thr ? 0.95 : 0.5} stroke="var(--text)" strokeWidth={1.5} /> : null,
-          applied >= total && sp2 ? (sp2.feat === idxF
-            ? <line key="cut2" x1={sx(thrPosOf(sp2.feat, sp2.thr))} y1={PYt} x2={sx(thrPosOf(sp2.feat, sp2.thr))} y2={PYb} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />
-            : <line key="cut2" x1={PX0} y1={sy(thrPosOf(sp2.feat, sp2.thr))} x2={PX1} y2={sy(thrPosOf(sp2.feat, sp2.thr))} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />) : null,
-        ]);
+        const cutShape = (feat: number, thr: number, color: string, dash?: string) => (feat === idxF
+          ? { type: "line", x0: thr, x1: thr, yref: "paper", y0: 0, y1: 1, line: { color, width: 2, dash } }
+          : { type: "line", xref: "paper", x0: 0, x1: 1, y0: thr, y1: thr, line: { color, width: 2, dash } });
+        viz = (applied, curRow) => {
+          const shown = (applied === 0 ? [curRow] : plotPts.slice(0, applied));
+          const leftPts = shown.filter((i) => X[i][sp.feat] <= sp.thr), rightPts = shown.filter((i) => X[i][sp.feat] > sp.thr);
+          const shapes: Record<string, unknown>[] = [cutShape(sp.feat, sp.thr, "#5b7cff")];
+          if (applied >= total && sp2) shapes.push(cutShape(sp2.feat, sp2.thr, "#3ecf7f", "dash"));
+          const data: Record<string, unknown>[] = [
+            { type: "scatter", mode: "markers", name: `${featC} ≤ ${fv(sp.thr)} (left)`, x: leftPts.map(xa), y: leftPts.map(xb), marker: { size: 7, color: PAL_ML[0], line: { width: 1, color: th.paper } } },
+            { type: "scatter", mode: "markers", name: `${featC} > ${fv(sp.thr)} (right)`, x: rightPts.map(xa), y: rightPts.map(xb), marker: { size: 7, color: PAL_ML[1], opacity: 0.7, line: { width: 1, color: th.paper } } },
+          ];
+          if (applied === 0) data.push({ type: "scatter", mode: "markers", name: "this row", x: [xa(curRow)], y: [xb(curRow)], marker: { size: 14, color: th.text, line: { width: 2, color: th.paper } } });
+          return mPlot(data, `best cut: ${featC} ≤ ${fv(sp.thr)} · gain ${fv(sp.gain)}`, names[idxF], names[idxG], { shapes });
+        };
       } else { // forest
         const m = Math.max(1, Math.round(Number(params.nTrees) || 3));
-        const shown = Math.min(3, m); const tx = [110, 200, 290].slice(0, shown);
-        const votes = tx.map((_, i) => (i % 3 === 2 ? 0 : 1));
+        const shown = Math.min(3, m);
+        const votes = [...Array(shown).keys()].map((i) => (i % 3 === 2 ? 0 : 1));
         const winner = votes.filter((v) => v === 1).length * 2 >= votes.length ? (classes?.[1] ?? "B") : (classes?.[0] ?? "A");
         intro = "Train many trees, each on a bootstrap resample with a random feature subset, then average their votes to cut variance.";
         legend = [
@@ -1178,16 +1188,11 @@ ${evalBlock}`;
             : { sym: "\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", sub: `\\text{majority of } ${shown}`, res: `\\Rightarrow \\text{${winnerC}}` },
         ];
         applyNote = "each tree casts its vote, then they aggregate";
-        viz = (applied, curRow, stage) => svg(tx.map((x, i) => { const show = applied > i || (applied === 0 && i === curRow && stage >= 2); const hot = applied === 0 && i === curRow; return [
-          <line key={"a" + i} x1={x} y1={100} x2={x - 20} y2={158} stroke="var(--faint)" strokeWidth={1.5} />,
-          <line key={"b" + i} x1={x} y1={100} x2={x + 20} y2={158} stroke="var(--faint)" strokeWidth={1.5} />,
-          <circle key={"n" + i} cx={x} cy={100} r={hot ? 8 : 6} fill="#a855f7" stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />,
-          <text key={"t" + i} x={x - 9} y={84} fill="var(--faint)" fontSize={12} fontFamily="monospace">T{i + 1}</text>,
-          show ? <circle key={"vl" + i} cx={x - 20} cy={172} r={7} fill={PAL_ML[votes[i]]} /> : null,
-          show ? <circle key={"vr" + i} cx={x + 20} cy={172} r={7} fill={PAL_ML[votes[i]]} /> : null,
-          show ? <text key={"vt" + i} x={x - 12} y={202} fill={PAL_ML[votes[i]]} fontSize={12} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
-          applied >= total && i === 1 ? <text key="win" x={x - 50} y={264} fill="#f59e0b" fontSize={14} fontFamily="monospace">ŷ = {isReg ? "mean" : winner} (majority)</text> : null,
-        ]; }));
+        viz = (applied, curRow, stage) => {
+          const revealed = [...Array(shown).keys()].filter((i) => applied > i || (applied === 0 && i === curRow && stage >= 2));
+          const data: Record<string, unknown>[] = [{ type: "bar", orientation: "h", name: "each tree's vote", x: revealed.map(() => 1), y: revealed.map((i) => `T${i + 1}`), marker: { color: revealed.map((i) => PAL_ML[votes[i]]) }, text: revealed.map((i) => `→ ${voteLbl(i)}`), textposition: "inside", insidetextanchor: "middle", hoverinfo: "skip" }];
+          return mPlot(data, applied >= total ? `${shown} trees → majority vote = ${isReg ? "mean" : winner}` : "each tree casts its vote (colour = predicted class)", "one vote per tree", "tree", { xaxis: { range: [0, 1.15], showticklabels: false, zeroline: false } });
+        };
       }
     }
 
