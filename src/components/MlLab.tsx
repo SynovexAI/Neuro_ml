@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
+  predictProba, rocCurve, prCurve, metricsAtThreshold,
   decisionSurface, learningCurve, gdTrace, gdAnim,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace, scaleNumCol,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
@@ -210,7 +211,9 @@ export default function MlLab() {
   const [ppSpeed, setPpSpeed] = useState(1500);
   const [processedCols, setProcessedCols] = useState<number>(0);
 
-  const [result, setResult] = useState<{ metrics: ClsMetrics | RegMetrics; importance: { name: string; w: number }[] | null; cv: number[]; predActual?: [number, number][]; loss?: number[]; ms: number } | null>(null);
+  const [result, setResult] = useState<{ metrics: ClsMetrics | RegMetrics; importance: { name: string; w: number }[] | null; cv: number[]; predActual?: [number, number][]; probaTest?: { yte: number[]; proba: number[][] }; loss?: number[]; ms: number } | null>(null);
+  const [rocClass, setRocClass] = useState(1); // positive class for one-vs-rest ROC/PR
+  const [threshold, setThreshold] = useState(0.5);
   const [training, setTraining] = useState(false);
   const [flowStep, setFlowStep] = useState(-1);
   const [showCode, setShowCode] = useState(false);
@@ -493,7 +496,7 @@ ${evalBlock}`;
         modelRef.current = model; setTrained({ featureNames: b.featureNames, classes: b.classes ?? null, algo, task });
         if (model.kind === "tree") setTreeViz({ root: model.root, depth: treeDepth(model.root), nodes: countNodes(model.root) });
         else if (model.kind === "forest") setTreeViz({ root: model.trees[0], depth: treeDepth(model.trees[0]), nodes: countNodes(model.trees[0]), nTrees: model.nTrees });
-        if (task === "classification") setResult({ metrics: classificationMetrics(yte, pred.map((p) => Math.round(p)), b.classes!), importance, cv, loss, ms });
+        if (task === "classification") { const proba = predictProba(model, Xte); setResult({ metrics: classificationMetrics(yte, pred.map((p) => Math.round(p)), b.classes!), importance, cv, loss, ms, probaTest: { yte, proba } }); setRocClass(Math.min(1, nClasses - 1)); setThreshold(0.5); }
         else setResult({ metrics: regressionMetrics(yte, pred), importance, cv, predActual: yte.map((a, i) => [a, pred[i]] as [number, number]), loss, ms });
       } catch (e) { setMsg("Training error: " + (e as Error).message); }
       setTraining(false); setTimeout(() => setFlowStep(7), 500);
@@ -600,6 +603,41 @@ ${evalBlock}`;
     ], layout: chartLayout(t, "Predicted vs actual", "actual", "predicted") };
   }, [result]);
 
+  // ROC + PR curves, AUC/AP, and an interactive decision-threshold tuner (classification).
+  function rocPrView(): React.ReactNode {
+    if (!result || result.metrics.task !== "classification" || !result.probaTest || !result.probaTest.proba[0]?.length) return null;
+    const cls = result.metrics.classes; const K = cls.length; const pos = Math.min(rocClass, K - 1);
+    const { yte, proba } = result.probaTest;
+    const scores = proba.map((p) => p[pos] ?? 0); const y01 = yte.map((y) => (y === pos ? 1 : 0));
+    const roc = rocCurve(y01, scores); const pr = prCurve(y01, scores); const tm = metricsAtThreshold(y01, scores, threshold);
+    const t = plotlyTheme(); const H = 300;
+    const rocFig = <Plot data={[
+      { type: "scatter", mode: "lines", name: "random", x: [0, 1], y: [0, 1], line: { color: t.muted, dash: "dash", width: 1.5 }, hoverinfo: "skip" },
+      { type: "scatter", mode: "lines", name: `ROC (AUC ${roc.auc.toFixed(3)})`, x: roc.points.map((p) => p.fpr), y: roc.points.map((p) => p.tpr), line: { color: t.accent, width: 2.5 }, fill: "tozeroy", fillcolor: t.accent + "18" },
+    ]} layout={{ ...chartLayout(t, `ROC — AUC ${roc.auc.toFixed(3)}`, "false-positive rate", "true-positive rate"), showlegend: true, legend: { orientation: "h", y: -0.25 }, height: H }} style={{ height: H, width: "100%" }} />;
+    const prFig = <Plot data={[
+      { type: "scatter", mode: "lines", name: `PR (AP ${pr.ap.toFixed(3)})`, x: pr.points.map((p) => p.recall), y: pr.points.map((p) => p.precision), line: { color: "#3ecf7f", width: 2.5 }, fill: "tozeroy", fillcolor: "#3ecf7f18" },
+    ]} layout={{ ...chartLayout(t, `Precision–Recall — AP ${pr.ap.toFixed(3)}`, "recall", "precision"), showlegend: true, legend: { orientation: "h", y: -0.25 }, height: H, yaxis: { range: [0, 1.03] } }} style={{ height: H, width: "100%" }} />;
+    return <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-h"><span className="t">📈 ROC / PR & threshold tuning</span></div>
+      <div className="card-b">
+        {K > 2 && <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10 }}><label className="fld" style={{ margin: 0 }}>Positive class (one-vs-rest)</label><select value={pos} onChange={(e) => setRocClass(+e.target.value)}>{cls.map((c, i) => <option key={i} value={i}>{c}</option>)}</select></div>}
+        <div className="row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>{rocFig}{prFig}</div>
+        <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <label className="fld" style={{ margin: 0 }}>Decision threshold on P({cls[pos]})</label>
+            <input type="range" min={0} max={1} step={0.01} value={threshold} onChange={(e) => setThreshold(+e.target.value)} style={{ flex: 1, minWidth: 160 }} />
+            <span className="mono" style={{ minWidth: 42 }}>{threshold.toFixed(2)}</span>
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {[["accuracy", tm.accuracy], ["precision", tm.precision], ["recall", tm.recall], ["F1", tm.f1]].map(([k, v], i) => <div key={i} style={{ background: "var(--panel)", borderRadius: 8, padding: "6px 14px", minWidth: 74 }}><div className="note">{k as string}</div><div style={{ fontSize: 20, fontWeight: 600 }}>{(v as number).toFixed(2)}</div></div>)}
+            <div style={{ background: "var(--panel)", borderRadius: 8, padding: "6px 14px" }}><div className="note">TP / FP / FN / TN</div><div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{tm.tp} / {tm.fp} / {tm.fn} / {tm.tn}</div></div>
+          </div>
+          <div className="note" style={{ marginTop: 8, lineHeight: 1.6 }}>Move the threshold to trade precision against recall — lower it to catch more positives (higher recall, more false alarms), raise it to be stricter. The default 0.5 is just one operating point on the ROC curve.</div>
+        </div>
+      </div>
+    </div>;
+  }
   // ════════════ FROM-SCRATCH (MATHS) MODE ════════════
   const colNumVals = (name: string) => (ds?.columns.find((c) => c.name === name)?.values.filter((v) => v != null).map(Number) ?? []);
   const mCard = (title: string, body: React.ReactNode) => <div className="card math-card" style={{ marginBottom: 16 }}><div className="card-h"><span className="t">🧮 The maths — {title}</span></div><div className="card-b">{body}</div></div>;
@@ -2301,6 +2339,7 @@ ${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("acc
 
           </>)}
           {result && (<>
+            {rocPrView()}
             {task === "classification" && numFeats().length >= 2 && (
               <div className="card" style={{ marginTop: 16 }}>
                 <div className="card-h"><span className="t">Decision boundary</span><div className="r"><button className="btn sm" onClick={runBoundary}>{dbSurf ? "↻ Redraw" : "▶ Draw boundary"}</button></div></div>

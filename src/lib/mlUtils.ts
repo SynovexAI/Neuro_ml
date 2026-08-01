@@ -233,7 +233,7 @@ function softmax(z: number[]): number[] { const m = Math.max(...z); const e = z.
 
 // ── models ──
 export type TreeNode =
-  | { leaf: true; value: number; n: number }
+  | { leaf: true; value: number; n: number; dist?: number[] }
   | { leaf: false; feat: number; thr: number; n: number; left: TreeNode; right: TreeNode };
 export type Model =
   | { kind: "logreg"; W: number[][]; classes: number; loss?: number[] }
@@ -313,11 +313,13 @@ function gini(y: number[], nClasses: number): number { if (!y.length) return 0; 
 function variance(y: number[]): number { if (!y.length) return 0; const m = y.reduce((a, b) => a + b, 0) / y.length; return y.reduce((a, b) => a + (b - m) ** 2, 0) / y.length; }
 function leafValue(y: number[], task: Task, nClasses: number): number { if (task === "regression") return y.reduce((a, b) => a + b, 0) / (y.length || 1); const c = new Array(nClasses).fill(0); y.forEach((v) => c[v]++); return c.indexOf(Math.max(...c)); }
 interface TreeOpts { maxDepth: number; minSplit: number; maxFeatures: number; }
+function leafDist(y: number[], nClasses: number): number[] { const c = new Array(nClasses).fill(0); y.forEach((v) => c[v]++); const n = y.length || 1; return c.map((x) => x / n); }
 function buildTree(X: number[][], y: number[], task: Task, nClasses: number, opts: TreeOpts, imp: number[], depth: number, rnd: () => number): TreeNode {
   const n = y.length;
+  const mkLeaf = (yy: number[]): TreeNode => (task === "regression" ? { leaf: true, value: leafValue(yy, task, nClasses), n: yy.length } : { leaf: true, value: leafValue(yy, task, nClasses), n: yy.length, dist: leafDist(yy, nClasses) });
   const nodeImp = task === "regression" ? variance(y) : gini(y, nClasses);
   const pure = task === "regression" ? nodeImp < 1e-9 : new Set(y).size <= 1;
-  if (depth >= opts.maxDepth || n < opts.minSplit || pure) return { leaf: true, value: leafValue(y, task, nClasses), n };
+  if (depth >= opts.maxDepth || n < opts.minSplit || pure) return mkLeaf(y);
   const d = X[0]?.length || 0;
   let feats = Array.from({ length: d }, (_, i) => i);
   if (opts.maxFeatures < d) { for (let i = feats.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [feats[i], feats[j]] = [feats[j], feats[i]]; } feats = feats.slice(0, opts.maxFeatures); }
@@ -338,13 +340,14 @@ function buildTree(X: number[][], y: number[], task: Task, nClasses: number, opt
       if (gain > best.gain) best = { gain, feat: f, thr };
     }
   }
-  if (best.feat < 0) return { leaf: true, value: leafValue(y, task, nClasses), n };
+  if (best.feat < 0) return mkLeaf(y);
   imp[best.feat] += best.gain * n;
   const Xl: number[][] = [], yl: number[] = [], Xr: number[][] = [], yr: number[] = [];
   for (let i = 0; i < n; i++) { if (X[i][best.feat] <= best.thr) { Xl.push(X[i]); yl.push(y[i]); } else { Xr.push(X[i]); yr.push(y[i]); } }
   return { leaf: false, feat: best.feat, thr: best.thr, n, left: buildTree(Xl, yl, task, nClasses, opts, imp, depth + 1, rnd), right: buildTree(Xr, yr, task, nClasses, opts, imp, depth + 1, rnd) };
 }
 function predictTreeOne(node: TreeNode, x: number[]): number { let cur = node; while (!cur.leaf) cur = x[cur.feat] <= cur.thr ? cur.left : cur.right; return cur.value; }
+function treeProbaOne(node: TreeNode, x: number[], nClasses: number): number[] { let cur = node; while (!cur.leaf) cur = x[cur.feat] <= cur.thr ? cur.left : cur.right; if (cur.dist) return cur.dist; const one = new Array(nClasses).fill(0); one[cur.value] = 1; return one; }
 export function trainTree(X: number[][], y: number[], task: Task, nClasses: number, p: { maxDepth: number; minSplit: number }): Model {
   const d = X[0]?.length || 0; const imp = new Array(d).fill(0);
   const root = buildTree(X, y, task, nClasses, { maxDepth: p.maxDepth, minSplit: Math.max(2, p.minSplit), maxFeatures: d }, imp, 0, mulberry32(42));
@@ -374,6 +377,39 @@ export function predict(m: Model, X: number[][]): number[] {
   if (m.kind === "tree") return X.map((x) => predictTreeOne(m.root, x));
   if (m.kind === "forest") return X.map((x) => predictForestOne(m, x));
   return X.map((x) => knnPredictOne(m, x));
+}
+// Per-class probabilities (predict_proba) for classifiers — used for ROC/PR and threshold tuning.
+export function predictProba(m: Model, X: number[][]): number[][] {
+  if (m.kind === "logreg") { const Xb = X.map((r) => [1, ...r]); return Xb.map((r) => softmax(m.W.map((w) => dot(w, r)))); }
+  if (m.kind === "gnb") return X.map((x) => { const lls: number[] = []; for (let k = 0; k < m.classes; k++) { let ll = Math.log(m.priors[k] || 1e-9); for (let j = 0; j < x.length; j++) { const v = m.vars[k][j]; ll += -0.5 * Math.log(2 * Math.PI * v) - ((x[j] - m.means[k][j]) ** 2) / (2 * v); } lls.push(ll); } const mx = Math.max(...lls); const ex = lls.map((l) => Math.exp(l - mx)); const s = ex.reduce((a, b) => a + b, 0) || 1; return ex.map((e) => e / s); });
+  if (m.kind === "knn") return X.map((x) => { const dists = m.X.map((row, i) => ({ d: Math.sqrt(row.reduce((a, v, j) => a + (v - x[j]) ** 2, 0)), y: m.y[i] })); dists.sort((a, b) => a.d - b.d); const near = dists.slice(0, m.k); const votes = new Array(m.classes).fill(0); near.forEach((p) => { votes[p.y] += m.weights === "distance" ? 1 / (p.d + 1e-6) : 1; }); const s = votes.reduce((a: number, b: number) => a + b, 0) || 1; return votes.map((v: number) => v / s); });
+  if (m.kind === "tree") return X.map((x) => treeProbaOne(m.root, x, m.classes));
+  if (m.kind === "forest") return X.map((x) => { const acc = new Array(m.classes).fill(0); for (const t of m.trees) { const pr = treeProbaOne(t, x, m.classes); for (let k = 0; k < m.classes; k++) acc[k] += pr[k]; } return acc.map((v) => v / (m.trees.length || 1)); });
+  return X.map(() => []); // linear regression has no class probabilities
+}
+
+// ── threshold / ROC / PR (one-vs-rest for a chosen positive class) ──
+export interface RocPoint { fpr: number; tpr: number; }
+export function rocCurve(yTrue01: number[], scores: number[]): { points: RocPoint[]; auc: number } {
+  const pairs = scores.map((s, i) => ({ s, y: yTrue01[i] })).sort((a, b) => b.s - a.s);
+  const P = yTrue01.reduce((a, y) => a + y, 0), N = yTrue01.length - P;
+  const points: RocPoint[] = [{ fpr: 0, tpr: 0 }]; let tp = 0, fp = 0, auc = 0, pf = 0, pt = 0;
+  for (const p of pairs) { if (p.y === 1) tp++; else fp++; const tpr = tp / (P || 1), fpr = fp / (N || 1); points.push({ fpr, tpr }); auc += (fpr - pf) * (tpr + pt) / 2; pf = fpr; pt = tpr; }
+  return { points, auc };
+}
+export interface PrPoint { recall: number; precision: number; }
+export function prCurve(yTrue01: number[], scores: number[]): { points: PrPoint[]; ap: number } {
+  const pairs = scores.map((s, i) => ({ s, y: yTrue01[i] })).sort((a, b) => b.s - a.s);
+  const P = yTrue01.reduce((a, y) => a + y, 0);
+  const points: PrPoint[] = []; let tp = 0, fp = 0, ap = 0, prevRec = 0;
+  for (const p of pairs) { if (p.y === 1) tp++; else fp++; const recall = tp / (P || 1), precision = tp / (tp + fp || 1); points.push({ recall, precision }); ap += (recall - prevRec) * precision; prevRec = recall; }
+  return { points, ap };
+}
+export function metricsAtThreshold(yTrue01: number[], scores: number[], thr: number): { tp: number; fp: number; fn: number; tn: number; precision: number; recall: number; f1: number; accuracy: number } {
+  let tp = 0, fp = 0, fn = 0, tn = 0;
+  for (let i = 0; i < yTrue01.length; i++) { const pred = scores[i] >= thr ? 1 : 0; if (yTrue01[i] === 1) { if (pred) tp++; else fn++; } else { if (pred) fp++; else tn++; } }
+  const precision = tp / (tp + fp || 1), recall = tp / (tp + fn || 1);
+  return { tp, fp, fn, tn, precision, recall, f1: 2 * precision * recall / (precision + recall || 1), accuracy: (tp + tn) / (yTrue01.length || 1) };
 }
 export function featureImportance(m: Model, names: string[]): { name: string; w: number }[] | null {
   if (m.kind === "logreg") { const imp = names.map((_, j) => m.W.reduce((a, w) => a + Math.abs(w[j + 1]), 0)); const mx = Math.max(...imp, 1e-9); return names.map((n, j) => ({ name: n, w: imp[j] / mx })).sort((a, b) => b.w - a.w).slice(0, 8); }
