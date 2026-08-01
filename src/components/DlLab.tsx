@@ -17,8 +17,12 @@ const STEPS: { k: Step; n: number; label: string }[] = [
   { k: "arch", n: 4, label: "Architecture" }, { k: "train", n: 5, label: "Train" }, { k: "test", n: 6, label: "Test & Export" },
 ];
 const SAMPLES = [
-  { k: "spiral", l: "Spiral", t: "binary" }, { k: "circles", l: "Circles", t: "binary" }, { k: "xor", l: "XOR", t: "binary" },
-  { k: "moons", l: "Moons", t: "binary" }, { k: "blobs3", l: "3 Blobs (multiclass)", t: "multiclass" }, { k: "sine", l: "Sine (regression)", t: "regression" },
+  { k: "spiral", l: "Spiral", t: "binary", d: "Two interleaving spirals", why: "Needs a curved boundary — a linear model fails, a 2-layer net succeeds. A great first lesson." },
+  { k: "circles", l: "Circles", t: "binary", d: "A ring inside a ring", why: "Concentric classes — impossible to split with a straight line, easy for a small net." },
+  { k: "xor", l: "XOR", t: "binary", d: "Diagonal quadrants", why: "The classic non-separable case that stumped the single-layer perceptron." },
+  { k: "moons", l: "Moons", t: "binary", d: "Two crescents", why: "Mildly non-linear — a small hidden layer separates them cleanly." },
+  { k: "blobs3", l: "3 Blobs", t: "multiclass", d: "Three clusters → softmax", why: "Three classes — the output layer uses softmax + cross-entropy." },
+  { k: "sine", l: "Sine", t: "regression", d: "1 feature → continuous target", why: "Regression — the net fits a smooth curve with a linear output and MSE loss." },
 ];
 const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
 
@@ -322,39 +326,79 @@ export default function DlLab() {
       </div>
       {msg && <div className="warnbar">{msg}</div>}
 
-      {step === "data" && (
-        <div className="card">
+      {step === "data" && (() => {
+        const taskBadge = (t: string) => { const m = t === "multiclass" ? ["var(--purple)", "rgba(168,85,247,.13)", "multiclass"] : t === "regression" ? ["#3ecf7f", "rgba(62,207,127,.13)", "regression"] : ["var(--accent)", "rgba(91,124,255,.13)", "binary"]; return <span style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 20, color: m[0], background: m[1] }}>{m[2]}</span>; };
+        const scatter = (kind: string, w: number, h: number, r: number, n = 120, nz = 0.08) => {
+          const d = genDataset(kind, n, nz, 7); const reg = d.task === "regression" && d.featNames.length === 1;
+          const ys = reg ? d.y : d.X.map((p) => p[1]); const xs = d.X.map((p) => p[0]);
+          const xmn = Math.min(...xs), xmx = Math.max(...xs), ymn = Math.min(...ys), ymx = Math.max(...ys); const pad = 6;
+          const px = (v: number) => pad + ((v - xmn) / ((xmx - xmn) || 1)) * (w - 2 * pad); const py = (v: number) => h - pad - ((v - ymn) / ((ymx - ymn) || 1)) * (h - 2 * pad);
+          return <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: "block", background: "var(--panel-2)", borderRadius: 8 }}>{d.X.map((p, i) => <circle key={i} cx={px(p[0])} cy={py(reg ? d.y[i] : p[1])} r={r} fill={reg ? "#3ecf7f" : PAL[d.y[i] % PAL.length]} opacity={0.8} />)}</svg>;
+        };
+        const seg = (v: "sample" | "csv", label: string) => <button onClick={() => setSource(v)} style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: source === v ? "var(--accent)" : "transparent", color: source === v ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{label}</button>;
+        const sel = SAMPLES.find((s) => s.k === toy) || SAMPLES[0]; const prev = genDataset(toy, 260, noise, 3);
+        const typePill = (t: string) => <span style={{ marginLeft: "auto", fontSize: 9, padding: "1px 6px", borderRadius: 20, color: t === "cat" ? "var(--purple)" : "var(--accent)", background: t === "cat" ? "rgba(168,85,247,.12)" : "rgba(91,124,255,.12)" }}>{t}</span>;
+        const missTotal = ds ? ds.columns.reduce((a, c) => a + c.values.filter((v) => v == null).length, 0) : 0;
+        return <div className="card">
           <div className="card-h"><span className="t">Choose data</span></div>
           <div className="card-b">
-            <div className="chips" style={{ marginBottom: 12 }}>
-              <button className={`chip ${source === "sample" ? "on" : ""}`} onClick={() => setSource("sample")}>Built-in dataset</button>
-              <button className={`chip ${source === "csv" ? "on" : ""}`} onClick={() => setSource("csv")}>Upload CSV</button>
-            </div>
+            <div className="note" style={{ marginTop: -4, marginBottom: 14 }}>Start from a built-in dataset to learn the flow, or upload your own CSV to train on real data.</div>
+            <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, marginBottom: 18 }}>{seg("sample", "◆ Built-in datasets")}{seg("csv", "⬆ Upload CSV")}</div>
+
             {source === "sample" ? <>
-              <label className="fld">Dataset</label>
-              <div className="chips" style={{ marginBottom: 10 }}>{SAMPLES.map((s) => <button key={s.k} className={`chip ${toy === s.k ? "on" : ""}`} onClick={() => setToy(s.k)}>{s.l}</button>)}</div>
-              <div className="knob" style={{ maxWidth: 260 }}><div className="kr"><span>Noise</span><b>{noise.toFixed(2)}</b></div><input type="range" min={0} max={0.4} step={0.02} value={noise} onChange={(e) => setNoise(+e.target.value)} /></div>
-              <div className="note" style={{ marginTop: 8 }}>{SAMPLES.find((s) => s.k === toy)?.t === "regression" ? "1 feature → continuous target (regression)." : SAMPLES.find((s) => s.k === toy)?.t === "multiclass" ? "2 features → 3 classes (softmax)." : "2 features → 2 classes (binary)."}</div>
-              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={resolveSample}>Use this dataset →</button></div>
+              <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--faint)", marginBottom: 10 }}>Pick a shape — each teaches a different decision boundary</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+                {SAMPLES.map((s) => <div key={s.k} onClick={() => setToy(s.k)} style={{ background: "var(--panel)", border: `1px solid ${toy === s.k ? "var(--accent)" : "var(--border)"}`, boxShadow: toy === s.k ? "0 0 0 1px var(--accent)" : "none", borderRadius: 12, padding: 12, cursor: "pointer" }}>
+                  {scatter(s.k, 150, 74, 2.4)}
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 9, display: "flex", alignItems: "center", justifyContent: "space-between" }}>{s.l}{taskBadge(s.t)}</div>
+                  <div className="note" style={{ marginTop: 2 }}>{s.d}</div>
+                </div>)}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "210px 1fr auto", gap: 18, alignItems: "center", marginTop: 14, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: 14 }}>
+                <div>{scatter(toy, 210, 120, 2.8, 260, noise)}</div>
+                <div>
+                  <div className="knob" style={{ maxWidth: 280 }}><div className="kr"><span>Noise</span><b>{noise.toFixed(2)}</b></div><input type="range" min={0} max={0.4} step={0.02} value={noise} onChange={(e) => setNoise(+e.target.value)} /></div>
+                  <div className="row" style={{ gap: 18, marginTop: 12 }}>
+                    <div><div style={{ fontSize: 16, fontWeight: 600 }}>260</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>samples</div></div>
+                    <div><div style={{ fontSize: 16, fontWeight: 600 }}>{prev.X[0].length}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>features</div></div>
+                    <div><div style={{ fontSize: 16, fontWeight: 600, color: "var(--accent)" }}>{prev.task === "regression" ? "cont." : prev.classes.length}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>{prev.task === "regression" ? "target" : "classes"}</div></div>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--faint)", marginTop: 10, maxWidth: 380 }}>{sel.why}</div>
+                </div>
+                <button className="btn" onClick={resolveSample}>Use this dataset →</button>
+              </div>
             </> : <>
               <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" hidden onChange={(e) => onFile(e.target.files?.[0] || null)} />
-              <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 10 }}><button className="btn ghost" onClick={() => fileRef.current?.click()}>⬆ Upload CSV</button>{ds && <span className="note">{dsName} · {ds.nrows} rows · {ds.columns.length} columns</span>}</div>
+              <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0] || null); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 22, textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                <div style={{ fontSize: 22, marginBottom: 4 }}>⬆</div><b>{ds ? dsName : "Drop a CSV here"}</b> {ds ? <span className="note">· {ds.nrows} rows · {ds.columns.length} columns — click to replace</span> : <span>or click to browse</span>}
+                <div className="note" style={{ marginTop: 5 }}>First row = column names · classification or regression auto-detected</div>
+              </div>
+              {msg && <div className="note" style={{ marginTop: 8, color: "var(--crit)" }}>{msg}</div>}
               {ds && <>
-                <div className="split col-2e" style={{ gap: 14 }}>
-                  <div><label className="fld">Feature columns</label><div style={{ maxHeight: 180, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>{ds.columns.map((c) => c.name).filter((c) => c !== target).map((c) => <label key={c} className="note" style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 0", cursor: "pointer" }}><input type="checkbox" checked={feats.includes(c)} onChange={() => setFeats((f) => f.includes(c) ? f.filter((x) => x !== c) : [...f, c])} />{c}</label>)}</div></div>
-                  <div><label className="fld">Target column</label><select value={target} onChange={(e) => { setTarget(e.target.value); setFeats((f) => f.filter((x) => x !== e.target.value)); }}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
-                    <div className="note" style={{ marginTop: 8 }}>Detected task: <b>{ds && target ? detectTask(ds, target) : "—"}</b> (auto from the target: 2 classes → binary, 3+ → multiclass, many numeric values → regression).</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
+                  <div style={pnl}>{secHead("var(--accent)", `Feature columns · ${feats.filter((f) => f !== target).length} selected`)}
+                    <div style={{ maxHeight: 210, overflowY: "auto", padding: 8 }}>{ds.columns.filter((c) => c.name !== target).map((c) => <label key={c.name} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 7px", borderRadius: 7, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={feats.includes(c.name)} onChange={() => setFeats((f) => f.includes(c.name) ? f.filter((x) => x !== c.name) : [...f, c.name])} />{c.name}{typePill(c.type)}</label>)}</div>
+                  </div>
+                  <div style={pnl}>{secHead("#a855f7", "Target column")}
+                    <div style={pnlBody}>
+                      <select value={target} onChange={(e) => { setTarget(e.target.value); setFeats((f) => f.filter((x) => x !== e.target.value)); }} style={{ width: "100%" }}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
+                      <div style={{ marginTop: 12, padding: "9px 11px", borderRadius: 9, background: "var(--panel-2)", border: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)" }}>Detected task: <b style={{ color: "var(--text)" }}>{ds && target ? detectTask(ds, target) : "—"}</b> — auto from the target. <span style={{ color: "var(--faint)" }}>2 → binary, 3+ → multiclass, many numeric → regression.</span></div>
+                      <div className="row" style={{ gap: 10, marginTop: 12 }}>
+                        {statCard(ds.nrows.toLocaleString(), "rows")}
+                        {statCard(ds.columns.length, "columns")}
+                        {statCard(missTotal, "missing", missTotal ? "var(--orange)" : "var(--good)")}
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <label className="fld" style={{ marginTop: 12 }}>Data preview (first 8 rows)</label>
+                <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", margin: "16px 0 6px" }}>Preview · first 8 rows</div>
                 {previewTable()}
-                <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={buildFromCsv} disabled={!feats.length}>Build & continue →</button></div>
+                <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={buildFromCsv} disabled={!feats.filter((f) => f !== target).length}>Build & continue →</button></div>
               </>}
-              {!ds && <div className="note">Upload a CSV — first row = column names. Then pick which columns are inputs and which is the target.</div>}
             </>}
           </div>
-        </div>
-      )}
+        </div>;
+      })()}
 
       {step === "explore" && data && (() => {
         const isCsv = source === "csv" && !!ds;
