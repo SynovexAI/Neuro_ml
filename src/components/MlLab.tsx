@@ -494,6 +494,10 @@ ${evalBlock}`;
     const t = setTimeout(() => setTpIdx((i) => i + 1), tpSpeed);
     return () => clearTimeout(t);
   }, [tpPlaying, tpIdx, tpSpeed, TP_TOTAL]);
+  // Once the learning curve has been computed, toggling the feature subset
+  // recomputes it live so the numbers + verdict update as you pick columns.
+  useEffect(() => { if (lcData.length && ds && result) runLC(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lcFeats]);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -573,16 +577,20 @@ ${evalBlock}`;
     try { const b = buildMatrix(ds, use, target, task, steps); setLcData(learningCurve(b.X, b.y, cfgNow(), b.classes?.length || 0)); }
     catch (e) { setMsg("Learning curve error: " + (e as Error).message); }
   }
-  // Auto-diagnose the learning curve → good fit / overfit / underfit.
+  // Auto-diagnose the learning curve → good fit / overfit / underfit, with the
+  // live numbers + the exact rule that fired (updates whenever lcData changes).
+  const lcFmt = (v: number) => (task === "classification" ? `${(v * 100).toFixed(0)}%` : v.toFixed(2));
   function lcDiagnosis() {
     if (!lcData.length) return null;
     const last = lcData[lcData.length - 1];
     const gap = last.train - last.test;
-    const fmt = task === "classification" ? (v: number) => `${(v * 100).toFixed(0)}%` : (v: number) => v.toFixed(2);
-    const goodThresh = task === "classification" ? 0.7 : 0.5;
-    if (gap > 0.15) return { label: "Overfitting", cls: "bad", why: `train ${fmt(last.train)} ≫ validation ${fmt(last.test)} — the model memorises the training data. Try more data, fewer features, or stronger regularisation.` };
-    if (last.test < goodThresh && last.train < goodThresh + 0.1) return { label: "Underfitting", cls: "warn", why: `both scores are low and flat (~${fmt(last.test)}) — the model is too simple. Try a more powerful model or more features.` };
-    return { label: "Good fit", cls: "ok", why: `train and validation converge (${fmt(last.test)}) with a small gap — healthy generalisation.` };
+    const cls_ = task === "classification";
+    const goodThresh = cls_ ? 0.7 : 0.5;
+    const gapT = cls_ ? "15%" : "0.15", goodT = cls_ ? "70%" : "0.50";
+    const base = { train: last.train, test: last.test, gap };
+    if (gap > 0.15) return { ...base, label: "Overfitting", cls: "bad", rule: `gap ${lcFmt(gap)} > ${gapT}`, why: `train (${lcFmt(last.train)}) is much higher than validation (${lcFmt(last.test)}) — it memorises the training rows. Try more data, fewer features, or stronger regularisation (lower C / higher alpha, less depth).` };
+    if (last.test < goodThresh && last.train < goodThresh + 0.1) return { ...base, label: "Underfitting", cls: "warn", rule: `validation ${lcFmt(last.test)} < ${goodT} and both lines flat`, why: `even on training data the score is low — the model is too simple. Try a more powerful model, more/better features, or less regularisation.` };
+    return { ...base, label: "Good fit", cls: "ok", rule: `gap ${lcFmt(gap)} ≤ ${gapT} and validation ${lcFmt(last.test)} ≥ ${goodT}`, why: `it does about as well on unseen data as on training data — it learned the real pattern and generalises.` };
   }
   function lcFig() {
     if (!lcData.length) return null; const t = plotlyTheme();
@@ -1134,7 +1142,18 @@ ${evalBlock}`;
                 <label className="fld">Features used ({(lcFeats.length ? lcFeats : features).length}/{features.length}) — pick columns to base the curve on, then recompute</label>
                 <div className="checklist" style={{ marginBottom: 12 }}>{features.map((f) => { const on = lcFeats.length ? lcFeats.includes(f) : true; return <span key={f} className={`chk ${on ? "on" : ""}`} onClick={() => setLcFeats((prev) => { const cur = prev.length ? prev : [...features]; const next = cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f]; return next.length === features.length ? [] : next; })}>{f}</span>; })}</div>
                 {(() => { const f = lcFig(); return f ? <Plot data={f.data} layout={f.layout} style={{ height: 300 }} /> : <div className="note">Compute to see train vs validation score as the data grows.</div>; })()}
-                {(() => { const d = lcDiagnosis(); return d ? <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">{d.cls === "ok" ? "✅" : d.cls === "bad" ? "⚠️" : "🔎"}</span><span><b>{d.label}.</b> {d.why}</span></div> : null; })()}
+                {(() => { const d = lcDiagnosis(); if (!d) return null; const clr = d.cls === "bad" ? "var(--crit)" : d.cls === "warn" ? "var(--warn)" : "var(--good)"; return (
+                  <div style={{ marginTop: 12 }}>
+                    <div className="etl-metrics" style={{ marginBottom: 10 }}>
+                      <div className="m">train (open-book)<b style={{ color: "#5b7cff" }}>{lcFmt(d.train)}</b></div>
+                      <div className="m">validation (unseen)<b style={{ color: "#f59e0b" }}>{lcFmt(d.test)}</b></div>
+                      <div className="m">gap<b style={{ color: clr }}>{lcFmt(d.gap)}</b></div>
+                      <div className="m">verdict<b style={{ color: clr }}>{d.label}</b></div>
+                    </div>
+                    <div className="teach-note"><span className="ic">{d.cls === "ok" ? "✅" : d.cls === "bad" ? "⚠️" : "🔎"}</span><span><b>{d.label}</b> — because <b>{d.rule}</b>. {d.why}</span></div>
+                    <div className="note" style={{ marginTop: 8, lineHeight: 1.65 }}><b>How to read it:</b> blue = score on rows it trained on (like an open-book test), orange = score on rows it never saw (closed-book). The <b>gap</b> between them is how much worse it does on new data. <b>Big gap</b> → overfitting (memorised) · <b>both low &amp; flat</b> → underfitting (too simple) · <b>small gap &amp; both high</b> → good fit.</div>
+                  </div>
+                ); })()}
               </div>
             </div>
             <div className="stepnav"><button className="btn ghost" onClick={() => setStep("validation")}>← Validation</button><button className="btn" onClick={() => setStep("deploy")}>Next: Test &amp; Export →</button></div>
