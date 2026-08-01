@@ -927,14 +927,18 @@ ${evalBlock}`;
     if (!ds || !b || !b.X.length || !b.featureNames.length) return mCard(`${label} — how it learns`, <div className="note">Pick your features &amp; target first — then this walks the model through your actual rows.</div>);
     const X = b.X, Y = b.y, names = b.featureNames, classes = b.classes;
     const n = X.length, nf = names.length, K = classes?.length ?? 0;
-    // plot geometry
+    // plot geometry — every coordinate is clamped to a finite 0…1 so a missing/NaN
+    // cell can never reach an SVG attribute (which would throw "Received NaN").
     const PX0 = 30, PX1 = 344, PYb = 212, PYt = 20;
-    const sx = (t: number) => PX0 + (PX1 - PX0) * Math.max(0, Math.min(1, t));
-    const sy = (t: number) => PYb + (PYt - PYb) * Math.max(0, Math.min(1, t));
+    const clamp01 = (t: number) => (Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0);
+    const sx = (t: number) => PX0 + (PX1 - PX0) * clamp01(t);
+    const sy = (t: number) => PYb + (PYt - PYb) * clamp01(t);
+    const fv = (x: number | undefined, dp = 2) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(dp) : "—");
     const pick = (m: number, mx: number) => (m <= mx ? [...Array(m).keys()] : [...Array(mx).keys()].map((k) => Math.floor(k * (m / mx))));
-    const idx = pick(n, 46);
-    const colj = (j: number) => X.map((r) => r[j] ?? 0);
-    const nrm = (arr: number[]) => { const mn = Math.min(...arr), mx = Math.max(...arr), d = (mx - mn) || 1; return { mn, mx, z: arr.map((v) => (v - mn) / d) }; };
+    const colj = (j: number) => X.map((r) => (Number.isFinite(r[j]) ? r[j] : NaN));
+    // Normalise ignoring non-finite values so one missing cell doesn't NaN the whole column.
+    const nrm = (arr: number[]) => { const f = arr.filter((v) => Number.isFinite(v)); const mn = f.length ? Math.min(...f) : 0, mx = f.length ? Math.max(...f) : 1, d = (mx - mn) || 1; return { mn, mx, z: arr.map((v) => (Number.isFinite(v) ? (v - mn) / d : 0)) }; };
+    const idx = pick(n, 46).filter((i) => Number.isFinite(Y[i]));
     const idxF = names.indexOf(dbF1) >= 0 ? names.indexOf(dbF1) : 0;
     const idxG = names.indexOf(dbF2) >= 0 && names.indexOf(dbF2) !== idxF ? names.indexOf(dbF2) : Math.min(nf - 1, idxF + 1);
     const clsColor = (i: number) => PAL_ML[Y[i] % PAL_ML.length];
@@ -944,7 +948,7 @@ ${evalBlock}`;
     const metric = (ids: number[]): number => { if (!ids.length) return 0; if (isReg) { const ys = ids.map((i) => Y[i]); const mu = ys.reduce((a, c) => a + c, 0) / ys.length; return ys.reduce((a, c) => a + (c - mu) ** 2, 0) / ys.length; } const c: Record<number, number> = {}; ids.forEach((i) => { c[Y[i]] = (c[Y[i]] || 0) + 1; }); let s = 1; for (const k in c) { const p = c[k] / ids.length; s -= p * p; } return s; };
     const bestSplit = (ids: number[], feats: number[]) => {
       const parent = metric(ids); let best = { gain: -1, feat: feats[0], thr: 0, gl: 0, gr: 0, nl: 0, nr: 0 };
-      for (const f of feats) { const vals = [...new Set(ids.map((i) => X[i][f]))].sort((a, c) => a - c); for (let t = 0; t < vals.length - 1; t++) { const thr = (vals[t] + vals[t + 1]) / 2; const L = ids.filter((i) => X[i][f] <= thr), R = ids.filter((i) => X[i][f] > thr); if (!L.length || !R.length) continue; const gl = metric(L), gr = metric(R); const gain = parent - (L.length / ids.length) * gl - (R.length / ids.length) * gr; if (gain > best.gain) best = { gain, feat: f, thr, gl, gr, nl: L.length, nr: R.length }; } }
+      for (const f of feats) { const vals = [...new Set(ids.map((i) => X[i][f]).filter((v) => Number.isFinite(v)))].sort((a, c) => a - c); for (let t = 0; t < vals.length - 1; t++) { const thr = (vals[t] + vals[t + 1]) / 2; const L = ids.filter((i) => X[i][f] <= thr), R = ids.filter((i) => X[i][f] > thr); if (!L.length || !R.length) continue; const gl = metric(L), gr = metric(R); const gain = parent - (L.length / ids.length) * gl - (R.length / ids.length) * gr; if (gain > best.gain) best = { gain, feat: f, thr, gl, gr, nl: L.length, nr: R.length }; } }
       return { ...best, parent };
     };
 
@@ -962,10 +966,10 @@ ${evalBlock}`;
       const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
       intro = "A weighted sum of your features becomes a score z; the sigmoid squashes it to a probability, and 0.5 is the cut between the two classes.";
       legend = [
-        { sym: "x", desc: `a feature`, how: `e.g. ${names[idxF]}, row 0`, val: X[0][idxF]?.toFixed(2) },
-        { sym: "\\mathbf w, b", desc: "weights & bias", how: "learned by gradient descent", val: gw ? `b=${gw[0].toFixed(2)}, w₁=${(gw[1] ?? 0).toFixed(2)}` : "—" },
-        { sym: "z", desc: "linear score", how: "w·x + b for a row", val: z0.toFixed(2) },
-        { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "σ(z)", val: p0.toFixed(2) },
+        { sym: "x", desc: "a feature", how: `${names[idxF]} value of row 0`, val: fv(X[0]?.[idxF]) },
+        { sym: "\\mathbf w, b", desc: "weights & bias", how: "gradient descent: w ← w − η∇L", val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
+        { sym: "z", desc: "linear score", how: "z = b + Σⱼ wⱼ·xⱼ over the row", val: fv(z0) },
+        { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "ŷ = 1 / (1 + e⁻ᶻ)", val: fv(p0) },
       ];
       formulas = [["z = \\mathbf{w}\\cdot\\mathbf{x} + b", "weighted sum → a score"], ["\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", "squash into 0…1"], [`\\hat y = \\sigma(${z0.toFixed(2)}) = ${p0.toFixed(2)}`, "apply to row 0"], ["\\hat y \\ge 0.5 \\Rightarrow " + `\\text{${(classes?.[1] ?? "class 1").replace(/[^a-zA-Z0-9 ]/g, " ")}}`, "threshold the probability"]];
       caps = [`your rows along ${names[idxF]}, labelled by class`, "the fitted probability curve", "each row drops to its predicted ŷ", "ŷ ≥ 0.5 splits the class"];
@@ -979,23 +983,23 @@ ${evalBlock}`;
       let gw: number[] | null = null;
       try { const gt = gdTrace(cfgNow(), X, Y, 0); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
       const pred = (r: number[]) => gw ? gw[0] + r.reduce((a, v, j) => a + (gw![j + 1] || 0) * v, 0) : 0;
-      const f0 = nrm(colj(idxF)); const yn = nrm(Y); const yh = X.map(pred); const yMin = Math.min(...Y), yRange = (Math.max(...Y) - yMin) || 1; const yhn = { z: yh.map((v) => (v - yMin) / yRange) };
-      const mse = idx.reduce((a, i) => a + (yh[i] - Y[i]) ** 2, 0) / idx.length;
+      const f0 = nrm(colj(idxF)); const yn = nrm(Y); const yh = X.map(pred); const yF = Y.filter((v) => Number.isFinite(v)); const yMin = yF.length ? Math.min(...yF) : 0, yRange = ((yF.length ? Math.max(...yF) : 1) - yMin) || 1; const yhn = { z: yh.map((v) => (Number.isFinite(v) ? (v - yMin) / yRange : 0)) };
+      const msePairs = idx.filter((i) => Number.isFinite(yh[i])); const mse = msePairs.length ? msePairs.reduce((a, i) => a + (yh[i] - Y[i]) ** 2, 0) / msePairs.length : NaN;
       const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
       intro = "Fit a straight line so the average squared vertical gap (residual) between the line and your points is as small as possible.";
       legend = [
-        { sym: "x", desc: "a feature", how: `${names[idxF]}, row 0`, val: X[0][idxF]?.toFixed(2) },
-        { sym: "\\mathbf w, b", desc: "slope & intercept", how: "learned by least squares", val: gw ? `b=${gw[0].toFixed(2)}, w₁=${(gw[1] ?? 0).toFixed(2)}` : "—" },
-        { sym: "\\hat y", desc: "prediction", how: "w·x + b", val: gw ? pred(X[0]).toFixed(2) : "—" },
-        { sym: "\\mathcal L", desc: "mean squared error", how: "avg of (ŷ−y)²", val: mse.toFixed(2) },
+        { sym: "x", desc: "a feature", how: `${names[idxF]} value of row 0`, val: fv(X[0]?.[idxF]) },
+        { sym: "\\mathbf w, b", desc: "slope & intercept", how: "gradient descent on squared error", val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
+        { sym: "\\hat y", desc: "prediction", how: "ŷ = b + Σⱼ wⱼ·xⱼ", val: gw ? fv(pred(X[0])) : "—" },
+        { sym: "\\mathcal L", desc: "mean squared error", how: "L = (1/n) Σ (ŷ−y)²", val: fv(mse) },
       ];
-      formulas = [["\\hat y = \\mathbf{w}\\cdot\\mathbf{x} + b", "a line through the cloud"], ["r_i = \\hat y_i - y_i", "residual: the miss"], [`\\mathcal L = \\tfrac1n\\sum r_i^2 = ${mse.toFixed(2)}`, "mean squared error"]].concat(algo === "Ridge" ? [["\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", "Ridge adds an L2 penalty"]] : []) as [string, string][];
+      formulas = [["\\hat y = \\mathbf{w}\\cdot\\mathbf{x} + b", "a line through the cloud"], ["r_i = \\hat y_i - y_i", "residual: the miss"], [`\\mathcal L = \\tfrac1n\\sum r_i^2 = ${fv(mse)}`, "mean squared error"]].concat(algo === "Ridge" ? [["\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", "Ridge adds an L2 penalty"]] : []) as [string, string][];
       caps = ["your points: feature vs target", "the fitted line", "residuals = vertical gaps", "MSE = mean of the squares"];
       viz = (s) => svg([
         ...idx.map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(yn.z[i])} r={4} fill="#5b7cff" opacity={0.7} />),
         s >= 1 ? <polyline key="ln" points={order.map((i) => `${sx(f0.z[i])},${sy(yhn.z[i])}`).join(" ")} fill="none" stroke="#f59e0b" strokeWidth={2.5} /> : null,
         ...(s >= 2 ? idx.map((i, k) => <line key={"r" + k} x1={sx(f0.z[i])} y1={sy(yn.z[i])} x2={sx(f0.z[i])} y2={sy(yhn.z[i])} stroke="#ef4444" strokeWidth={1} opacity={0.7} />) : []),
-        s >= 3 ? <text key="mse" x={150} y={34} fill="var(--faint)" fontSize={12} fontFamily="monospace">MSE = {mse.toFixed(2)}</text> : null,
+        s >= 3 ? <text key="mse" x={150} y={34} fill="var(--faint)" fontSize={12} fontFamily="monospace">MSE = {fv(mse)}</text> : null,
       ]);
     } else if (kind === "knn") {
       const kk = Math.max(1, Math.round(Number(params.n_neighbors) || 5));
@@ -1004,14 +1008,15 @@ ${evalBlock}`;
       const others = idx.filter((i) => i !== qi);
       const near = [...others].sort((a, c) => dist(X[a]) - dist(X[c])).slice(0, kk);
       const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
-      const dNear = dist(X[near[0]]);
+      const dNear = near.length ? dist(X[near[0]]) : NaN;
       const votes = near.filter((i) => Y[i] === 1).length;
-      const yhat = isReg ? (near.reduce((a, i) => a + Y[i], 0) / near.length).toFixed(2) : (classes?.[votes * 2 >= kk ? 1 : 0] ?? "—");
+      const yhatNum = isReg && near.length ? near.reduce((a, i) => a + Y[i], 0) / near.length : NaN;
+      const yhat = isReg ? fv(yhatNum) : String(classes?.[votes * 2 >= kk ? 1 : 0] ?? "—");
       intro = isReg ? "No training. For a new point, measure the distance to every stored point, keep the k nearest, and average their target." : "No training. For a new point, measure the distance to every stored point, keep the k nearest, and let them vote.";
       legend = [
-        { sym: "d", desc: "Euclidean distance", how: "√Σ(aⱼ−bⱼ)² across features", val: dNear.toFixed(2) + " (nearest)" },
-        { sym: "k", desc: "neighbours kept", how: "your n_neighbors setting", val: String(kk) },
-        { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? "mean target of neighbours" : "most common class", val: String(yhat) },
+        { sym: "d", desc: "Euclidean distance", how: "d = √Σⱼ(qⱼ−xⱼ)² over features", val: `${fv(dNear)} (nearest)` },
+        { sym: "k", desc: "neighbours kept", how: `n_neighbors setting = ${kk}`, val: String(kk) },
+        { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? "ŷ = (1/k) Σ yᵢ of neighbours" : "ŷ = most common label among k", val: yhat },
       ];
       formulas = [["d(\\mathbf a,\\mathbf b) = \\sqrt{\\textstyle\\sum_j (a_j-b_j)^2}", "distance to every point"], [`\\text{keep the } k=${kk} \\text{ smallest } d`, "the nearest neighbours"], isReg ? ["\\hat y = \\tfrac1k\\textstyle\\sum_{i\\in kNN} y_i", "average their target"] : ["\\hat y = \\text{mode of their labels}", "they vote"]];
       caps = ["stored rows + a new ★ point", "distance to all of them", `circle the k=${kk} nearest`, isReg ? "average → ŷ" : `vote → ${yhat}`];
@@ -1024,24 +1029,24 @@ ${evalBlock}`;
       ]);
     } else if (kind === "gnb") {
       const cA = idx.filter((i) => Y[i] === 0), cB = idx.filter((i) => Y[i] === 1);
-      const colF = colj(idxF); const nf0 = nrm(colF);
-      const mV = (ids: number[]) => { const v = ids.map((i) => colF[i]); const mu = v.reduce((a, c) => a + c, 0) / (v.length || 1); const va = v.reduce((a, c) => a + (c - mu) ** 2, 0) / (v.length || 1) || 1; return { mu, va }; };
+      const colF = colj(idxF);
+      const mV = (ids: number[]) => { const v = ids.map((i) => colF[i]).filter((c) => Number.isFinite(c)); const mu = v.length ? v.reduce((a, c) => a + c, 0) / v.length : 0; const va = (v.length ? v.reduce((a, c) => a + (c - mu) ** 2, 0) / v.length : 1) || 1; return { mu, va }; };
       const sA = mV(cA.length ? cA : idx), sB = mV(cB.length ? cB : idx);
-      const priorA = (cA.length || 1) / idx.length, priorB = (cB.length || 1) / idx.length;
-      const xq = X[0][idxF]; const xqn = nf0.z[0];
+      const priorA = (cA.length || 1) / (idx.length || 1), priorB = (cB.length || 1) / (idx.length || 1);
+      const cf = colF.filter((c) => Number.isFinite(c)); const range = [cf.length ? Math.min(...cf) : 0, cf.length ? Math.max(...cf) : 1];
+      const xq = Number.isFinite(X[0]?.[idxF]) ? X[0][idxF] : sA.mu; const xqn = (xq - range[0]) / ((range[1] - range[0]) || 1);
       const bell = (x: number, mu: number, va: number) => Math.exp(-((x - mu) ** 2) / (2 * va));
       const likeA = bell(xq, sA.mu, sA.va), likeB = bell(xq, sB.mu, sB.va);
-      const range = [Math.min(...colF), Math.max(...colF)];
       const curve = (mu: number, va: number) => { const pts: string[] = []; for (let t = 0; t <= 60; t++) { const x = range[0] + (range[1] - range[0]) * (t / 60); pts.push(`${sx(t / 60)},${sy(bell(x, mu, va) * 0.9)}`); } return pts.join(" "); };
       intro = "Learn one bell curve (mean & variance) per class. A point's class score is that class's prior times the bell heights at the point.";
       legend = [
-        { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `avg of ${names[idxF]} in class ${classes?.[0] ?? 0}`, val: sA.mu.toFixed(2) },
-        { sym: "\\sigma^2", desc: "class variance", how: "spread within the class", val: sA.va.toFixed(2) },
-        { sym: "P(y)", desc: "class prior", how: "class count ÷ n", val: priorA.toFixed(2) },
-        { sym: "P(x\\mid y)", desc: "bell height at x", how: "Gaussian at the point", val: likeA.toFixed(2) },
+        { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `mean of ${names[idxF]} within class ${classes?.[0] ?? 0}`, val: fv(sA.mu) },
+        { sym: "\\sigma^2", desc: "class variance", how: "Σ(x−μ)² / n within the class", val: fv(sA.va) },
+        { sym: "P(y)", desc: "class prior", how: `rows in class ÷ n = ${cA.length}/${idx.length}`, val: fv(priorA) },
+        { sym: "P(x\\mid y)", desc: "bell height at x", how: "e^(−(x−μ)²/2σ²)", val: fv(likeA) },
       ];
-      formulas = [["P(x\\mid y) = \\tfrac{1}{\\sqrt{2\\pi\\sigma^2}} e^{-\\frac{(x-\\mu)^2}{2\\sigma^2}}", "a bell per class"], ["P(y\\mid x) \\propto P(y)\\,\\textstyle\\prod_j P(x_j\\mid y)", "prior × likelihoods"], [`P(${(classes?.[0] ?? "A").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${(priorA * likeA).toFixed(2)},\\ P(${(classes?.[1] ?? "B").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${(priorB * likeB).toFixed(2)}`, "apply → argmax wins"]];
-      caps = ["a bell curve for each class", `drop your point x = ${xq.toFixed(2)}`, "read each bell's height", `×prior → ${((priorA * likeA) >= (priorB * likeB) ? (classes?.[0] ?? "A") : (classes?.[1] ?? "B"))} wins`];
+      formulas = [["P(x\\mid y) = \\tfrac{1}{\\sqrt{2\\pi\\sigma^2}} e^{-\\frac{(x-\\mu)^2}{2\\sigma^2}}", "a bell per class"], ["P(y\\mid x) \\propto P(y)\\,\\textstyle\\prod_j P(x_j\\mid y)", "prior × likelihoods"], [`P(${(classes?.[0] ?? "A").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${fv(priorA * likeA)},\\ P(${(classes?.[1] ?? "B").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${fv(priorB * likeB)}`, "apply → argmax wins"]];
+      caps = ["a bell curve for each class", `drop your point x = ${fv(xq)}`, "read each bell's height", `×prior → ${((priorA * likeA) >= (priorB * likeB) ? (classes?.[0] ?? "A") : (classes?.[1] ?? "B"))} wins`];
       viz = (s) => svg([
         <polyline key="bA" points={curve(sA.mu, sA.va)} fill="none" stroke={PAL_ML[0]} strokeWidth={2} />,
         <polyline key="bB" points={curve(sB.mu, sB.va)} fill="none" stroke={PAL_ML[1]} strokeWidth={2} />,
@@ -1052,25 +1057,25 @@ ${evalBlock}`;
         s >= 3 ? <text key="win" x={96} y={34} fill="var(--faint)" fontSize={11} fontFamily="monospace">{(priorA * likeA) >= (priorB * likeB) ? `P(${classes?.[0] ?? "A"}) wins` : `P(${classes?.[1] ?? "B"}) wins`}</text> : null,
       ]);
     } else { // tree & forest
-      const rowsAll = pick(n, 260);
+      const rowsAll = pick(n, 260).filter((i) => Number.isFinite(Y[i]) && Number.isFinite(X[i][idxF]) && Number.isFinite(X[i][idxG]));
       const sp = bestSplit(rowsAll, [idxF, idxG]);
       const leftIds = rowsAll.filter((i) => X[i][sp.feat] <= sp.thr);
       const sp2 = leftIds.length > 3 ? bestSplit(leftIds, [idxF, idxG]) : null;
       const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
-      const thrPosOf = (feat: number, thr: number) => { const raw = colj(feat); const mn = Math.min(...raw), mx = Math.max(...raw); return (thr - mn) / ((mx - mn) || 1); };
+      const thrPosOf = (feat: number, thr: number) => { const raw = colj(feat).filter((v) => Number.isFinite(v)); const mn = raw.length ? Math.min(...raw) : 0, mx = raw.length ? Math.max(...raw) : 1; return (thr - mn) / ((mx - mn) || 1); };
       const spAxis = sp.feat === idxF ? "x" : "y";
       const thrPos = thrPosOf(sp.feat, sp.thr);
       const metricName = isReg ? "variance" : "Gini";
       if (kind === "tree") {
         intro = "Greedily test every feature threshold, keep the split that removes the most impurity, then recurse into if/else rules on each side.";
         legend = [
-          { sym: "G", desc: `${metricName} impurity`, how: isReg ? "target spread in a node" : "1 − Σ pₖ² at a node", val: sp.parent.toFixed(3) },
-          { sym: "n_L, n_R", desc: "rows each side", how: "counts after the split", val: `${sp.nl}, ${sp.nr}` },
-          { sym: "\\text{gain}", desc: "impurity removed", how: "parent − weighted children", val: sp.gain.toFixed(3) },
-          { sym: "\\text{thr}", desc: "chosen threshold", how: `best cut on ${names[sp.feat]}`, val: sp.thr.toFixed(2) },
+          { sym: "G", desc: `${metricName} impurity`, how: isReg ? "variance of the target in a node" : "G = 1 − Σₖ pₖ² at a node", val: fv(sp.parent, 3) },
+          { sym: "n_L, n_R", desc: "rows each side", how: `rows with ${names[sp.feat]} ≤ / > thr`, val: `${sp.nl}, ${sp.nr}` },
+          { sym: "\\text{gain}", desc: "impurity removed", how: "G − (n_L/n)G_L − (n_R/n)G_R", val: fv(sp.gain, 3) },
+          { sym: "\\text{thr}", desc: "chosen threshold", how: `the ${names[sp.feat]} cut with max gain`, val: fv(sp.thr) },
         ];
-        formulas = [[`G = ${isReg ? "\\text{var}(y)" : "1 - \\sum_k p_k^2"}`, "how mixed a node is"], ["\\text{gain} = G - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", "impurity a split removes"], [`\\text{gain} = ${sp.parent.toFixed(2)} - \\tfrac{${sp.nl}}{${sp.nl + sp.nr}}(${sp.gl.toFixed(2)}) - \\tfrac{${sp.nr}}{${sp.nl + sp.nr}}(${sp.gr.toFixed(2)}) = ${sp.gain.toFixed(2)}`, "apply at the root"]];
-        caps = [`mixed data (${metricName} = ${sp.parent.toFixed(2)})`, `best cut: ${names[sp.feat]} ≤ ${sp.thr.toFixed(2)}`, `two purer sides (gain ${sp.gain.toFixed(2)})`, sp2 ? "recurse → cut again" : "leaves are pure enough"];
+        formulas = [[`G = ${isReg ? "\\text{var}(y)" : "1 - \\sum_k p_k^2"}`, "how mixed a node is"], ["\\text{gain} = G - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", "impurity a split removes"], [`\\text{gain} = ${fv(sp.parent)} - \\tfrac{${sp.nl}}{${sp.nl + sp.nr}}(${fv(sp.gl)}) - \\tfrac{${sp.nr}}{${sp.nl + sp.nr}}(${fv(sp.gr)}) = ${fv(sp.gain)}`, "apply at the root"]];
+        caps = [`mixed data (${metricName} = ${fv(sp.parent)})`, `best cut: ${names[sp.feat]} ≤ ${fv(sp.thr)}`, `two purer sides (gain ${fv(sp.gain)})`, sp2 ? "recurse → cut again" : "leaves are pure enough"];
         viz = (s) => svg([
           ...rowsAll.filter((i) => idx.includes(i)).map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={s >= 2 ? (X[i][sp.feat] <= sp.thr ? 0.9 : 0.5) : 0.8} />),
           s >= 1 ? (spAxis === "x" ? <line key="cut" x1={sx(thrPos)} y1={PYt} x2={sx(thrPos)} y2={PYb} stroke="#5b7cff" strokeWidth={2} /> : <line key="cut" x1={PX0} y1={sy(thrPos)} x2={PX1} y2={sy(thrPos)} stroke="#5b7cff" strokeWidth={2} />) : null,
@@ -1086,10 +1091,10 @@ ${evalBlock}`;
         const winner = votes.filter((v) => v === 1).length * 2 >= votes.length ? (classes?.[1] ?? "B") : (classes?.[0] ?? "A");
         intro = "Train many trees, each on a bootstrap resample with a random feature subset, then average their votes to cut variance.";
         legend = [
-          { sym: "m", desc: "number of trees", how: "your n_estimators", val: String(m) },
-          { sym: "\\text{bootstrap}", desc: "resample rows", how: "sample n rows with replacement", val: `${n} → ${n}` },
-          { sym: "T_i", desc: "the i-th tree", how: "fit on its own sample", val: `${shown} shown` },
-          { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: "aggregate the m outputs", val: isReg ? "avg" : String(winner) },
+          { sym: "m", desc: "number of trees", how: `n_estimators setting = ${m}`, val: String(m) },
+          { sym: "\\text{bootstrap}", desc: "resample rows", how: "draw n rows with replacement per tree", val: `${n} → ${n}` },
+          { sym: "T_i", desc: "the i-th tree", how: "fit on its own bootstrap sample", val: `${shown} shown` },
+          { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: isReg ? "ŷ = (1/m) Σᵢ Tᵢ(x)" : "ŷ = mode{T₁…Tₘ}", val: isReg ? "avg" : String(winner) },
         ];
         formulas = [["\\text{each } T_i:\\ \\text{bootstrap} + \\text{random features}", "de-correlate the trees"], ["\\text{every tree predicts}", `${shown} independent votes`], isReg ? ["\\hat y = \\tfrac1m\\textstyle\\sum_i T_i(\\mathbf x)", "average the trees"] : ["\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", "majority wins"]];
         caps = [`${shown} of ${m} trees, each its own sample`, "each tree casts a vote", "tally the votes", isReg ? "average → ŷ" : `majority → ${winner}`];
