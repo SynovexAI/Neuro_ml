@@ -24,9 +24,9 @@ async function resolveKbDocs(userId: string, kbIds: string[], query: string, pro
 
 // Build the resolved MCP configs the NAT service expects (secrets decrypted here,
 // headers/env prepared, never sent to the client).
-async function resolveMcp(ids: string[]) {
+async function resolveMcp(ids: string[], userId: string) {
   if (!ids.length) return [];
-  const rows = await db.select().from(mcpServers).where(and(inArray(mcpServers.id, ids), eq(mcpServers.enabled, true)));
+  const rows = await db.select().from(mcpServers).where(and(inArray(mcpServers.id, ids), eq(mcpServers.enabled, true), eq(mcpServers.userId, userId)));
   return rows.map((s) => {
     const secret = s.secretEnc ? decrypt(s.secretEnc) : "";
     const cfg: Record<string, unknown> = { name: s.name, transport: s.transport === "http" ? "streamable-http" : s.transport };
@@ -69,7 +69,7 @@ export async function POST(req: Request) {
   const systemPrompt = b.systemPrompt ? String(b.systemPrompt) : undefined;
   const mcpIds: string[] = Array.isArray(b.mcpServerIds) ? b.mcpServerIds.filter((t: unknown) => typeof t === "string") : [];
   const kbIds: string[] = Array.isArray(b.knowledgeBaseIds) ? b.knowledgeBaseIds.filter((t: unknown) => typeof t === "string") : [];
-  const mcp_servers = await resolveMcp(mcpIds).catch(() => []);
+  const mcp_servers = await resolveMcp(mcpIds, user.id).catch(() => []);
 
   const prov = b.providerId ? await getProviderById(String(b.providerId)) : await getActiveProvider();
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider is configured. An admin must add one under Admin → Providers." }, { status: 400 });

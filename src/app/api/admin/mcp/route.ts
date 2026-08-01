@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { mcpServers } from "@/lib/db/schema";
 import { getSessionUser, uid } from "@/lib/auth";
@@ -12,18 +12,18 @@ export const dynamic = "force-dynamic";
 const TRANSPORTS = ["http", "sse", "stdio"];
 const AUTH_TYPES = ["none", "apikey", "bearer", "oauth"];
 
+// MCP servers are per-user: each user connects and uses their own.
 export async function GET() {
   const u = await getSessionUser();
-  if (!u || u.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
-  const rows = await db.select().from(mcpServers).orderBy(desc(mcpServers.createdAt));
-  // Never leak the encrypted secret; expose only whether one is set.
+  if (!u) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  const rows = await db.select().from(mcpServers).where(eq(mcpServers.userId, u.id)).orderBy(desc(mcpServers.createdAt));
   const safe = rows.map(({ secretEnc, ...r }) => ({ ...r, hasSecret: !!secretEnc }));
   return NextResponse.json({ servers: safe });
 }
 
 export async function POST(req: Request) {
   const u = await getSessionUser();
-  if (!u || u.role !== "admin") return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  if (!u) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const b = await req.json().catch(() => ({}));
   const name = String(b.name || "").trim();
   const transport = TRANSPORTS.includes(b.transport) ? b.transport : "http";
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   const secret = b.secret ? String(b.secret) : "";
   const id = uid();
   await db.insert(mcpServers).values({
-    id, name, transport,
+    id, userId: u.id, name, transport,
     url: transport === "stdio" ? null : String(b.url || "").trim() || null,
     command: transport === "stdio" ? String(b.command || "").trim() : null,
     authType,

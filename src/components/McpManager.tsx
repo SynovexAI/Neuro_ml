@@ -36,6 +36,7 @@ export default function McpManager() {
   const [f, setF] = useState<Form>({ ...empty });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [connectOpen, setConnectOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -45,14 +46,8 @@ export default function McpManager() {
   }
   useEffect(() => { load(); }, []);
 
-  const remote = f.transport === "http" || f.transport === "sse";
-
-  function applyPreset(c: Partial<Form>) {
-    setF({ ...empty, ...c });
-    setMsg("");
-    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
-    toast(`Filled the form for “${c.name}” — add its key and Connect`, "info");
-  }
+  function applyPreset(c: Partial<Form>) { setF({ ...empty, ...c }); setMsg(""); setConnectOpen(true); }
+  function openCustom() { setF({ ...empty }); setMsg(""); setConnectOpen(true); }
 
   async function add() {
     setBusy(true); setMsg("");
@@ -60,7 +55,7 @@ export default function McpManager() {
       const r = await fetch("/api/admin/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(f) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { setMsg(j.error || "Could not add the server."); toast(j.error || "Could not connect the server", "error"); }
-      else { toast(`Connected “${f.name}”`, "success"); setF({ ...empty }); await load(); }
+      else { toast(`Connected “${f.name}”`, "success"); setF({ ...empty }); setConnectOpen(false); await load(); }
     } catch (e) { setMsg((e as Error).message); toast((e as Error).message, "error"); }
     setBusy(false);
   }
@@ -76,83 +71,35 @@ export default function McpManager() {
     toast("MCP server removed", "success");
   }
 
+  const remoteForm = f.transport === "http" || f.transport === "sse";
+
   return (
     <>
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-h"><span className="t">Marketplace</span><span className="note r">click to pre-fill the form below</span></div>
-        <div className="card-b">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
-            {CATALOG.map((c) => (
-              <button key={c.title} type="button" onClick={() => applyPreset(c)}
-                style={{ textAlign: "left", border: "1px solid var(--border)", borderRadius: 9, padding: "11px 12px", background: "var(--surface)", cursor: "pointer", fontFamily: "inherit" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 17 }}>{c.icon}</span><b style={{ fontSize: 13 }}>{c.title}</b></div>
-                <div className="note" style={{ marginTop: 3 }}>{c.desc}</div>
-                <div className="note" style={{ marginTop: 4, color: "var(--accent)" }}>needs: {c.needs}</div>
-              </button>
-            ))}
-          </div>
-        </div>
+      <div style={{ display: "flex", alignItems: "flex-end", marginBottom: 12, gap: 12 }}>
+        <div><h3 style={{ margin: 0, fontSize: 15 }}>Marketplace</h3><div className="note" style={{ marginTop: 2 }}>Pick a server to connect — you add your own key.</div></div>
+        <span style={{ flex: 1 }} />
+        <button className="btn" onClick={openCustom}>+ Custom server</button>
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-h"><span className="t">Connect a server</span></div>
-        <div className="card-b">
-          <div className="split col-2e">
-            <div><label className="fld">Name</label><input type="text" placeholder="github" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
-            <div><label className="fld">Transport</label>
-              <select value={f.transport} onChange={(e) => setF({ ...f, transport: e.target.value as typeof f.transport })}>
-                <option value="http">Streamable HTTP</option>
-                <option value="sse">SSE</option>
-                <option value="stdio">stdio (local command)</option>
-              </select>
+      <div className="cards" style={{ marginBottom: 18 }}>
+        {CATALOG.map((c) => (
+          <button key={c.title} type="button" className="lab-card" onClick={() => applyPreset(c)} style={{ cursor: "pointer", textAlign: "left", fontFamily: "inherit", alignItems: "stretch" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}><span className="zi" style={{ fontSize: 18 }}>{c.icon}</span><b style={{ fontSize: 14 }}>{c.title}</b></div>
+            <p style={{ margin: "6px 0 0" }}>{c.desc}</p>
+            <div style={{ marginTop: "auto", paddingTop: 10, display: "flex", alignItems: "center", gap: 6 }}>
+              <span className="badge">{c.transport === "http" ? "HTTP" : c.transport}</span>
+              <span className="note">needs {c.needs}</span>
+              <span className="go" style={{ marginLeft: "auto" }}>Connect →</span>
             </div>
-          </div>
-
-          {remote ? (
-            <>
-              <label className="fld" style={{ marginTop: 12 }}>Server URL</label>
-              <input type="text" placeholder="https://mcp.example.com/mcp" value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} />
-              <div className="split col-2e" style={{ marginTop: 12 }}>
-                <div><label className="fld">Auth</label>
-                  <select value={f.authType} onChange={(e) => setF({ ...f, authType: e.target.value as typeof f.authType })}>
-                    <option value="none">None</option>
-                    <option value="bearer">API key (Bearer)</option>
-                    <option value="apikey">API key (custom header)</option>
-                    <option value="oauth">OAuth 2.1 (soon)</option>
-                  </select>
-                </div>
-                {f.authType === "apikey" && <div><label className="fld">Header name</label><input type="text" placeholder="X-API-Key" value={f.headerName} onChange={(e) => setF({ ...f, headerName: e.target.value })} /></div>}
-              </div>
-              {(f.authType === "apikey" || f.authType === "bearer") && (
-                <><label className="fld" style={{ marginTop: 12 }}>Secret (stored encrypted)</label>
-                  <input type="password" placeholder="paste the API key / token" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} /></>
-              )}
-              {f.authType === "oauth" && <div className="note" style={{ marginTop: 10 }}>OAuth sign-in flow is a later phase — use API key / Bearer for now.</div>}
-            </>
-          ) : (
-            <>
-              <label className="fld" style={{ marginTop: 12 }}>Command</label>
-              <input type="text" placeholder="npx -y @modelcontextprotocol/server-filesystem /data" value={f.command} onChange={(e) => setF({ ...f, command: e.target.value })} />
-              <div className="split col-2e" style={{ marginTop: 12 }}>
-                <div><label className="fld">Env var name (optional)</label><input type="text" placeholder="API_TOKEN" value={f.envName} onChange={(e) => setF({ ...f, envName: e.target.value })} /></div>
-                <div><label className="fld">Secret (encrypted)</label><input type="password" placeholder="value for that env var" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} /></div>
-              </div>
-              <div className="note" style={{ marginTop: 8 }}>⚠ the command must be installed in the deployed image (stdio can&apos;t launch arbitrary binaries on Render).</div>
-            </>
-          )}
-
-          <div className="row" style={{ marginTop: 14, alignItems: "center", gap: 10 }}>
-            <button className="btn" onClick={add} disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
-            {msg && <span className="err" style={{ margin: 0 }}>{msg}</span>}
-          </div>
-        </div>
+          </button>
+        ))}
       </div>
 
       <div className="card">
-        <div className="card-h"><span className="t">Connected servers</span><span className="mono r">{servers.length}</span></div>
+        <div className="card-h"><span className="t">Your connected servers</span><span className="mono r">{servers.length}</span></div>
         <div className="card-b">
           {loading ? <div className="note">Loading…</div>
-            : servers.length === 0 ? <div className="note">No MCP servers yet. Connect one above — HTTP + API key is the easiest.</div>
+            : servers.length === 0 ? <div className="note">No MCP servers yet. Pick one from the Marketplace above.</div>
             : servers.map((s) => (
               <div key={s.id} style={{ borderBottom: "1px solid var(--border)", padding: "10px 0" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -175,6 +122,55 @@ export default function McpManager() {
       </div>
 
       <div className="note" style={{ marginTop: 12 }}>Tools from <b>enabled</b> servers appear in the Agent Lab palette, tagged MCP. Execution runs through the NAT service.</div>
+
+      {connectOpen && (
+        <div className="modal-wrap show" onClick={(e) => { if (e.target === e.currentTarget) setConnectOpen(false); }}>
+          <div className="modal" style={{ maxWidth: 560 }}>
+            <div className="mh"><b>Connect MCP server</b><button className="x" onClick={() => setConnectOpen(false)}>×</button></div>
+            <div className="mb">
+              <div className="split col-2e">
+                <div><label className="fld">Name</label><input type="text" placeholder="github" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
+                <div><label className="fld">Transport</label>
+                  <select value={f.transport} onChange={(e) => setF({ ...f, transport: e.target.value as typeof f.transport })}>
+                    <option value="http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">stdio (local command)</option>
+                  </select>
+                </div>
+              </div>
+              {remoteForm ? (
+                <>
+                  <label className="fld" style={{ marginTop: 12 }}>Server URL</label>
+                  <input type="text" placeholder="https://mcp.example.com/mcp" value={f.url} onChange={(e) => setF({ ...f, url: e.target.value })} />
+                  <div className="split col-2e" style={{ marginTop: 12 }}>
+                    <div><label className="fld">Auth</label>
+                      <select value={f.authType} onChange={(e) => setF({ ...f, authType: e.target.value as typeof f.authType })}>
+                        <option value="none">None</option><option value="bearer">API key (Bearer)</option><option value="apikey">API key (custom header)</option><option value="oauth">OAuth 2.1 (soon)</option>
+                      </select>
+                    </div>
+                    {f.authType === "apikey" && <div><label className="fld">Header name</label><input type="text" placeholder="X-API-Key" value={f.headerName} onChange={(e) => setF({ ...f, headerName: e.target.value })} /></div>}
+                  </div>
+                  {(f.authType === "apikey" || f.authType === "bearer") && (<><label className="fld" style={{ marginTop: 12 }}>Your key / token (stored encrypted)</label><input type="password" placeholder="paste your API key / token" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} /></>)}
+                  {f.authType === "oauth" && <div className="note" style={{ marginTop: 10 }}>OAuth sign-in is a later phase — use API key / Bearer for now.</div>}
+                </>
+              ) : (
+                <>
+                  <label className="fld" style={{ marginTop: 12 }}>Command</label>
+                  <input type="text" placeholder="npx -y @modelcontextprotocol/server-filesystem /data" value={f.command} onChange={(e) => setF({ ...f, command: e.target.value })} />
+                  <div className="split col-2e" style={{ marginTop: 12 }}>
+                    <div><label className="fld">Env var name (optional)</label><input type="text" placeholder="API_TOKEN" value={f.envName} onChange={(e) => setF({ ...f, envName: e.target.value })} /></div>
+                    <div><label className="fld">Your key (encrypted)</label><input type="password" placeholder="value for that env var" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} /></div>
+                  </div>
+                  <div className="note" style={{ marginTop: 8 }}>⚠ the command must be installed in the deployed image (stdio can&apos;t launch arbitrary binaries on Render).</div>
+                </>
+              )}
+              <div className="row" style={{ marginTop: 16, gap: 10 }}>
+                <button className="btn" onClick={add} disabled={busy}>{busy ? "Connecting…" : "Connect"}</button>
+                <button className="btn ghost" onClick={() => setConnectOpen(false)}>Cancel</button>
+                {msg && <span className="err" style={{ margin: 0 }}>{msg}</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

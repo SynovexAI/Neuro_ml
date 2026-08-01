@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS `audit_log` (
 
 CREATE TABLE IF NOT EXISTS `mcp_servers` (
 	`id` varchar(36) NOT NULL,
+	`user_id` varchar(36),
 	`name` varchar(80) NOT NULL,
 	`transport` enum('http','sse','stdio') NOT NULL DEFAULT 'http',
 	`url` varchar(500),
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS `kb_chunks` (
 );
 
 ALTER TABLE `users` ADD COLUMN IF NOT EXISTS `monthly_token_limit` int;
+ALTER TABLE `mcp_servers` ADD COLUMN IF NOT EXISTS `user_id` varchar(36);
 
 CREATE INDEX IF NOT EXISTS `usage_user_ts_idx` ON `usage` (`user_id`,`ts`);
 CREATE INDEX IF NOT EXISTS `audit_event_ts_idx` ON `audit_log` (`event`,`ts`);

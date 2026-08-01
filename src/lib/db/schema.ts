@@ -89,6 +89,7 @@ export const auditLog = mysqlTable("audit_log", {
 // available to agents. Secrets (API keys / tokens) are AES-256-GCM encrypted.
 export const mcpServers = mysqlTable("mcp_servers", {
   id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }),  // owner; each user has their own MCP servers
   name: varchar("name", { length: 80 }).notNull(),
   transport: mysqlEnum("transport", ["http", "sse", "stdio"]).notNull().default("http"),
   url: varchar("url", { length: 500 }),        // http / sse
