@@ -436,7 +436,7 @@ export default function RagLab() {
   const pLayout = (t: ReturnType<typeof plotlyTheme>, title: string, extra: Record<string, unknown> = {}) => ({ title: { text: title, font: { size: 13, color: t.text } }, paper_bgcolor: t.paper, plot_bgcolor: t.plot, font: { color: t.muted, size: 11 }, margin: { l: 44, r: 16, t: 40, b: 60 }, xaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, yaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, colorway: t.colorway, ...extra });
 
   return (
-    <>
+    <div className="rag-lab">
       <div className="lab-head">
         <div>
           <div className="eyebrow">Lab 02 · flagship</div>
@@ -918,6 +918,6 @@ export default function RagLab() {
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
