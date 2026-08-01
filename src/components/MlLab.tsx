@@ -1400,7 +1400,7 @@ ${evalBlock}`;
         const loss = <Plot data={[
           { type: "scatter", mode: "lines", name: "training loss", x: gdSnaps.slice(0, shown).map((s) => s.ep), y: gdSnaps.slice(0, shown).map((s) => s.loss), line: { color: "#3ecf7f", width: 2.5 } },
           { type: "scatter", mode: "markers", name: "current epoch", x: cur ? [cur.ep] : [], y: cur ? [cur.loss] : [], marker: { size: 10, color: "#3ecf7f", line: { width: 1, color: th.paper } } },
-        ]} layout={{ ...chartLayout(th, "loss ↓ over epochs", "epoch", "loss"), ...legendLayout, height: 175 }} style={{ height: 175, width: "100%" }} />;
+        ]} layout={{ ...chartLayout(th, "loss ↓ over epochs", "epoch", "loss"), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
         const bound = !anim.reg
           ? <Plot data={[
               { type: "heatmap", x: anim.xs, y: anim.ys, z: fr?.z, showscale: false, colorscale: discreteScale(anim.classes.length), zmin: -0.5, zmax: anim.classes.length - 0.5, opacity: 0.32, hoverinfo: "skip", name: "regions" },
@@ -1410,7 +1410,7 @@ ${evalBlock}`;
               { type: "scatter", mode: "markers", name: "data points", x: anim.points.map((p) => p.x), y: anim.points.map((p) => p.y), marker: { size: 7, color: "#5b7cff", opacity: 0.6 } },
               { type: "scatter", mode: "lines", name: "fitted line", x: anim.xs, y: fr?.line, line: { color: "#f59e0b", width: 3 } },
             ]} layout={{ ...chartLayout(th, `epoch ${fr?.ep ?? 0} · MSE ${fv(fr?.loss, 2)} — the line tilts to minimise squared error`, d.f1, target), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
-        return <div>{loss}{bound}</div>;
+        return <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12, alignItems: "start" }}>{loss}{bound}</div>;
       }
       if (d?.kind === "surface" && d.surf) {
         const s = d.surf; const kk = s.classes.length; const ratio = trainTotal ? Math.min(t, trainTotal) / trainTotal : 1; const shown = Math.max(1, Math.round(ratio * s.points.length));
