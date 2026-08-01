@@ -73,6 +73,8 @@ export default function DlLab() {
   const splitRef = useRef<{ Xtr: number[][]; ytr: number[]; Xte: number[][]; yte: number[] } | null>(null);
   const rangeRef = useRef<{ lo: number[]; hi: number[] } | null>(null);
   const [testInput, setTestInput] = useState<number[]>([]);
+  const [predResult, setPredResult] = useState<{ kind: "cls"; label: string; conf: number; probs: { name: string; p: number }[] } | { kind: "reg"; value: number } | null>(null);
+  const [copied, setCopied] = useState(false);
   const th = plotlyTheme();
 
   useEffect(() => () => { if (timer.current) clearInterval(timer.current); }, []);
@@ -234,6 +236,18 @@ export default function DlLab() {
     return `import torch, torch.nn as nn\n\nmodel = nn.Sequential(\n${layers.join("\n")}\n)\ncriterion = ${loss}\noptimizer = ${optLine}\n\n# X: (n, ${data.X[0].length}) standardized features   y: ${data.task === "regression" ? "(n,) float" : data.task === "binary" ? "(n,) 0/1" : "(n,) class index"}\nfor epoch in range(${epochsTarget}):\n    optimizer.zero_grad()\n    out = model(X)\n    loss = criterion(out${data.task === "binary" ? ".squeeze(1)" : ""}, y${data.task === "regression" ? ".unsqueeze(1)" : ""})\n    loss.backward(); optimizer.step()`;
   }, [data, hidden, act, outDim, optimizer, lr, epochsTarget]);
 
+  // ── test-page helpers ──
+  function doPredict() {
+    if (!netRef.current || !scRef.current || !data) return;
+    const x = data.featNames.map((_, j) => testInput[j] ?? 0); const o = predictVec(netRef.current, scaleRow(x, scRef.current));
+    if (data.task === "regression") setPredResult({ kind: "reg", value: o[0] });
+    else { const c = o.indexOf(Math.max(...o)); const probs = o.map((p, i) => ({ name: String(data.classes[i] ?? i), p })).sort((a, b) => b.p - a.p).slice(0, 5); setPredResult({ kind: "cls", label: String(data.classes[c] ?? c), conf: Math.max(...o), probs }); }
+  }
+  function copyCode() { navigator.clipboard?.writeText(pyCode).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1400); }).catch(() => {}); }
+  function downloadFile(name: string, content: string, mime: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([content], { type: mime })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
+  function modelJson() { const n = netRef.current; if (!n || !data) return "{}"; return JSON.stringify({ task: data.task, classes: data.classes, featNames: data.featNames, sizes: n.sizes, activation: n.act, scaler: scRef.current, weights: n.W, biases: n.b }, null, 2); }
+  const mcard = (v: string, k: string, accent = false, badge?: [string, string]) => <div style={{ background: "linear-gradient(160deg, var(--panel), var(--surface))", border: `1px solid ${accent ? "var(--accent)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", position: "relative", overflow: "hidden" }}><div style={{ fontSize: 28, fontWeight: 600, color: accent ? "var(--accent)" : "var(--text)", lineHeight: 1 }}>{v}</div><div className="note" style={{ marginTop: 6, textTransform: "uppercase", letterSpacing: ".04em" }}>{k}</div>{badge && <span style={{ position: "absolute", right: 10, top: 12, fontSize: 11, color: badge[1], fontFamily: "var(--mono)" }}>{badge[0]}</span>}</div>;
+  const panelSt: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--panel)" };
   const canExplore = !!data, best = history.length ? history[history.length - 1] : null;
 
   return (
@@ -370,46 +384,58 @@ export default function DlLab() {
       {step === "test" && data && (
         <div className="card"><div className="card-h"><span className="t">Test & Export</span></div>
           <div className="card-b">
-            {!evalR ? <div className="note">Train the network first (step 5).</div> : <>
-              {evalR.task === "regression"
-                ? <>
-                  <div className="split" style={{ gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 14, maxWidth: 420 }}><div className="metric"><span className="v">{evalR.acc.toFixed(3)}</span><span className="k">R² (test)</span></div><div className="metric"><span className="v">{Math.sqrt(evalR.loss).toFixed(2)}</span><span className="k">RMSE</span></div><div className="metric"><span className="v">{evalR.predActual ? (evalR.predActual.reduce((a, p) => a + Math.abs(p[0] - p[1]), 0) / evalR.predActual.length).toFixed(2) : "—"}</span><span className="k">MAE</span></div></div>
-                  {evalR.predActual && <div style={{ maxWidth: 460 }}><Plot data={[{ type: "scatter", mode: "markers", name: "test rows", x: evalR.predActual.map((p) => p[0]), y: evalR.predActual.map((p) => p[1]), marker: { color: "#5b7cff", size: 7, opacity: 0.75 } }, { type: "scatter", mode: "lines", name: "ŷ = y (perfect)", x: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], y: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], line: { color: th.muted, dash: "dash" }, hoverinfo: "skip" }] as never} layout={lay("predicted vs actual (held-out test set)", "actual", "predicted", { showlegend: true, legend: { orientation: "h", y: -0.22 }, height: 360 }) as never} style={{ height: 360, width: "100%" }} /></div>}
-                </>
-                : <>
-                  {(() => { const m = evalR.confusion ? prf(evalR.confusion) : { precision: 0, recall: 0, f1: 0 }; return <div className="split" style={{ gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 14, maxWidth: 520 }}><div className="metric"><span className="v">{(evalR.acc * 100).toFixed(1)}%</span><span className="k">accuracy</span></div><div className="metric"><span className="v">{m.precision.toFixed(2)}</span><span className="k">precision</span></div><div className="metric"><span className="v">{m.recall.toFixed(2)}</span><span className="k">recall</span></div><div className="metric"><span className="v">{m.f1.toFixed(2)}</span><span className="k">F1</span></div></div>; })()}
-                  {evalR.confusion && (() => { const cls = (evalR.classes ?? []).map(String); const cm = evalR.confusion; const ann: Record<string, unknown>[] = []; for (let a = 0; a < cls.length; a++) for (let p = 0; p < cls.length; p++) ann.push({ x: cls[p], y: cls[a], text: String(cm[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 16 } }); const sz = Math.min(400, 150 + cls.length * 78);
-                    return <div className="split col-2e" style={{ gap: 16, alignItems: "start" }}>
-                      <div style={{ maxWidth: sz }}>
-                        <label className="fld">Confusion matrix (test) — diagonal = correct, off-diagonal = mistakes</label>
-                        <Plot data={[{ type: "heatmap", x: cls, y: cls, z: cm, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: false, hoverinfo: "skip" }] as never} layout={{ ...lay("", "predicted →", "actual ↓", { height: sz, margin: { l: 46, r: 12, t: 12, b: 46 } }), annotations: ann, yaxis: { title: { text: "actual ↓" }, scaleanchor: "x", autorange: "reversed", gridcolor: th.grid } } as never} style={{ height: sz, width: "100%" }} />
-                      </div>
-                      <div>
-                        <label className="fld">Per-class accuracy (test)</label>
-                        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
-                          <tr><th>class</th><th>rows</th><th>correct</th><th>recall</th></tr>
-                          {cls.map((c, k) => { const tot = cm[k].reduce((a, b) => a + b, 0); const cor = cm[k][k]; const rc = cor / (tot || 1); return <tr key={k}><td>{c}</td><td className="mono">{tot}</td><td className="mono">{cor}</td><td className="mono" style={{ color: rc >= 0.8 ? "var(--good)" : rc >= 0.5 ? "var(--warn)" : "var(--crit)" }}>{rc.toFixed(2)}</td></tr>; })}
-                        </tbody></table></div>
-                        <div className="note" style={{ marginTop: 8, lineHeight: 1.6 }}>Recall = of the rows that truly belong to a class, the fraction the model got right (the diagonal ÷ its row). Low-recall classes are where the model struggles.</div>
-                      </div>
+            {!evalR ? <div className="note">Train the network first (step 5).</div> : (() => {
+              const isReg = evalR.task === "regression";
+              const badge: [string, string] = isReg ? (evalR.acc >= 0.8 ? ["▲ strong", "#3ecf7f"] : evalR.acc >= 0.5 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]) : (evalR.acc >= 0.9 ? ["▲ strong", "#3ecf7f"] : evalR.acc >= 0.75 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]);
+              const m = !isReg && evalR.confusion ? prf(evalR.confusion) : { precision: 0, recall: 0, f1: 0 };
+              const mae = isReg && evalR.predActual ? (evalR.predActual.reduce((a, p) => a + Math.abs(p[0] - p[1]), 0) / evalR.predActual.length) : 0;
+              return <>
+                {/* metric cards */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 20 }}>
+                  {isReg
+                    ? [mcard(evalR.acc.toFixed(3), "R² (test)", true, badge), mcard(Math.sqrt(evalR.loss).toFixed(2), "RMSE"), mcard(mae.toFixed(2), "MAE")]
+                    : [mcard(`${(evalR.acc * 100).toFixed(1)}%`, "accuracy", true, badge), mcard(m.precision.toFixed(2), "precision"), mcard(m.recall.toFixed(2), "recall"), mcard(m.f1.toFixed(2), "F1 score")]}
+                </div>
+                {/* matrix / scatter + breakdown */}
+                {isReg
+                  ? evalR.predActual && <div style={{ ...panelSt, marginBottom: 20, maxWidth: 560 }}><h4 className="fld" style={{ margin: "0 0 8px" }}>Predicted vs actual (held-out test set)</h4><Plot data={[{ type: "scatter", mode: "markers", name: "test rows", x: evalR.predActual.map((p) => p[0]), y: evalR.predActual.map((p) => p[1]), marker: { color: "#5b7cff", size: 7, opacity: 0.75 } }, { type: "scatter", mode: "lines", name: "ŷ = y", x: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], y: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], line: { color: th.muted, dash: "dash" }, hoverinfo: "skip" }] as never} layout={lay("", "actual", "predicted", { showlegend: true, legend: { orientation: "h", y: -0.22 }, height: 340, margin: { l: 46, r: 12, t: 12, b: 46 } }) as never} style={{ height: 340, width: "100%" }} /></div>
+                  : evalR.confusion && (() => { const cls = (evalR.classes ?? []).map(String); const cm = evalR.confusion; const ann: Record<string, unknown>[] = []; for (let a = 0; a < cls.length; a++) for (let p = 0; p < cls.length; p++) ann.push({ x: cls[p], y: cls[a], text: String(cm[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 16 } }); const sz = Math.min(380, 150 + cls.length * 72);
+                    return <div className="split col-2e" style={{ gap: 16, alignItems: "start", marginBottom: 20 }}>
+                      <div style={panelSt}><h4 className="fld" style={{ margin: "0 0 4px" }}>Confusion matrix</h4><div className="note" style={{ marginBottom: 6 }}>green = correct · amber/red = mistakes</div><Plot data={[{ type: "heatmap", x: cls, y: cls, z: cm, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: false, hoverinfo: "skip" }] as never} layout={{ ...lay("", "predicted →", "actual ↓", { height: sz, margin: { l: 42, r: 10, t: 8, b: 42 } }), annotations: ann, yaxis: { title: { text: "actual ↓" }, scaleanchor: "x", autorange: "reversed", gridcolor: th.grid } } as never} style={{ height: sz, width: "100%" }} /></div>
+                      <div style={panelSt}><h4 className="fld" style={{ margin: "0 0 8px" }}>Per-class accuracy</h4><div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
+                        <tr><th>class</th><th>rows</th><th>correct</th><th>recall</th></tr>
+                        {cls.map((c, k) => { const tot = cm[k].reduce((a, b) => a + b, 0); const cor = cm[k][k]; const rc = cor / (tot || 1); const col = rc >= 0.8 ? "var(--good)" : rc >= 0.5 ? "var(--warn)" : "var(--crit)"; return <tr key={k}><td>{c}</td><td className="mono">{tot}</td><td className="mono">{cor}</td><td className="mono" style={{ color: col }}><span style={{ display: "inline-block", height: 6, borderRadius: 3, width: Math.round(rc * 36), background: col, verticalAlign: "middle", marginRight: 6 }} />{rc.toFixed(2)}</td></tr>; })}
+                      </tbody></table></div><div className="note" style={{ marginTop: 8, lineHeight: 1.6 }}>Recall = of the rows that truly belong to a class, the fraction predicted right. Low-recall rows are where the model struggles.</div></div>
                     </div>; })()}
-                </>}
-              <div className="split col-2e" style={{ gap: 16, marginTop: 18 }}>
-                <div>
-                  <label className="fld">Predict one input (raw feature values)</label>
-                  <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                    {data.featNames.slice(0, 6).map((f, j) => <div key={f}><label className="note">{f}</label><input type="number" step="any" value={testInput[j] ?? ""} onChange={(e) => setTestInput((t) => { const n = [...t]; n[j] = +e.target.value; return n; })} style={{ width: 88 }} /></div>)}
-                    {data.featNames.length > 6 && <span className="note">+{data.featNames.length - 6} more (defaults to 0)</span>}
-                    <button className="btn sm" onClick={() => { const x = data.featNames.map((_, j) => testInput[j] ?? 0); if (netRef.current && scRef.current) { const o = predictVec(netRef.current, scaleRow(x, scRef.current)); if (data.task === "regression") setMsg(`Prediction: ${o[0].toFixed(3)}`); else { const c = o.indexOf(Math.max(...o)); setMsg(`Prediction: ${data.classes[c] ?? c} (${(Math.max(...o) * 100).toFixed(0)}% confident)`); } } }}>Predict</button>
+                {/* predict panel */}
+                <div style={{ ...panelSt, marginBottom: 20 }}>
+                  <h4 className="fld" style={{ margin: "0 0 10px" }}>Predict a new sample <span className="note">(raw feature values)</span></h4>
+                  <div className="row" style={{ gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    {data.featNames.slice(0, 8).map((f, j) => <div key={f} style={{ display: "flex", flexDirection: "column", gap: 4 }}><label className="note">{f}</label><input type="number" step="any" value={testInput[j] ?? ""} onChange={(e) => setTestInput((t) => { const n = [...t]; n[j] = +e.target.value; return n; })} style={{ width: 96 }} /></div>)}
+                    {data.featNames.length > 8 && <span className="note">+{data.featNames.length - 8} more (default 0)</span>}
+                    <button className="btn" onClick={doPredict}>Predict ↗</button>
                   </div>
-                  <div className="note" style={{ marginTop: 8 }}>Values are standardized with the training μ/σ before the network sees them.</div>
+                  {predResult && (predResult.kind === "reg"
+                    ? <div style={{ marginTop: 14, border: "1px solid var(--accent)", borderRadius: 12, padding: "14px 16px", background: "var(--surface)" }}><div className="note" style={{ textTransform: "uppercase", letterSpacing: ".04em" }}>predicted value</div><div style={{ fontSize: 26, fontWeight: 600, color: "var(--accent)" }}>{predResult.value.toFixed(3)}</div></div>
+                    : <div style={{ marginTop: 14, border: "1px solid var(--good)", borderRadius: 12, padding: "14px 16px", background: "var(--surface)" }}><div className="note" style={{ textTransform: "uppercase", letterSpacing: ".04em" }}>predicted class</div><div style={{ fontSize: 24, fontWeight: 600, color: "var(--good)" }}>{predResult.label} <span style={{ fontSize: 14, color: "var(--muted)", fontWeight: 400 }}>· {(predResult.conf * 100).toFixed(0)}% confident</span></div>
+                      <div style={{ marginTop: 10 }}>{predResult.probs.map((pb) => <div key={pb.name} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, fontFamily: "var(--mono)", fontSize: 12 }}><span style={{ width: 30, color: "var(--muted)", textAlign: "right" }}>{pb.name}</span><span style={{ flex: 1, height: 8, background: "var(--panel-2)", borderRadius: 4, overflow: "hidden" }}><span style={{ display: "block", height: "100%", width: `${pb.p * 100}%`, background: pb.name === predResult.label ? "var(--good)" : "var(--accent)", borderRadius: 4 }} /></span><span style={{ width: 34 }}>{pb.p.toFixed(2)}</span></div>)}</div>
+                    </div>)}
+                  <div className="note" style={{ marginTop: 8 }}>Inputs are standardized with the training μ/σ before the network sees them.</div>
                 </div>
-                <div>
-                  <label className="fld">Equivalent PyTorch</label>
-                  <pre className="codebox" style={{ maxHeight: 240, overflow: "auto", fontSize: 11.5 }}>{pyCode}</pre>
+                {/* export */}
+                <div style={panelSt}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+                    <h4 className="fld" style={{ margin: 0 }}>Export — equivalent PyTorch</h4>
+                    <div className="row" style={{ gap: 8 }}>
+                      <button className="btn ghost sm" onClick={copyCode}>{copied ? "✓ Copied" : "⧉ Copy"}</button>
+                      <button className="btn ghost sm" onClick={() => downloadFile("model.py", pyCode, "text/x-python")}>⬇ Download .py</button>
+                      <button className="btn ghost sm" onClick={() => downloadFile("model.json", modelJson(), "application/json")}>⬇ Weights .json</button>
+                    </div>
+                  </div>
+                  <pre className="codebox" style={{ maxHeight: 280, overflow: "auto", fontSize: 11.5, margin: 0 }}>{pyCode}</pre>
                 </div>
-              </div>
-            </>}
+              </>;
+            })()}
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("train")}>← Back</button></div>
           </div>
         </div>
