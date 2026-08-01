@@ -198,7 +198,7 @@ export default function DlLab() {
 
   // ── train visualization ──
   function trainViz() {
-    if (!data) return null; const H = 360;
+    if (!data) return null; const H = 300;
     if (data.featNames.length === 2 && data.task !== "regression" && surface) {
       const heat = { type: "heatmap", x: surface.xs, y: surface.ys, z: surface.z, showscale: false, colorscale: discrete(K), zmin: -0.5, zmax: K - 0.5, opacity: 0.35, hoverinfo: "skip" };
       const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers", name: data.classes[c] ?? `class ${c}`, x: data.X.map((r, i) => (data.y[i] === c ? r[0] : null)), y: data.X.map((r, i) => (data.y[i] === c ? r[1] : null)), marker: { color: PAL[c % PAL.length], size: 6, line: { width: 1, color: th.paper } } }));
@@ -219,8 +219,15 @@ export default function DlLab() {
   }
   void tick;
 
+  // weight-distribution histogram (all network weights) — spreads from ~0 as it learns
+  function weightHist() {
+    const n = netRef.current; if (!n) return <div className="note" style={{ padding: "50px 0", textAlign: "center" }}>weight distribution appears once training starts</div>;
+    const w: number[] = []; n.W.forEach((l) => l.forEach((r) => r.forEach((v) => w.push(v)))); const H = 280;
+    const mad = w.reduce((a, v) => a + Math.abs(v), 0) / (w.length || 1);
+    return <Plot data={[{ type: "histogram", x: w, marker: { color: "#a855f7" }, opacity: 0.85, nbinsx: 30 }] as never} layout={lay(`weight distribution — ${w.length} weights, mean |w| = ${mad.toFixed(2)}`, "weight value", "count", { height: H, showlegend: false, bargap: 0.03 }) as never} style={{ height: H, width: "100%" }} />;
+  }
   // curves
-  const curveFig = () => { if (!history.length) return null; const H = 220; const metric = data?.task === "regression" ? "R²" : "accuracy";
+  const curveFig = () => { if (!history.length) return null; const H = 280; const metric = data?.task === "regression" ? "R²" : "accuracy";
     return { loss: <Plot data={[{ type: "scatter", mode: "lines", name: "train", x: history.map((h) => h.ep), y: history.map((h) => h.loss), line: { color: "#5b7cff", width: 2 } }, { type: "scatter", mode: "lines", name: "val", x: history.map((h) => h.ep), y: history.map((h) => h.vloss), line: { color: "#f59e0b", width: 2, dash: "dot" } }] as never} layout={lay("loss ↓", "epoch", "loss", { showlegend: true, legend: { orientation: "h", y: -0.3 }, height: H }) as never} style={{ height: H, width: "100%" }} />,
       acc: <Plot data={[{ type: "scatter", mode: "lines", name: "train", x: history.map((h) => h.ep), y: history.map((h) => h.acc), line: { color: "#3ecf7f", width: 2 } }, { type: "scatter", mode: "lines", name: "val", x: history.map((h) => h.ep), y: history.map((h) => h.vacc), line: { color: "#a855f7", width: 2, dash: "dot" } }] as never} layout={lay(`${metric} ↑`, "epoch", metric, { showlegend: true, legend: { orientation: "h", y: -0.3 }, height: H, yaxis: { title: { text: metric } } }) as never} style={{ height: H, width: "100%" }} /> };
   };
@@ -387,13 +394,12 @@ export default function DlLab() {
               {stat(best ? best.vacc.toFixed(3) : "—", `validation ${metricName}`, "#a855f7")}
               {stat(best ? best.loss.toFixed(3) : "—", "loss")}
             </div>
-            {/* boundary/fit + curves */}
-            <div className="split col-2e" style={{ gap: 16, alignItems: "start" }}>
+            {/* balanced 2×2 graph grid: boundary + loss / weights + accuracy */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, alignItems: "start" }}>
               <div style={panelSt}>{trainViz()}</div>
-              <div style={{ display: "grid", gap: 12 }}>
-                <div style={panelSt}>{c ? c.loss : <div className="note" style={{ padding: "40px 0", textAlign: "center" }}>loss curve appears once training starts</div>}</div>
-                <div style={panelSt}>{c ? c.acc : <div className="note" style={{ padding: "40px 0", textAlign: "center" }}>{metricName} curve appears once training starts</div>}</div>
-              </div>
+              <div style={panelSt}>{c ? c.loss : <div className="note" style={{ padding: "50px 0", textAlign: "center" }}>loss curve appears once training starts</div>}</div>
+              <div style={panelSt}>{weightHist()}</div>
+              <div style={panelSt}>{c ? c.acc : <div className="note" style={{ padding: "50px 0", textAlign: "center" }}>{metricName} curve appears once training starts</div>}</div>
             </div>
             {best && best.vacc < best.acc - 0.12 && <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">⚠️</span><span><b>Overfitting</b> — train {metricName} is well above validation. Add L2, shrink the network, or get more data.</span></div>}
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("arch")}>← Back</button><button className="btn" onClick={() => { finishNow(); setStep("test"); }} disabled={!epoch}>Next: Test →</button></div>
