@@ -21,7 +21,6 @@ const SAMPLES = [
   { k: "moons", l: "Moons", t: "binary" }, { k: "blobs3", l: "3 Blobs (multiclass)", t: "multiclass" }, { k: "sine", l: "Sine (regression)", t: "regression" },
 ];
 const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
-const MAX_EPOCHS = 500;
 
 type Resolved = { X: number[][]; y: number[]; task: DlTask; classes: string[]; featNames: string[]; source: string };
 
@@ -59,6 +58,7 @@ export default function DlLab() {
   const [lr, setLr] = useState(0.02);
   const [l2, setL2] = useState(0);
   const [batchSize, setBatchSize] = useState(16);
+  const [epochsTarget, setEpochsTarget] = useState(300);
 
   const [epoch, setEpoch] = useState(0);
   const [running, setRunning] = useState(false);
@@ -136,7 +136,7 @@ export default function DlLab() {
       setHistory((h) => [...h, { ep, loss: stat.loss, acc: stat.acc, vloss: veval.loss, vacc: veval.acc }]);
       if (data.featNames.length === 2 && data.task !== "regression" && (ep % 4 === 0 || ep === 1)) setSurface(dlSurface(n, scRef.current!, rangeRef.current!.lo, rangeRef.current!.hi, 44));
       setTick((t) => t + 1);
-      if (ep >= MAX_EPOCHS) { stopTrain(); setEvalR(fullEval(n, s.Xte, s.yte, data.classes)); }
+      if (ep >= epochsTarget) { stopTrain(); setEvalR(fullEval(n, s.Xte, s.yte, data.classes)); }
     }, 40);
   }
   function stopTrain() { if (timer.current) { clearInterval(timer.current); timer.current = null; } setRunning(false); }
@@ -231,8 +231,8 @@ export default function DlLab() {
     layers.push(`    nn.Linear(${sizes[sizes.length - 1]}, ${outDim}),`);
     const loss = data.task === "regression" ? "nn.MSELoss()" : data.task === "binary" ? "nn.BCEWithLogitsLoss()" : "nn.CrossEntropyLoss()";
     const optLine = optimizer === "adam" ? `torch.optim.Adam(model.parameters(), lr=${lr})` : optimizer === "momentum" ? `torch.optim.SGD(model.parameters(), lr=${lr}, momentum=0.9)` : `torch.optim.SGD(model.parameters(), lr=${lr})`;
-    return `import torch, torch.nn as nn\n\nmodel = nn.Sequential(\n${layers.join("\n")}\n)\ncriterion = ${loss}\noptimizer = ${optLine}\n\n# X: (n, ${data.X[0].length}) standardized features   y: ${data.task === "regression" ? "(n,) float" : data.task === "binary" ? "(n,) 0/1" : "(n,) class index"}\nfor epoch in range(${MAX_EPOCHS}):\n    optimizer.zero_grad()\n    out = model(X)\n    loss = criterion(out${data.task === "binary" ? ".squeeze(1)" : ""}, y${data.task === "regression" ? ".unsqueeze(1)" : ""})\n    loss.backward(); optimizer.step()`;
-  }, [data, hidden, act, outDim, optimizer, lr]);
+    return `import torch, torch.nn as nn\n\nmodel = nn.Sequential(\n${layers.join("\n")}\n)\ncriterion = ${loss}\noptimizer = ${optLine}\n\n# X: (n, ${data.X[0].length}) standardized features   y: ${data.task === "regression" ? "(n,) float" : data.task === "binary" ? "(n,) 0/1" : "(n,) class index"}\nfor epoch in range(${epochsTarget}):\n    optimizer.zero_grad()\n    out = model(X)\n    loss = criterion(out${data.task === "binary" ? ".squeeze(1)" : ""}, y${data.task === "regression" ? ".unsqueeze(1)" : ""})\n    loss.backward(); optimizer.step()`;
+  }, [data, hidden, act, outDim, optimizer, lr, epochsTarget]);
 
   const canExplore = !!data, best = history.length ? history[history.length - 1] : null;
 
@@ -351,11 +351,12 @@ export default function DlLab() {
               <div><label className="note">Optimizer</label><select value={optimizer} onChange={(e) => setOptimizer(e.target.value as Optimizer)}><option value="adam">Adam</option><option value="momentum">SGD + momentum</option><option value="sgd">SGD</option></select></div>
               <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>L2 (weight decay)</span><b>{l2}</b></div><input type="range" min={0} max={0.01} step={0.0005} value={l2} onChange={(e) => setL2(+e.target.value)} /></div>
               <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Batch size (rows)</span><b>{batchSize}</b></div><input type="range" min={1} max={64} step={1} value={batchSize} onChange={(e) => setBatchSize(+e.target.value)} /></div>
+              <div className="knob" style={{ margin: 0, minWidth: 160 }}><div className="kr"><span>Epochs (how long to train)</span><b>{epochsTarget}</b></div><input type="range" min={50} max={1000} step={25} value={epochsTarget} onChange={(e) => setEpochsTarget(+e.target.value)} disabled={running} /></div>
             </div>
             <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
               <button className="btn" onClick={running ? stopTrain : startTrain}>{running ? "⏸ Pause" : epoch ? "↻ Restart" : "▶ Train"}</button>
               {running && <button className="btn ghost" onClick={finishNow}>⏭ Finish now</button>}
-              <span className="note">epoch <b>{epoch}</b> / {MAX_EPOCHS}</span>
+              <span className="note">epoch <b>{epoch}</b> / {epochsTarget}</span>
               {best && <span className="note">· train {data.task === "regression" ? "R²" : "accuracy"} <b>{best.acc.toFixed(3)}</b> · validation <b>{best.vacc.toFixed(3)}</b> · loss <b>{best.loss.toFixed(3)}</b></span>}
             </div>
             {trainViz()}
@@ -377,8 +378,21 @@ export default function DlLab() {
                 </>
                 : <>
                   {(() => { const m = evalR.confusion ? prf(evalR.confusion) : { precision: 0, recall: 0, f1: 0 }; return <div className="split" style={{ gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 14, maxWidth: 520 }}><div className="metric"><span className="v">{(evalR.acc * 100).toFixed(1)}%</span><span className="k">accuracy</span></div><div className="metric"><span className="v">{m.precision.toFixed(2)}</span><span className="k">precision</span></div><div className="metric"><span className="v">{m.recall.toFixed(2)}</span><span className="k">recall</span></div><div className="metric"><span className="v">{m.f1.toFixed(2)}</span><span className="k">F1</span></div></div>; })()}
-                  {evalR.confusion && (() => { const cls = (evalR.classes ?? []).map(String); const ann: Record<string, unknown>[] = []; for (let a = 0; a < cls.length; a++) for (let p = 0; p < cls.length; p++) ann.push({ x: cls[p], y: cls[a], text: String(evalR.confusion![a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 16 } }); const sz = Math.min(420, 150 + cls.length * 90);
-                    return <div style={{ maxWidth: sz }}><Plot data={[{ type: "heatmap", x: cls, y: cls, z: evalR.confusion, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: false, hoverinfo: "skip" }] as never} layout={{ ...lay("confusion matrix (test) — diagonal = correct", "predicted →", "actual ↓", { height: sz }), annotations: ann, yaxis: { title: { text: "actual ↓" }, scaleanchor: "x", autorange: "reversed", gridcolor: th.grid } } as never} style={{ height: sz, width: "100%" }} /></div>; })()}
+                  {evalR.confusion && (() => { const cls = (evalR.classes ?? []).map(String); const cm = evalR.confusion; const ann: Record<string, unknown>[] = []; for (let a = 0; a < cls.length; a++) for (let p = 0; p < cls.length; p++) ann.push({ x: cls[p], y: cls[a], text: String(cm[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 16 } }); const sz = Math.min(400, 150 + cls.length * 78);
+                    return <div className="split col-2e" style={{ gap: 16, alignItems: "start" }}>
+                      <div style={{ maxWidth: sz }}>
+                        <label className="fld">Confusion matrix (test) — diagonal = correct, off-diagonal = mistakes</label>
+                        <Plot data={[{ type: "heatmap", x: cls, y: cls, z: cm, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: false, hoverinfo: "skip" }] as never} layout={{ ...lay("", "predicted →", "actual ↓", { height: sz, margin: { l: 46, r: 12, t: 12, b: 46 } }), annotations: ann, yaxis: { title: { text: "actual ↓" }, scaleanchor: "x", autorange: "reversed", gridcolor: th.grid } } as never} style={{ height: sz, width: "100%" }} />
+                      </div>
+                      <div>
+                        <label className="fld">Per-class accuracy (test)</label>
+                        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
+                          <tr><th>class</th><th>rows</th><th>correct</th><th>recall</th></tr>
+                          {cls.map((c, k) => { const tot = cm[k].reduce((a, b) => a + b, 0); const cor = cm[k][k]; const rc = cor / (tot || 1); return <tr key={k}><td>{c}</td><td className="mono">{tot}</td><td className="mono">{cor}</td><td className="mono" style={{ color: rc >= 0.8 ? "var(--good)" : rc >= 0.5 ? "var(--warn)" : "var(--crit)" }}>{rc.toFixed(2)}</td></tr>; })}
+                        </tbody></table></div>
+                        <div className="note" style={{ marginTop: 8, lineHeight: 1.6 }}>Recall = of the rows that truly belong to a class, the fraction the model got right (the diagonal ÷ its row). Low-recall classes are where the model struggles.</div>
+                      </div>
+                    </div>; })()}
                 </>}
               <div className="split col-2e" style={{ gap: 16, marginTop: 18 }}>
                 <div>
