@@ -634,17 +634,34 @@ export default function RagLab() {
         </div>
       )}
 
-      {index && (
+      {step === "query" && index && (
         <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-h"><span className="t">Compare chunking</span><div className="r"><button className="btn sm" onClick={compareChunking}>▶ Compare sizes</button></div></div>
+          <div className="card-h"><span className="t">Compare chunking</span><span className="mono r">{strategy} · top-{topK}</span></div>
           <div className="card-b">
-            <div className="note" style={{ marginBottom: 10 }}>Rebuilds the index at several chunk sizes and retrieves for your question — bigger isn&apos;t always better. Higher <b>top score</b> = the best chunk matches the question more strongly ({strategy}, top-{topK}).</div>
-            {compareRows.length === 0 ? <div className="note">Click compare to score chunk sizes for “{question}”.</div> : (
-              <div style={{ overflowX: "auto" }}><table className="tbl">
-                <thead><tr><th>Chunk size</th><th>Overlap</th><th style={{ textAlign: "right" }}>Chunks</th><th style={{ textAlign: "right" }}>Top score</th><th style={{ textAlign: "right" }}>Avg top-{topK}</th><th>Best chunk</th></tr></thead>
-                <tbody>{compareRows.map((r, i) => { const best = Math.max(...compareRows.map((x) => x.top)); const win = r.top === best && r.top > 0; return <tr key={i}><td>{r.size}w {win && <span title="best">⭐</span>}</td><td>{r.overlap}</td><td className="mono" style={{ textAlign: "right" }}>{r.chunks}</td><td className="mono" style={{ textAlign: "right", color: win ? "var(--good)" : undefined, fontWeight: win ? 600 : 400 }}>{r.top.toFixed(3)}</td><td className="mono" style={{ textAlign: "right" }}>{r.avg.toFixed(3)}</td><td style={{ fontSize: 11, color: "var(--muted)", maxWidth: 260 }}>{r.best.slice(0, 120)}{r.best.length > 120 ? "…" : ""}</td></tr>; })}</tbody>
-              </table></div>
-            )}
+            <div className="note" style={{ marginBottom: 10 }}>Rebuilds the index at several chunk sizes and retrieves for “{question}”. Higher <b>top score</b> = the best chunk matches more strongly — bigger chunks aren&apos;t always better. (Independent of your main pipeline above.)</div>
+            <button className="btn sm" onClick={compareChunking} style={{ marginBottom: compareRows.length ? 14 : 0 }}>{compareRows.length ? "↻ Re-run comparison" : "▶ Compare chunk sizes"}</button>
+            {compareRows.length > 0 && (() => {
+              const best = Math.max(...compareRows.map((r) => r.top), 0.0001);
+              const winner = compareRows.reduce((a, b) => (b.top > a.top ? b : a));
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {compareRows.map((r, i) => {
+                    const win = r.top === best && r.top > 0;
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="mono" style={{ width: 88, flex: "0 0 auto", fontSize: 12 }}>{r.size}w·{r.overlap}o</span>
+                        <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 5, height: 18, position: "relative", overflow: "hidden" }}>
+                          <div style={{ width: `${Math.max(3, (r.top / best) * 100)}%`, height: "100%", background: win ? "var(--good)" : "var(--accent)", borderRadius: 5, transition: "width .3s" }} />
+                          <span style={{ position: "absolute", right: 8, top: 0, lineHeight: "18px", fontSize: 10.5, fontFamily: "var(--mono)", color: "var(--muted)" }}>{r.top.toFixed(3)}{win ? " ⭐" : ""}</span>
+                        </div>
+                        <span className="note" style={{ width: 62, flex: "0 0 auto", textAlign: "right" }}>{r.chunks} ck</span>
+                      </div>
+                    );
+                  })}
+                  <div className="note" style={{ marginTop: 6, lineHeight: 1.5 }}>Best: <b>{winner.size}-word chunks</b> → “{winner.best.slice(0, 130)}{winner.best.length > 130 ? "…" : ""}”</div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
