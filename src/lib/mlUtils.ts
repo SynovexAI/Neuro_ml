@@ -444,6 +444,53 @@ export function crossValDetailed(cfg: TrainConfig, X: number[][], y: number[], n
 export function crossVal(cfg: TrainConfig, X: number[][], y: number[], nClasses: number): number[] {
   return crossValDetailed(cfg, X, y, nClasses).map((f) => f.score);
 }
+// Decision boundary over TWO numeric features (trains a 2-feature model of the
+// same type, predicts a grid, returns it + the data points). Classification only.
+export function decisionSurface(ds: Dataset, targetName: string, f1: string, f2: string, cfg: TrainConfig, res = 46):
+  { xs: number[]; ys: number[]; z: number[][]; points: { x: number; y: number; c: number }[]; classes: string[] } | null {
+  const c1 = ds.columns.find((c) => c.name === f1), c2 = ds.columns.find((c) => c.name === f2), ty = ds.columns.find((c) => c.name === targetName);
+  if (!c1 || !c2 || !ty || c1.type !== "num" || c2.type !== "num" || f1 === f2) return null;
+  const raw: [number, number, string][] = [];
+  for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], b = c2.values[i], t = ty.values[i]; if (a == null || b == null || t == null) continue; raw.push([Number(a), Number(b), String(t)]); }
+  if (raw.length < 4) return null;
+  const classes = Array.from(new Set(raw.map((r) => r[2])));
+  if (classes.length < 2 || classes.length > 8) return null;
+  const cmap = new Map(classes.map((c, i) => [c, i]));
+  const xs0 = raw.map((r) => r[0]), ys0 = raw.map((r) => r[1]);
+  const m1 = mean(xs0), s1 = std(xs0) || 1, m2 = mean(ys0), s2 = std(ys0) || 1;
+  const X = raw.map((r) => [(r[0] - m1) / s1, (r[1] - m2) / s2]);
+  const y = raw.map((r) => cmap.get(r[2])!);
+  const model = makeModel({ ...cfg, task: "classification" }, X, y, classes.length);
+  const min1 = Math.min(...xs0), max1 = Math.max(...xs0), min2 = Math.min(...ys0), max2 = Math.max(...ys0);
+  const xs: number[] = [], ys: number[] = [];
+  for (let i = 0; i < res; i++) xs.push(min1 + ((max1 - min1) * i) / (res - 1));
+  for (let j = 0; j < res; j++) ys.push(min2 + ((max2 - min2) * j) / (res - 1));
+  const flat: number[][] = [];
+  for (const gy of ys) for (const gx of xs) flat.push([(gx - m1) / s1, (gy - m2) / s2]);
+  const preds = predict(model, flat);
+  const z: number[][] = [];
+  for (let j = 0; j < res; j++) z.push(preds.slice(j * res, j * res + res).map((p) => Math.round(p)));
+  const points = raw.map((r, i) => ({ x: r[0], y: r[1], c: y[i] }));
+  return { xs, ys, z, points, classes };
+}
+
+// Learning curve: train on growing fractions of the training set; return train vs
+// hold-out score at each size (teaches over/under-fitting).
+export function learningCurve(X: number[][], y: number[], cfg: TrainConfig, nClasses: number):
+  { n: number; train: number; test: number }[] {
+  const { Xtr, ytr, Xte, yte } = split(X, y, cfg.testSize || 0.2);
+  const acc = (yt: number[], yp: number[]) => yt.reduce((a, t, i) => a + (Math.round(yp[i]) === t ? 1 : 0), 0) / (yt.length || 1);
+  const r2 = (yt: number[], yp: number[]) => { const m = mean(yt); let ss = 0, st = 0; for (let i = 0; i < yt.length; i++) { ss += (yt[i] - yp[i]) ** 2; st += (yt[i] - m) ** 2; } return st ? 1 - ss / st : 0; };
+  const score = cfg.task === "classification" ? acc : r2;
+  const fracs = [0.1, 0.2, 0.35, 0.5, 0.7, 0.85, 1];
+  return fracs.map((f) => {
+    const n = Math.max(2, Math.round(Xtr.length * f));
+    const xs = Xtr.slice(0, n), ys = ytr.slice(0, n);
+    const model = makeModel(cfg, xs, ys, nClasses);
+    return { n, train: score(ys, predict(model, xs)), test: score(yte, predict(model, Xte)) };
+  });
+}
+
 export function mean(a: number[]): number { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0; }
 export function std(a: number[]): number { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); }
 

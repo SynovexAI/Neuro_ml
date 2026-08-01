@@ -4,11 +4,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
+  decisionSurface, learningCurve,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
 } from "@/lib/mlUtils";
 import { sampleDatasets } from "@/lib/mlDatasets";
+import { pickle } from "@/lib/pickle";
 import Plot from "@/components/Plot";
 import {
   buildFigure, plotlyTheme, datasetInsights,
@@ -211,6 +213,13 @@ export default function MlLab() {
   const [flowStep, setFlowStep] = useState(-1);
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
+  // decision boundary + learning curve + editable code
+  const [dbF1, setDbF1] = useState("");
+  const [dbF2, setDbF2] = useState("");
+  const [dbSurf, setDbSurf] = useState<ReturnType<typeof decisionSurface>>(null);
+  const [lcData, setLcData] = useState<{ n: number; train: number; test: number }[]>([]);
+  const [codeDraft, setCodeDraft] = useState("");
+  const [codeDirty, setCodeDirty] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -516,6 +525,69 @@ ${evalBlock}`;
 
   function download() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "ml_workflow.py"; a.click(); URL.revokeObjectURL(a.href); }
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
+  function downloadBlob2(data: BlobPart, filename: string, mime: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: mime })); a.download = filename; a.click(); URL.revokeObjectURL(a.href); }
+
+  const cfgNow = (): TrainConfig => ({ task, algo, params, testSize, cvFolds });
+  const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
+  const numFeats = () => (ds ? features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num" && f !== target) : []);
+
+  function runBoundary() {
+    if (!ds) return;
+    const nums = numFeats();
+    if (nums.length < 2) { setMsg("Need at least two numeric features for a decision boundary."); return; }
+    const a = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
+    const b = dbF2 && nums.includes(dbF2) && dbF2 !== a ? dbF2 : (nums.find((n) => n !== a) || nums[1]);
+    setDbF1(a); setDbF2(b);
+    const surf = decisionSurface(ds, target, a, b, cfgNow());
+    setDbSurf(surf);
+    if (!surf) setMsg("Boundary needs two different numeric features and a categorical target (2–8 classes).");
+  }
+  function boundaryFig() {
+    if (!dbSurf) return null;
+    const t = plotlyTheme(); const K = dbSurf.classes.length;
+    const colorscale: [number, string][] = [];
+    for (let i = 0; i < K; i++) { const c = PAL[i % PAL.length]; colorscale.push([i / K, c]); colorscale.push([(i + 1) / K, c]); }
+    const data: Record<string, unknown>[] = [
+      { type: "heatmap", x: dbSurf.xs, y: dbSurf.ys, z: dbSurf.z, showscale: false, colorscale, zmin: -0.5, zmax: K - 0.5, opacity: 0.4, hoverinfo: "skip" },
+      ...dbSurf.classes.map((cl, ci) => ({ type: "scatter", mode: "markers", name: cl, x: dbSurf.points.filter((p) => p.c === ci).map((p) => p.x), y: dbSurf.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 7, color: PAL[ci % PAL.length], line: { width: 1, color: t.paper } } })),
+    ];
+    const layout = { ...chartLayout(t, `Decision boundary · ${MODEL_INFO[algo]?.label ?? algo}`, dbF1, dbF2), showlegend: true, legend: { font: { color: t.text, size: 10 }, orientation: "h" } };
+    return { data, layout };
+  }
+  function runLC() {
+    if (!ds) return;
+    try { const b = buildMatrix(ds, features, target, task, steps); setLcData(learningCurve(b.X, b.y, cfgNow(), b.classes?.length || 0)); }
+    catch (e) { setMsg("Learning curve error: " + (e as Error).message); }
+  }
+  function lcFig() {
+    if (!lcData.length) return null; const t = plotlyTheme();
+    const data = [
+      { x: lcData.map((d) => d.n), y: lcData.map((d) => d.train), name: "train", mode: "lines+markers", line: { color: "#5b7cff", width: 2 } },
+      { x: lcData.map((d) => d.n), y: lcData.map((d) => d.test), name: "validation", mode: "lines+markers", line: { color: "#f59e0b", width: 2 } },
+    ];
+    const layout = { ...chartLayout(t, "Learning curve", "training examples", task === "classification" ? "accuracy" : "R²"), showlegend: true, legend: { font: { color: t.text, size: 10 }, orientation: "h" } };
+    return { data, layout };
+  }
+
+  function setStepMethod(op: string, method: string) { setSteps((ss) => { const i = ss.findIndex((s) => s.op === op); if (i < 0) return ss; const n = [...ss]; n[i] = { ...n[i], method }; return n; }); }
+  function applyCodeToFlow() {
+    const code = codeDirty ? codeDraft : buildCode(); const applied: string[] = [];
+    const ts = code.match(/test_size\s*=\s*([0-9.]+)/); if (ts) { setTestSize(Number(ts[1])); applied.push("test_size"); }
+    const cvm = code.match(/\bcv\s*=\s*(\d+)/); if (cvm) { setCvFolds(Number(cvm[1])); applied.push("cv folds"); }
+    const algoMap: Record<string, string> = { LogisticRegression: "LogisticRegression", LinearRegression: "LinearRegression", Ridge: "Ridge", KNeighborsClassifier: "KNeighborsClassifier", KNeighborsRegressor: "KNeighborsRegressor", GaussianNB: "GaussianNB", DecisionTreeClassifier: "DecisionTree", DecisionTreeRegressor: "DecisionTree", RandomForestClassifier: "RandomForest", RandomForestRegressor: "RandomForest" };
+    for (const [cls, key] of Object.entries(algoMap)) { if (new RegExp(`\\b${cls}\\s*\\(`).test(code)) { if (MODELS[task][key]) { setAlgo(key); setParamsFor(task, key); applied.push("algorithm→" + key); } break; } }
+    const pnum = (re: RegExp, name: string) => { const m = code.match(re); if (m) { setParams((p) => ({ ...p, [name]: m[1] })); applied.push(name); } };
+    pnum(/n_estimators\s*=\s*(\d+)/, "n_estimators"); pnum(/max_depth\s*=\s*(\d+)/, "max_depth"); pnum(/min_samples_split\s*=\s*(\d+)/, "min_samples_split"); pnum(/n_neighbors\s*=\s*(\d+)/, "n_neighbors"); pnum(/max_iter\s*=\s*(\d+)/, "max_iter"); pnum(/\bC\s*=\s*([0-9.]+)/, "C"); pnum(/\balpha\s*=\s*([0-9.]+)/, "alpha");
+    const scMap: Record<string, string> = { StandardScaler: "StandardScaler", MinMaxScaler: "MinMaxScaler", RobustScaler: "RobustScaler", MaxAbsScaler: "MaxAbsScaler", QuantileTransformer: "QuantileUniform" };
+    for (const [cls, method] of Object.entries(scMap)) { if (new RegExp(`\\b${cls}\\s*\\(`).test(code)) { setStepMethod("Scale / normalize", method); applied.push("scaler→" + method); break; } }
+    if (/OrdinalEncoder\s*\(/.test(code)) { setStepMethod("Encode categorical", "Ordinal"); applied.push("encoder→Ordinal"); }
+    else if (/OneHotEncoder\s*\(/.test(code)) { setStepMethod("Encode categorical", "One-Hot"); applied.push("encoder→One-Hot"); }
+    setCodeDirty(false);
+    setMsg(applied.length ? `Applied to flow: ${applied.join(", ")}. Re-run training to see the effect.` : "No recognized settings found. Syncable knobs: algorithm, hyperparameters, test_size, cv, scaler, encoder.");
+  }
+  function modelBundle() { const m = modelRef.current; if (!m || !trained) return null; return { ...m, _meta: { algo: trained.algo, task: trained.task, features: trained.featureNames, classes: trained.classes, testSize, params, source: "AI Workbench ML Lab" } }; }
+  function exportPkl() { const obj = modelBundle(); if (!obj) { setMsg("Train a model first."); return; } downloadBlob2(pickle(obj) as BlobPart, "model.pkl", "application/octet-stream"); }
+  function exportJson() { const obj = modelBundle(); if (!obj) { setMsg("Train a model first."); return; } downloadBlob2(JSON.stringify(obj, null, 2), "model.json", "application/json"); }
   async function saveProject() {
     const config = { dsName, target, task, features, steps, algo, params, testSize, cvFolds };
     try { const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "ml", name: dsName || "ML build", config }) }); setSavedMsg(r.ok ? "Saved ✓" : "Save failed"); }
@@ -998,12 +1070,41 @@ ${evalBlock}`;
               </div>
             </div>
           </>)}
-          {result && (
+          {result && (<>
+            {task === "classification" && numFeats().length >= 2 && (
+              <div className="card" style={{ marginTop: 16 }}>
+                <div className="card-h"><span className="t">Decision boundary</span><div className="r"><button className="btn sm" onClick={runBoundary}>{dbSurf ? "↻ Redraw" : "▶ Draw boundary"}</button></div></div>
+                <div className="card-b">
+                  <div className="note" style={{ marginBottom: 10 }}>Trains a 2-feature {MODEL_INFO[algo]?.label ?? algo} and colours the region it assigns to each class, with the data points on top — <b>how the model separates the classes</b>.</div>
+                  <div className="split col-2e" style={{ maxWidth: 460, marginBottom: 12 }}>
+                    <div><label className="fld">Feature X</label><select value={dbF1 || numFeats()[0] || ""} onChange={(e) => setDbF1(e.target.value)}>{numFeats().map((f) => <option key={f}>{f}</option>)}</select></div>
+                    <div><label className="fld">Feature Y</label><select value={dbF2 || numFeats()[1] || ""} onChange={(e) => setDbF2(e.target.value)}>{numFeats().map((f) => <option key={f}>{f}</option>)}</select></div>
+                  </div>
+                  {(() => { const f = boundaryFig(); return f ? <Plot data={f.data} layout={f.layout} style={{ height: 380 }} /> : <div className="note">Pick two features and draw the boundary.</div>; })()}
+                </div>
+              </div>
+            )}
             <div className="card" style={{ marginTop: 16 }}>
-              <div className="card-h"><span className="t">Complete workflow code — data import → result</span><div className="r"><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={download}>Download .py</button></div></div>
-              <div className="card-b"><div className="code" style={{ maxHeight: 300 }}>{buildCode()}</div></div>
+              <div className="card-h"><span className="t">Learning curve</span><div className="r"><button className="btn sm" onClick={runLC}>{lcData.length ? "↻ Recompute" : "▶ Compute"}</button></div></div>
+              <div className="card-b">
+                <div className="note" style={{ marginBottom: 10 }}>Retrains on growing slices of the data. A wide <b>train-vs-validation gap</b> = overfitting; both low &amp; flat = underfitting; converging high = healthy.</div>
+                {(() => { const f = lcFig(); return f ? <Plot data={f.data} layout={f.layout} style={{ height: 300 }} /> : <div className="note">Compute to see train vs validation score as the data grows.</div>; })()}
+              </div>
             </div>
-          )}
+            <div className="card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">Complete workflow code — editable</span><div className="r"><button className="btn ghost sm" onClick={applyCodeToFlow}>↥ Apply to flow</button>{codeDirty && <button className="btn ghost sm" onClick={() => setCodeDirty(false)}>Reset</button>}<button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn ghost sm" onClick={download}>.py</button></div></div>
+              <div className="card-b">
+                <div className="note" style={{ marginBottom: 8 }}>Edit the code, then <b>Apply to flow</b> to sync recognised settings (algorithm, hyperparameters, test_size, cv, scaler, encoder) back into the steps above, then re-train.</div>
+                <textarea value={codeDirty ? codeDraft : buildCode()} onChange={(e) => { setCodeDraft(e.target.value); setCodeDirty(true); }} spellCheck={false} style={{ minHeight: 320, fontFamily: "var(--mono)", fontSize: 12, lineHeight: 1.5 }} />
+                <div className="row" style={{ marginTop: 12, gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <label className="fld" style={{ margin: 0 }}>Export trained model:</label>
+                  <button className="btn sm" onClick={exportPkl}>🥒 model.pkl</button>
+                  <button className="btn ghost sm" onClick={exportJson}>📄 model.json</button>
+                  <span className="note"><code>pickle.load(open(&quot;model.pkl&quot;,&quot;rb&quot;))</code> → the trained params as a dict.</span>
+                </div>
+              </div>
+            </div>
+          </>)}
         </>
       )}
 
