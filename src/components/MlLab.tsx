@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
-  decisionSurface, learningCurve,
+  decisionSurface, learningCurve, gdTrace, rootSplitMath,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
@@ -12,6 +12,7 @@ import {
 import { sampleDatasets } from "@/lib/mlDatasets";
 import { pickle } from "@/lib/pickle";
 import Plot from "@/components/Plot";
+import Katex from "@/components/Katex";
 import {
   buildFigure, plotlyTheme, datasetInsights,
   SINGLE_NUM, SINGLE_CAT, COMPARE_CHARTS, type EdaSpec,
@@ -213,6 +214,7 @@ export default function MlLab() {
   const [flowStep, setFlowStep] = useState(-1);
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mlMode, setMlMode] = useState<"package" | "maths">("package");
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -539,6 +541,304 @@ ${evalBlock}`;
     ], layout: chartLayout(t, "Predicted vs actual", "actual", "predicted") };
   }, [result]);
 
+  // ════════════ FROM-SCRATCH (MATHS) MODE ════════════
+  const colNumVals = (name: string) => (ds?.columns.find((c) => c.name === name)?.values.filter((v) => v != null).map(Number) ?? []);
+  const mCard = (title: string, body: React.ReactNode) => <div className="card math-card" style={{ marginBottom: 16 }}><div className="card-h"><span className="t">🧮 The maths — {title}</span></div><div className="card-b">{body}</div></div>;
+
+  function mathData() {
+    if (!ds) return null;
+    return mCard("data as numbers", <>
+      <div className="mathrow"><Katex block tex={`X \\in \\mathbb{R}^{\\,${ds.nrows}\\times ${features.length}}, \\qquad y \\in \\mathbb{R}^{\\,${ds.nrows}}`} /></div>
+      <div className="note" style={{ lineHeight: 1.6 }}>Each of the <b>{ds.nrows}</b> rows becomes a vector of <b>{features.length}</b> numbers; stacked, they form the matrix <Katex tex="X" />. The target <Katex tex="y" /> is what we predict. Text columns become numbers in Preprocessing (one-hot / ordinal).</div>
+    </>);
+  }
+  function mathEda() {
+    if (!ds) return null;
+    const c = ds.columns.find((x) => x.name === uniCol); if (!c) return null;
+    if (c.type === "num") {
+      const v = colNumVals(uniCol); if (!v.length) return null;
+      const n = v.length, sum = v.reduce((a, b) => a + b, 0), mu = sum / n;
+      const ss = v.reduce((a, x) => a + (x - mu) ** 2, 0), sd = Math.sqrt(ss / n);
+      return mCard(`statistics of “${uniCol}”`, <>
+        <div className="mathrow"><Katex block tex={`\\mu = \\tfrac{1}{n}\\sum_{i=1}^{n} x_i = \\tfrac{${sum.toFixed(1)}}{${n}} = ${mu.toFixed(3)}`} /></div>
+        <div className="mathrow"><Katex block tex={`\\sigma = \\sqrt{\\tfrac{1}{n}\\sum_i (x_i-\\mu)^2} = \\sqrt{\\tfrac{${ss.toFixed(1)}}{${n}}} = ${sd.toFixed(3)}`} /></div>
+        <div className="mathrow"><Katex block tex={`\\min = ${Math.min(...v).toFixed(2)}, \\quad \\max = ${Math.max(...v).toFixed(2)}`} /></div>
+      </>);
+    }
+    const vals = c.values.filter((x) => x != null).map(String); const counts = new Map<string, number>(); vals.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+    return mCard(`proportions of “${uniCol}”`, <>
+      <div className="mathrow"><Katex block tex={`p_k = \\frac{\\text{count}(k)}{n}`} /></div>
+      {top.map(([k, cnt]) => <div key={k} className="mathrow"><Katex tex={`p(\\text{${k.replace(/[^\w ]/g, "")}}) = \\tfrac{${cnt}}{${vals.length}} = ${(cnt / vals.length).toFixed(3)}`} /></div>)}
+    </>);
+  }
+  function mathPrep() {
+    if (!ds) return null;
+    const numF = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
+    const catF = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "cat");
+    const f = numF[0];
+    let numBlock: React.ReactNode = null;
+    if (f) {
+      const v = colNumVals(f); const mu = mean(v), sd = std(v) || 1; const x0 = v[0] ?? mu;
+      numBlock = <>
+        <label className="fld">Standardize numeric — <b>{f}</b></label>
+        <div className="mathrow"><Katex block tex={`z = \\frac{x-\\mu}{\\sigma} = \\frac{${x0.toFixed(2)} - ${mu.toFixed(2)}}{${sd.toFixed(2)}} = ${((x0 - mu) / sd).toFixed(3)}`} /></div>
+        <div className="note">Row 1 of “{f}” ({x0.toFixed(2)}) becomes {((x0 - mu) / sd).toFixed(3)} — centred at 0, unit spread. Every feature is put on the same scale so none dominates by its units.</div>
+      </>;
+    }
+    const cf = catF[0];
+    let catBlock: React.ReactNode = null;
+    if (cf) {
+      const cats = Array.from(new Set(ds.columns.find((c) => c.name === cf)!.values.filter((v) => v != null).map(String))).slice(0, 4);
+      catBlock = <div style={{ marginTop: 14 }}>
+        <label className="fld">One-hot encode — <b>{cf}</b></label>
+        {cats.map((cat, i) => <div key={cat} className="mathrow"><Katex tex={`\\text{${cat.replace(/[^\w ]/g, "")}} \\;\\rightarrow\\; [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}
+        <div className="note">One column per category; a 1 marks which one — turns text into numbers with no fake ordering.</div>
+      </div>;
+    }
+    return mCard("preprocessing", <>{numBlock}{catBlock}{!numBlock && !catBlock && <div className="note">No preprocessing needed.</div>}</>);
+  }
+  function mathModel() {
+    const A = algo;
+    const eqs: Record<string, [string, string][]> = {
+      LogisticRegression: [["z = \\mathbf{w}\\cdot\\mathbf{x} + b", "linear score"], ["\\hat{y} = \\sigma(z) = \\frac{1}{1+e^{-z}}", "squash to a probability 0–1"], ["\\mathcal{L} = -\\tfrac{1}{n}\\sum_i\\big[y_i\\log\\hat{y}_i + (1-y_i)\\log(1-\\hat{y}_i)\\big]", "cross-entropy loss"], ["\\nabla_{\\mathbf w}\\mathcal{L} = \\tfrac{1}{n}\\,\\mathbf{X}^\\top(\\hat{\\mathbf y}-\\mathbf y)", "gradient used to update w"]],
+      LinearRegression: [["\\hat{y} = \\mathbf{w}\\cdot\\mathbf{x} + b", "predict a number"], ["\\mathcal{L} = \\tfrac{1}{n}\\sum_i (\\hat{y}_i - y_i)^2", "mean squared error"], ["\\nabla_{\\mathbf w}\\mathcal{L} = \\tfrac{2}{n}\\,\\mathbf{X}^\\top(\\hat{\\mathbf y}-\\mathbf y)", "gradient"]],
+      Ridge: [["\\hat{y} = \\mathbf{w}\\cdot\\mathbf{x} + b", "predict a number"], ["\\mathcal{L} = \\tfrac{1}{n}\\sum_i (\\hat{y}_i - y_i)^2 + \\alpha\\lVert\\mathbf{w}\\rVert^2", "MSE + L2 penalty"]],
+      KNeighborsClassifier: [["d(\\mathbf{a},\\mathbf{b}) = \\sqrt{\\sum_j (a_j-b_j)^2}", "Euclidean distance"], ["\\hat{y} = \\text{majority vote of the } k \\text{ nearest}", "no training — just look up neighbours"]],
+      KNeighborsRegressor: [["d(\\mathbf{a},\\mathbf{b}) = \\sqrt{\\sum_j (a_j-b_j)^2}", "Euclidean distance"], ["\\hat{y} = \\tfrac{1}{k}\\sum_{i\\in \\text{kNN}} y_i", "average of the k nearest"]],
+      GaussianNB: [["P(y\\mid \\mathbf{x}) \\propto P(y)\\prod_j P(x_j\\mid y)", "Bayes' rule (naïve independence)"], ["P(x_j\\mid y) = \\frac{1}{\\sqrt{2\\pi\\sigma^2}}\\,e^{-\\frac{(x_j-\\mu)^2}{2\\sigma^2}}", "Gaussian likelihood per feature"]],
+      DecisionTree: [["G = 1 - \\sum_k p_k^2", "Gini impurity of a node"], ["\\text{gain} = G_{\\text{parent}} - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", "pick the split with the biggest gain"]],
+      RandomForest: [["\\hat{y} = \\text{mode}\\{ T_1(\\mathbf x),\\dots,T_m(\\mathbf x)\\}", "vote across m trees"], ["\\text{each tree: bootstrap sample + random feature subset}", "de-correlates the trees"]],
+    };
+    const rows = eqs[A] || eqs.LogisticRegression;
+    return mCard(`${MODEL_INFO[A]?.label ?? A} — the model`, <>{rows.map(([t, cap], i) => <div key={i} className="mathrow" style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 10 }}><Katex block tex={t} /><span className="note">{cap}</span></div>)}</>);
+  }
+  function mathValidation() {
+    return mCard(`${valMethod === "kfold" ? `${cvFolds}-fold cross-validation` : "hold-out validation"}`, <>
+      {valMethod === "kfold" ? <>
+        <div className="note" style={{ marginBottom: 8 }}>Split the data into {cvFolds} folds; train on {cvFolds - 1}, score on the held-out one, rotate, then average:</div>
+        <div className="mathrow"><Katex block tex={`\\text{CV} = \\tfrac{1}{k}\\sum_{f=1}^{k} \\text{score}_f`} /></div>
+        {cvResult.length > 0 && <div className="mathrow"><Katex tex={`\\text{CV} = \\tfrac{1}{${cvResult.length}}(${cvResult.map((r) => r.score.toFixed(2)).join("+")}) = ${(cvResult.reduce((a, r) => a + r.score, 0) / cvResult.length).toFixed(3)}`} /></div>}
+      </> : <>
+        <div className="mathrow"><Katex block tex={`n_{\\text{test}} = ${Math.round((ds?.nrows || 0) * testSize)}, \\quad n_{\\text{train}} = ${(ds?.nrows || 0) - Math.round((ds?.nrows || 0) * testSize)}`} /></div>
+        <div className="note">A fixed {(testSize * 100).toFixed(0)}% of rows is held out and never seen during training.</div>
+      </>}
+    </>);
+  }
+  function mathTrain() {
+    if (!ds || !result) return <div className="note">Train the model to see the numbers.</div>;
+    let gt = null, sp = null, X0: number[] | undefined;
+    try { const b = buildMatrix(ds, features, target, task, steps); const nc = b.classes?.length || 0; gt = gdTrace(cfgNow(), b.X, b.y, nc); sp = modelRef.current ? rootSplitMath(modelRef.current, b.X, b.y, nc) : null; X0 = b.X[0]; } catch { /* ignore */ }
+    void X0;
+    if (gt && gt.snaps.length) {
+      const last = gt.snaps[gt.snaps.length - 1];
+      return mCard("gradient descent — watch w update", <>
+        <div className="note" style={{ marginBottom: 8 }}>Each epoch nudges every weight <b>downhill</b> on the loss by the gradient, scaled by the learning rate <Katex tex={`\\eta=${gt.lr}`} />:</div>
+        <div className="mathrow"><Katex block tex={`\\mathbf{w} \\leftarrow \\mathbf{w} - \\eta\\,\\nabla_{\\mathbf w}\\mathcal{L}`} /></div>
+        <div className="mathrow"><Katex tex={`\\text{first step: } w_1: 0 - ${gt.lr}\\times(${gt.grad0[1]?.toFixed(3) ?? "0"}) = ${(-gt.lr * (gt.grad0[1] ?? 0)).toFixed(4)}`} /></div>
+        <label className="fld" style={{ marginTop: 12 }}>Per-epoch (loss ↓ as the gradient shrinks)</label>
+        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
+          <tr><th>epoch</th><th>loss</th><th>‖∇‖</th><th>b</th><th>w₁</th><th>w₂</th></tr>
+          {gt.snaps.map((s) => <tr key={s.ep}><td>{s.ep}</td><td className="mono">{s.loss.toFixed(4)}</td><td className="mono">{s.gnorm.toFixed(4)}</td><td className="mono">{s.w[0]?.toFixed(3)}</td><td className="mono">{s.w[1]?.toFixed(3)}</td><td className="mono">{s.w[2]?.toFixed(3)}</td></tr>)}
+        </tbody></table></div>
+        <div className="note" style={{ marginTop: 8 }}>After {gt.snaps[gt.snaps.length - 1].ep + 1} epochs the loss settled at <b>{last.loss.toFixed(4)}</b> and the gradient is tiny ({last.gnorm.toFixed(4)}) — it has converged.</div>
+      </>);
+    }
+    if (sp) {
+      return mCard("the best split (greedy)", <>
+        <div className="note" style={{ marginBottom: 8 }}>At the root the tree tries every feature/threshold and keeps the one that reduces impurity most:</div>
+        <div className="mathrow"><Katex block tex={`\\text{gain} = ${sp.parent.toFixed(3)} - \\tfrac{${sp.nL}}{${sp.nL + sp.nR}}(${sp.left.toFixed(3)}) - \\tfrac{${sp.nR}}{${sp.nL + sp.nR}}(${sp.right.toFixed(3)}) = ${sp.gain.toFixed(3)}`} /></div>
+        <div className="note">Chosen split: feature <b>#{sp.feat}</b> ≤ {sp.thr.toFixed(3)} · {sp.metric} drops from {sp.parent.toFixed(3)} to a weighted {(sp.parent - sp.gain).toFixed(3)}. This repeats recursively down the tree.</div>
+      </>);
+    }
+    if (modelRef.current?.kind === "gnb") {
+      const m = modelRef.current;
+      return mCard("class statistics learned", <>
+        <div className="note" style={{ marginBottom: 8 }}>“Training” is just measuring each class’s prior and each feature’s mean &amp; variance:</div>
+        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>class</th><th>prior P(y)</th><th>μ (feat 1)</th><th>σ² (feat 1)</th></tr>
+          {m.priors.map((pr, k) => <tr key={k}><td>{trained?.classes?.[k] ?? k}</td><td className="mono">{pr.toFixed(3)}</td><td className="mono">{m.means[k][0]?.toFixed(3)}</td><td className="mono">{m.vars[k][0]?.toFixed(3)}</td></tr>)}
+        </tbody></table></div>
+      </>);
+    }
+    return mCard("lazy learner (KNN)", <div className="note">KNN does <b>no training</b> — it just stores the {ds.nrows} rows. All the work happens at prediction time: compute the distance to every stored point, keep the {params.n_neighbors || 5} closest, and vote.</div>);
+  }
+  function mathPredict() {
+    if (!ds || !result || !modelRef.current) return null;
+    let X0: number[] = [], names: string[] = [];
+    try { const b = buildMatrix(ds, features, target, task, steps); X0 = b.X[0]; names = b.featureNames; } catch { return null; }
+    const m = modelRef.current;
+    if (m.kind === "logreg" || m.kind === "linear") {
+      const w = m.kind === "logreg" ? m.W[Math.min(1, m.classes - 1)] : m.w;
+      const terms = X0.slice(0, 3).map((x, j) => `${w[j + 1]?.toFixed(2)}\\!\\times\\!${x.toFixed(2)}`).join(" + ");
+      const z = w[0] + X0.reduce((a, x, j) => a + (w[j + 1] || 0) * x, 0);
+      return mCard("predict one row — the arithmetic", <>
+        <div className="mathrow"><Katex block tex={`z = b + \\sum_j w_j x_j = ${w[0]?.toFixed(2)} + ${terms} + \\dots = ${z.toFixed(3)}`} /></div>
+        {m.kind === "logreg"
+          ? <div className="mathrow"><Katex block tex={`\\hat{y} = \\sigma(${z.toFixed(2)}) = \\frac{1}{1+e^{-(${z.toFixed(2)})}} = ${(1 / (1 + Math.exp(-z))).toFixed(3)}`} /></div>
+          : <div className="mathrow"><Katex block tex={`\\hat{y} = ${z.toFixed(3)}`} /></div>}
+        <div className="note">Using the trained weights on the first row’s {names.length} features (first 3 terms shown). That’s the whole prediction — a weighted sum, then a squash for classification.</div>
+      </>);
+    }
+    return null;
+  }
+
+  // Pure-Python (stdlib only) from-scratch implementation of the current model.
+  function buildScratchCode(): string {
+    const num = ds ? ds.columns.filter((c) => c.type === "num" && features.includes(c.name) && c.name !== target).map((c) => c.name) : [];
+    const cat = ds ? ds.columns.filter((c) => c.type === "cat" && features.includes(c.name) && c.name !== target).map((c) => c.name) : [];
+    const cls = task === "classification";
+    const pre = `# AI Workbench · ${MODEL_INFO[algo]?.label ?? algo} — FROM SCRATCH (pure Python, stdlib only)
+import csv, math, random
+random.seed(42)
+
+NUM = ${JSON.stringify(num)}
+CAT = ${JSON.stringify(cat)}
+TARGET = ${JSON.stringify(target)}
+
+rows = list(csv.DictReader(open("data.csv")))   # <-- only "package" used: read the file
+
+# ── standardize numeric: z = (x - mean) / std ──
+means, stds = {}, {}
+for c in NUM:
+    xs = [float(r[c]) for r in rows if r[c] not in ("", None)]
+    m = sum(xs) / len(xs); s = (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5 or 1.0
+    means[c], stds[c] = m, s
+cats = {c: sorted({r[c] for r in rows}) for c in CAT}   # one-hot categories
+
+def featurize(r):
+    v = []
+    for c in NUM:
+        x = float(r[c]) if r[c] not in ("", None) else means[c]
+        v.append((x - means[c]) / stds[c])
+    for c in CAT:
+        v += [1.0 if r[c] == cat else 0.0 for cat in cats[c]]
+    return v
+
+X = [featurize(r) for r in rows]
+${cls ? `classes = sorted({r[TARGET] for r in rows}); cidx = {c: i for i, c in enumerate(classes)}
+y = [cidx[r[TARGET]] for r in rows]` : `y = [float(r[TARGET]) for r in rows]`}
+
+idx = list(range(len(X))); random.shuffle(idx)
+cut = int(len(idx) * ${1 - testSize}); tr, te = idx[:cut], idx[cut:]
+d = len(X[0])`;
+
+    const p = (k: string, def: number) => Number(params[k]) || def;
+    let body = "";
+    if (algo === "LogisticRegression") body = `
+# ── logistic regression via gradient descent ──
+K = len(classes); W = [[0.0] * (d + 1) for _ in range(K)]
+def softmax(z):
+    mx = max(z); e = [math.exp(v - mx) for v in z]; s = sum(e); return [v / s for v in e]
+def fwd(x):
+    xb = [1.0] + x; return softmax([sum(w[j] * xb[j] for j in range(d + 1)) for w in W])
+lr, L2 = ${p("learning_rate", 0.2)}, ${(0.01 / p("C", 1)).toFixed(4)}
+for ep in range(${p("max_iter", 300)}):
+    G = [[0.0] * (d + 1) for _ in range(K)]
+    for i in tr:
+        xb = [1.0] + X[i]; pr = fwd(X[i])
+        for k in range(K):
+            err = pr[k] - (1.0 if y[i] == k else 0.0)
+            for j in range(d + 1): G[k][j] += err * xb[j]
+    for k in range(K):
+        for j in range(d + 1):
+            g = G[k][j] / len(tr) + (L2 * W[k][j] if j > 0 else 0.0)
+            W[k][j] -= lr * g
+def predict(x): p = fwd(x); return p.index(max(p))
+acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te)
+print("accuracy:", round(acc, 3))`;
+    else if (algo === "LinearRegression" || algo === "Ridge") body = `
+# ── linear regression via gradient descent ──
+w = [0.0] * (d + 1); lr, alpha = 0.05, ${(algo === "Ridge" ? 0.01 * p("alpha", 1) : 0).toFixed(4)}
+for ep in range(400):
+    G = [0.0] * (d + 1)
+    for i in tr:
+        xb = [1.0] + X[i]; err = sum(w[j] * xb[j] for j in range(d + 1)) - y[i]
+        for j in range(d + 1): G[j] += err * xb[j]
+    for j in range(d + 1):
+        g = G[j] / len(tr) + (alpha * w[j] if j > 0 else 0.0); w[j] -= lr * g
+def predict(x): xb = [1.0] + x; return sum(w[j] * xb[j] for j in range(d + 1))
+mte = sum(y[i] for i in te) / len(te)
+ss = sum((y[i] - predict(X[i])) ** 2 for i in te); st = sum((y[i] - mte) ** 2 for i in te)
+print("R2:", round(1 - ss / st, 3))`;
+    else if (algo.startsWith("KNeighbors")) body = `
+# ── k-nearest neighbours (no training) ──
+k = ${p("n_neighbors", 5)}
+def predict(x):
+    nn = sorted((sum((X[i][j] - x[j]) ** 2 for j in range(d)) ** 0.5, y[i]) for i in tr)[:k]
+    ${cls ? `labels = [lab for _, lab in nn]; return max(set(labels), key=labels.count)` : `return sum(lab for _, lab in nn) / k`}
+${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("accuracy:", round(acc, 3))` : `mte = sum(y[i] for i in te)/len(te); ss=sum((y[i]-predict(X[i]))**2 for i in te); st=sum((y[i]-mte)**2 for i in te); print("R2:", round(1-ss/st,3))`}`;
+    else if (algo === "GaussianNB") body = `
+# ── Gaussian Naive Bayes (measure class stats) ──
+K = len(classes)
+means_ = [[0.0] * d for _ in range(K)]; varr = [[0.0] * d for _ in range(K)]; cnt = [0] * K
+for i in tr:
+    cnt[y[i]] += 1
+    for j in range(d): means_[y[i]][j] += X[i][j]
+for k in range(K):
+    for j in range(d): means_[k][j] /= cnt[k] or 1
+for i in tr:
+    for j in range(d): varr[y[i]][j] += (X[i][j] - means_[y[i]][j]) ** 2
+for k in range(K):
+    for j in range(d): varr[k][j] = varr[k][j] / (cnt[k] or 1) + 1e-6
+prior = [c / len(tr) for c in cnt]
+def predict(x):
+    best = (-1e18, 0)
+    for k in range(K):
+        ll = math.log(prior[k] or 1e-9)
+        for j in range(d): ll += -0.5 * math.log(2 * math.pi * varr[k][j]) - (x[j] - means_[k][j]) ** 2 / (2 * varr[k][j])
+        if ll > best[0]: best = (ll, k)
+    return best[1]
+acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te)
+print("accuracy:", round(acc, 3))`;
+    else body = `
+# ── CART decision tree${algo === "RandomForest" ? " / random forest" : ""} from scratch ──
+K = ${cls ? "len(classes)" : "1"}
+def impurity(ys):
+    ${cls ? `if not ys: return 0.0
+    c = [0] * K
+    for v in ys: c[v] += 1
+    return 1 - sum((ci / len(ys)) ** 2 for ci in c)` : `if not ys: return 0.0
+    m = sum(ys) / len(ys); return sum((v - m) ** 2 for v in ys) / len(ys)`}
+def leaf(ys):
+    ${cls ? `c = [0] * K
+    for v in ys: c[v] += 1
+    return c.index(max(c))` : `return sum(ys) / len(ys)`}
+def build(rowsi, depth, feats):
+    ys = [y[i] for i in rowsi]
+    if depth >= ${p("max_depth", algo === "RandomForest" ? 6 : 5)} or len(rowsi) < ${p("min_samples_split", 2)} or len(set(ys)) <= 1:
+        return ("leaf", leaf(ys))
+    base = impurity(ys); best = (1e-9, None, None)
+    for f in feats:
+        vals = sorted(set(X[i][f] for i in rowsi))
+        for a, b in zip(vals, vals[1:]):
+            thr = (a + b) / 2
+            L = [i for i in rowsi if X[i][f] <= thr]; R = [i for i in rowsi if X[i][f] > thr]
+            if not L or not R: continue
+            gain = base - len(L)/len(rowsi)*impurity([y[i] for i in L]) - len(R)/len(rowsi)*impurity([y[i] for i in R])
+            if gain > best[0]: best = (gain, f, thr)
+    if best[1] is None: return ("leaf", leaf(ys))
+    _, f, thr = best
+    L = [i for i in rowsi if X[i][f] <= thr]; R = [i for i in rowsi if X[i][f] > thr]
+    return ("node", f, thr, build(L, depth+1, feats), build(R, depth+1, feats))
+def pred_tree(t, x):
+    while t[0] == "node":
+        t = t[3] if x[t[1]] <= t[2] else t[4]
+    return t[1]
+${algo === "RandomForest" ? `import random as _r
+mfeat = max(1, int(d ** 0.5)); trees = []
+for _ in range(${p("n_estimators", 25)}):
+    samp = [_r.choice(tr) for _ in tr]; fs = _r.sample(range(d), mfeat)
+    trees.append(build(samp, 0, fs))
+def predict(x):
+    votes = [pred_tree(t, x) for t in trees]
+    ${cls ? `return max(set(votes), key=votes.count)` : `return sum(votes) / len(votes)`}` : `tree = build(tr, 0, list(range(d)))
+def predict(x): return pred_tree(tree, x)`}
+${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("accuracy:", round(acc, 3))` : `mte = sum(y[i] for i in te)/len(te); ss=sum((y[i]-predict(X[i]))**2 for i in te); st=sum((y[i]-mte)**2 for i in te); print("R2:", round(1-ss/st,3))`}`;
+    return pre + "\n" + body + "\n";
+  }
+  function copyScratch() { navigator.clipboard.writeText(buildScratchCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
+  function downloadScratch() { const blob = new Blob([buildScratchCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "ml_from_scratch.py"; a.click(); URL.revokeObjectURL(a.href); }
+
   function download() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "ml_workflow.py"; a.click(); URL.revokeObjectURL(a.href); }
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
   function downloadBlob2(data: BlobPart, filename: string, mime: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: mime })); a.download = filename; a.click(); URL.revokeObjectURL(a.href); }
@@ -660,8 +960,25 @@ ${evalBlock}`;
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{savedMsg || "💾 Save"}</button><button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button></div>
       </div>
       {msg && <div className="err">{msg}</div>}
-      <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> Models train from scratch in your browser so every step is inspectable. It&apos;s a faithful but simplified approximation — the <b>Get code</b> export uses scikit-learn, the version you&apos;d ship.</span></div>
+      <div className="row" style={{ alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <div className="seg" style={{ width: 300 }}>
+          <button className={mlMode === "package" ? "on" : ""} onClick={() => setMlMode("package")}>📦 Package (sklearn)</button>
+          <button className={mlMode === "maths" ? "on" : ""} onClick={() => setMlMode("maths")}>🧮 From scratch (maths)</button>
+        </div>
+        <span className="note" style={{ flex: 1, minWidth: 240 }}>{mlMode === "maths"
+          ? "Same 7 steps — but every step shows the actual formulas with your numbers, no libraries. Code export is pure Python."
+          : "The production workflow with scikit-learn. Switch to “From scratch” to see the maths under every step."}</span>
+      </div>
+      <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> {mlMode === "maths" ? <>Every model here is implemented <b>from scratch</b> — these cards show the exact equations and intermediate numbers behind each step.</> : <>Models train from scratch in your browser so every step is inspectable. The <b>Get code</b> export uses scikit-learn.</>}</span></div>
       <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}<button className={step === "deploy" ? "on" : ""} disabled={!result} onClick={() => setStep("deploy")}><b>7</b>Test &amp; Export</button></div>
+
+      {mlMode === "maths" && step === "data" && mathData()}
+      {mlMode === "maths" && step === "eda" && mathEda()}
+      {mlMode === "maths" && step === "prep" && mathPrep()}
+      {mlMode === "maths" && step === "model" && mathModel()}
+      {mlMode === "maths" && step === "validation" && mathValidation()}
+      {mlMode === "maths" && step === "train" && mathTrain()}
+      {mlMode === "maths" && step === "deploy" && mathPredict()}
 
       {/* STEP 1 DATA */}
       {step === "data" && (
@@ -1193,8 +1510,17 @@ ${evalBlock}`;
               <div className="note" style={{ marginTop: 10 }}>Inputs run through the exact same preprocessing pipeline, then the trained {MODEL_INFO[algo]?.label ?? algo} predicts. Categorical fields are limited to values seen in training.</div>
             </div>
           </div>
+          {mlMode === "maths" && (
+            <div className="card math-card" style={{ marginTop: 16 }}>
+              <div className="card-h"><span className="t">🧮 From-scratch code — pure Python (no libraries)</span><div className="r"><button className="btn ghost sm" onClick={copyScratch}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadScratch}>Download .py</button></div></div>
+              <div className="card-b">
+                <div className="note" style={{ marginBottom: 8 }}>The <b>same model</b>, implemented with only <code>csv</code> + <code>math</code> — every formula from the steps above turned into plain loops. No numpy, no sklearn.</div>
+                <div className="code" style={{ maxHeight: 360 }}>{buildScratchCode()}</div>
+              </div>
+            </div>
+          )}
           <div className="card" style={{ marginTop: 16 }}>
-            <div className="card-h"><span className="t">Complete workflow code — editable</span><div className="r"><button className="btn ghost sm" onClick={applyCodeToFlow}>↥ Apply to flow</button>{codeDirty && <button className="btn ghost sm" onClick={() => setCodeDirty(false)}>Reset</button>}<button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn ghost sm" onClick={download}>.py</button></div></div>
+            <div className="card-h"><span className="t">Complete workflow code — {mlMode === "maths" ? "sklearn (for comparison)" : "editable"}</span><div className="r"><button className="btn ghost sm" onClick={applyCodeToFlow}>↥ Apply to flow</button>{codeDirty && <button className="btn ghost sm" onClick={() => setCodeDirty(false)}>Reset</button>}<button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn ghost sm" onClick={download}>.py</button></div></div>
             <div className="card-b">
               <div className="note" style={{ marginBottom: 8 }}>Edit the code, then <b>Apply to flow</b> to sync recognised settings (algorithm, hyperparameters, test_size, cv, scaler, encoder) back into the steps above, then re-train.</div>
               <textarea value={codeDirty ? codeDraft : buildCode()} onChange={(e) => { setCodeDraft(e.target.value); setCodeDirty(true); }} spellCheck={false} style={{ minHeight: 320, fontFamily: "var(--mono)", fontSize: 12, lineHeight: 1.5 }} />

@@ -493,6 +493,56 @@ export function learningCurve(X: number[][], y: number[], cfg: TrainConfig, nCla
   });
 }
 
+// ── maths-mode instrumentation: expose the intermediate numbers the training math
+// produces (a faithful mirror of trainLogReg / trainLinear, recording snapshots) ──
+export interface GdTrace { kind: "logreg" | "linear"; d: number; lr: number; grad0: number[]; snaps: { ep: number; loss: number; gnorm: number; w: number[] }[]; }
+export function gdTrace(cfg: TrainConfig, X: number[][], y: number[], nClasses: number): GdTrace | null {
+  const isLog = cfg.algo === "LogisticRegression";
+  const isLin = cfg.algo === "LinearRegression" || cfg.algo === "Ridge";
+  if (!isLog && !isLin) return null;
+  const n = X.length, d = X[0]?.length || 0;
+  const Xb = X.map((r) => [1, ...r]);
+  const epochs = isLog ? Math.max(1, Math.round(Number(cfg.params.max_iter) || 300)) : 400;
+  const lr = isLog ? (Number(cfg.params.learning_rate) || 0.2) : 0.05;
+  const want = new Set<number>([0, 1, 2]); for (let i = 0; i <= 10; i++) want.add(Math.round((epochs - 1) * i / 10));
+  const snaps: GdTrace["snaps"] = []; let grad0: number[] = [];
+  if (isLin) {
+    const w = new Array(d + 1).fill(0); const alpha = cfg.algo === "Ridge" ? 0.01 * (Number(cfg.params.alpha) || 1) : 0;
+    for (let ep = 0; ep < epochs; ep++) {
+      const grad = new Array(d + 1).fill(0);
+      for (let i = 0; i < n; i++) { const pred = dot(w, Xb[i]); const err = pred - y[i]; for (let j = 0; j <= d; j++) grad[j] += err * Xb[i][j]; }
+      const gn = grad.map((g) => g / n);
+      for (let j = 0; j <= d; j++) { let g = gn[j]; if (j > 0) g += alpha * w[j]; w[j] -= lr * g; }
+      if (ep === 0) grad0 = gn;
+      if (want.has(ep)) { let L = 0; for (let i = 0; i < n; i++) L += (dot(w, Xb[i]) - y[i]) ** 2; snaps.push({ ep, loss: L / n, gnorm: Math.sqrt(gn.reduce((a, g) => a + g * g, 0)), w: [...w] }); }
+    }
+    return { kind: "linear", d, lr, grad0, snaps };
+  }
+  const W = Array.from({ length: nClasses }, () => new Array(d + 1).fill(0)); const l2 = 0.01 / (Number(cfg.params.C) || 1);
+  const cls = Math.min(1, nClasses - 1);
+  for (let ep = 0; ep < epochs; ep++) {
+    const grad = Array.from({ length: nClasses }, () => new Array(d + 1).fill(0));
+    for (let i = 0; i < n; i++) { const probs = softmax(W.map((w) => dot(w, Xb[i]))); for (let k = 0; k < nClasses; k++) { const err = probs[k] - (y[i] === k ? 1 : 0); for (let j = 0; j <= d; j++) grad[k][j] += err * Xb[i][j]; } }
+    const gn = grad[cls].map((g) => g / n);
+    for (let k = 0; k < nClasses; k++) for (let j = 0; j <= d; j++) { let g = grad[k][j] / n; if (j > 0) g += l2 * W[k][j]; W[k][j] -= lr * g; }
+    if (ep === 0) grad0 = gn;
+    if (want.has(ep)) { let L = 0; for (let i = 0; i < n; i++) { const pr = softmax(W.map((w) => dot(w, Xb[i]))); L += -Math.log(Math.max(1e-9, pr[y[i]])); } snaps.push({ ep, loss: L / n, gnorm: Math.sqrt(gn.reduce((a, g) => a + g * g, 0)), w: [...W[cls]] }); }
+  }
+  return { kind: "logreg", d, lr, grad0, snaps };
+}
+export interface SplitMath { feat: number; thr: number; parent: number; left: number; right: number; gain: number; nL: number; nR: number; metric: "gini" | "variance"; }
+export function rootSplitMath(model: Model, X: number[][], y: number[], nClasses: number): SplitMath | null {
+  if (model.kind !== "tree" && model.kind !== "forest") return null;
+  const root = model.kind === "tree" ? model.root : model.trees[0];
+  if (root.leaf) return null;
+  const reg = model.task === "regression";
+  const imp = (yy: number[]) => (reg ? variance(yy) : gini(yy, nClasses));
+  const yl: number[] = [], yr: number[] = [];
+  for (let i = 0; i < X.length; i++) (X[i][root.feat] <= root.thr ? yl : yr).push(y[i]);
+  const parent = imp(y), left = imp(yl), right = imp(yr);
+  return { feat: root.feat, thr: root.thr, parent, left, right, gain: parent - (yl.length / y.length) * left - (yr.length / y.length) * right, nL: yl.length, nR: yr.length, metric: reg ? "variance" : "gini" };
+}
+
 export function mean(a: number[]): number { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0; }
 export function std(a: number[]): number { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); }
 
