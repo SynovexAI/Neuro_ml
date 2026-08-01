@@ -356,30 +356,50 @@ export default function DlLab() {
         </div>
       )}
 
-      {step === "train" && data && (
-        <div className="card"><div className="card-h"><span className="t">Train</span><span className="mono r">{running ? "training…" : epoch ? `epoch ${epoch}` : "not started"}</span></div>
+      {step === "train" && data && (() => {
+        const metricName = data.task === "regression" ? "R²" : "accuracy";
+        const pct = Math.min(100, epochsTarget ? (epoch / epochsTarget) * 100 : 0);
+        const stat = (v: string, k: string, color?: string) => <div style={{ background: "linear-gradient(160deg, var(--panel), var(--surface))", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px" }}><div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1, color: color || "var(--text)" }}>{v}</div><div className="note" style={{ marginTop: 5, textTransform: "uppercase", letterSpacing: ".04em" }}>{k}</div></div>;
+        const c = history.length ? curveFig() : null;
+        return <div className="card"><div className="card-h"><span className="t">Train — fit the network on your data</span><span className="mono r">{running ? "training…" : epoch ? "done" : "not started"}</span></div>
           <div className="card-b">
-            <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🎛️</span><span><b>Learning rate</b> = step size per update (too high → unstable, too low → slow). <b>Optimizer</b> = how steps are computed (Adam adapts per-weight; usually converges fastest). <b>L2</b> = weight penalty that fights overfitting. <b>Batch size</b> = rows averaged before each update. An <b>epoch</b> = one full pass over the training data.</span></div>
-            <div className="row" style={{ gap: 14, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
-              <div className="knob" style={{ margin: 0, minWidth: 160 }}><div className="kr"><span>Learning rate (η)</span><b>{lr}</b></div><input type="range" min={0.001} max={0.2} step={0.001} value={lr} onChange={(e) => setLr(+e.target.value)} /></div>
-              <div><label className="note">Optimizer</label><select value={optimizer} onChange={(e) => setOptimizer(e.target.value as Optimizer)}><option value="adam">Adam</option><option value="momentum">SGD + momentum</option><option value="sgd">SGD</option></select></div>
-              <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>L2 (weight decay)</span><b>{l2}</b></div><input type="range" min={0} max={0.01} step={0.0005} value={l2} onChange={(e) => setL2(+e.target.value)} /></div>
-              <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Batch size (rows)</span><b>{batchSize}</b></div><input type="range" min={1} max={64} step={1} value={batchSize} onChange={(e) => setBatchSize(+e.target.value)} /></div>
-              <div className="knob" style={{ margin: 0, minWidth: 160 }}><div className="kr"><span>Epochs (how long to train)</span><b>{epochsTarget}</b></div><input type="range" min={50} max={1000} step={25} value={epochsTarget} onChange={(e) => setEpochsTarget(+e.target.value)} disabled={running} /></div>
+            <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🎛️</span><span><b>Learning rate</b> = step size per update. <b>Optimizer</b> = how steps are computed (Adam adapts per-weight, usually fastest). <b>L2</b> = weight penalty that fights overfitting. <b>Batch size</b> = rows averaged per update. An <b>epoch</b> = one full pass over the training data.</span></div>
+            {/* control panel */}
+            <div style={panelSt}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 16 }}>
+                <div className="knob" style={{ margin: 0 }}><div className="kr"><span>Learning rate (η)</span><b>{lr}</b></div><input type="range" min={0.001} max={0.2} step={0.001} value={lr} onChange={(e) => setLr(+e.target.value)} /></div>
+                <div><label className="note" style={{ display: "block", marginBottom: 5 }}>Optimizer</label><select value={optimizer} onChange={(e) => setOptimizer(e.target.value as Optimizer)} style={{ width: "100%" }}><option value="adam">Adam</option><option value="momentum">SGD + momentum</option><option value="sgd">SGD</option></select></div>
+                <div className="knob" style={{ margin: 0 }}><div className="kr"><span>L2 (weight decay)</span><b>{l2}</b></div><input type="range" min={0} max={0.01} step={0.0005} value={l2} onChange={(e) => setL2(+e.target.value)} /></div>
+                <div className="knob" style={{ margin: 0 }}><div className="kr"><span>Batch size (rows)</span><b>{batchSize}</b></div><input type="range" min={1} max={64} step={1} value={batchSize} onChange={(e) => setBatchSize(+e.target.value)} /></div>
+                <div className="knob" style={{ margin: 0 }}><div className="kr"><span>Epochs</span><b>{epochsTarget}</b></div><input type="range" min={50} max={1000} step={25} value={epochsTarget} onChange={(e) => setEpochsTarget(+e.target.value)} disabled={running} /></div>
+              </div>
+              <div className="row" style={{ gap: 12, alignItems: "center", marginTop: 14 }}>
+                <button className="btn" onClick={running ? stopTrain : startTrain}>{running ? "⏸ Pause" : epoch ? "↻ Restart" : "▶ Train"}</button>
+                {running && <button className="btn ghost" onClick={finishNow}>⏭ Finish now</button>}
+                <div style={{ flex: 1, minWidth: 120, height: 8, background: "var(--panel-2)", borderRadius: 4, overflow: "hidden" }}><div style={{ height: "100%", width: `${pct}%`, background: "linear-gradient(90deg, var(--accent), var(--good))", borderRadius: 4, transition: "width .2s" }} /></div>
+                <span className="note mono" style={{ whiteSpace: "nowrap" }}>epoch {epoch} / {epochsTarget}</span>
+              </div>
             </div>
-            <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <button className="btn" onClick={running ? stopTrain : startTrain}>{running ? "⏸ Pause" : epoch ? "↻ Restart" : "▶ Train"}</button>
-              {running && <button className="btn ghost" onClick={finishNow}>⏭ Finish now</button>}
-              <span className="note">epoch <b>{epoch}</b> / {epochsTarget}</span>
-              {best && <span className="note">· train {data.task === "regression" ? "R²" : "accuracy"} <b>{best.acc.toFixed(3)}</b> · validation <b>{best.vacc.toFixed(3)}</b> · loss <b>{best.loss.toFixed(3)}</b></span>}
+            {/* live stat cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, margin: "14px 0" }}>
+              {stat(String(epoch), "epoch", "var(--accent)")}
+              {stat(best ? best.acc.toFixed(3) : "—", `train ${metricName}`, "var(--good)")}
+              {stat(best ? best.vacc.toFixed(3) : "—", `validation ${metricName}`, "#a855f7")}
+              {stat(best ? best.loss.toFixed(3) : "—", "loss")}
             </div>
-            {trainViz()}
-            {history.length > 0 && (() => { const c = curveFig(); return c ? <div className="split col-2e" style={{ gap: 12, marginTop: 12 }}>{c.loss}{c.acc}</div> : null; })()}
-            {best && best.vacc < best.acc - 0.12 && <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">⚠️</span><span><b>Overfitting</b> — train {data.task === "regression" ? "R²" : "accuracy"} is well above validation. Add L2, shrink the network, or get more data.</span></div>}
+            {/* boundary/fit + curves */}
+            <div className="split col-2e" style={{ gap: 16, alignItems: "start" }}>
+              <div style={panelSt}>{trainViz()}</div>
+              <div style={{ display: "grid", gap: 12 }}>
+                <div style={panelSt}>{c ? c.loss : <div className="note" style={{ padding: "40px 0", textAlign: "center" }}>loss curve appears once training starts</div>}</div>
+                <div style={panelSt}>{c ? c.acc : <div className="note" style={{ padding: "40px 0", textAlign: "center" }}>{metricName} curve appears once training starts</div>}</div>
+              </div>
+            </div>
+            {best && best.vacc < best.acc - 0.12 && <div className="teach-note" style={{ marginTop: 12 }}><span className="ic">⚠️</span><span><b>Overfitting</b> — train {metricName} is well above validation. Add L2, shrink the network, or get more data.</span></div>}
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("arch")}>← Back</button><button className="btn" onClick={() => { finishNow(); setStep("test"); }} disabled={!epoch}>Next: Test →</button></div>
           </div>
-        </div>
-      )}
+        </div>;
+      })()}
 
       {step === "test" && data && (
         <div className="card"><div className="card-h"><span className="t">Test & Export</span></div>
