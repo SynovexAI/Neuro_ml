@@ -85,6 +85,7 @@ export default function RagLab() {
   const [trace, setTrace] = useState<{ who: string; what: string; state: string }[]>([]);
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
+  const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -209,6 +210,20 @@ export default function RagLab() {
   }
 
   const [saved, setSaved] = useState("");
+
+  // Rebuild the index at several chunk sizes and score retrieval for the current
+  // question — teaches that chunk size is a real, measurable knob.
+  function compareChunking() {
+    const cfgs = [{ size: 20, overlap: 4 }, { size: 40, overlap: 8 }, { size: 80, overlap: 16 }, { size: 120, overlap: 24 }];
+    setCompareRows(cfgs.map(({ size: sz, overlap: ov }) => {
+      const cks = chunkText(combined, sz, ov);
+      if (!cks.length) return { size: sz, overlap: ov, chunks: 0, top: 0, avg: 0, best: "" };
+      const hs = retrieve(buildIndex(cks), question, strategy, topK);
+      const top = hs[0]?.score || 0;
+      const avg = hs.length ? hs.reduce((a, h) => a + h.score, 0) / hs.length : 0;
+      return { size: sz, overlap: ov, chunks: cks.length, top, avg, best: hs[0] != null ? cks[hs[0].i] : "" };
+    }));
+  }
   async function saveProject() {
     const MAX = 600_000; // cap saved document text (~0.6 MB) so a project row stays small
     let used = 0;
@@ -615,6 +630,21 @@ export default function RagLab() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {index && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">Compare chunking</span><div className="r"><button className="btn sm" onClick={compareChunking}>▶ Compare sizes</button></div></div>
+          <div className="card-b">
+            <div className="note" style={{ marginBottom: 10 }}>Rebuilds the index at several chunk sizes and retrieves for your question — bigger isn&apos;t always better. Higher <b>top score</b> = the best chunk matches the question more strongly ({strategy}, top-{topK}).</div>
+            {compareRows.length === 0 ? <div className="note">Click compare to score chunk sizes for “{question}”.</div> : (
+              <div style={{ overflowX: "auto" }}><table className="tbl">
+                <thead><tr><th>Chunk size</th><th>Overlap</th><th style={{ textAlign: "right" }}>Chunks</th><th style={{ textAlign: "right" }}>Top score</th><th style={{ textAlign: "right" }}>Avg top-{topK}</th><th>Best chunk</th></tr></thead>
+                <tbody>{compareRows.map((r, i) => { const best = Math.max(...compareRows.map((x) => x.top)); const win = r.top === best && r.top > 0; return <tr key={i}><td>{r.size}w {win && <span title="best">⭐</span>}</td><td>{r.overlap}</td><td className="mono" style={{ textAlign: "right" }}>{r.chunks}</td><td className="mono" style={{ textAlign: "right", color: win ? "var(--good)" : undefined, fontWeight: win ? 600 : 400 }}>{r.top.toFixed(3)}</td><td className="mono" style={{ textAlign: "right" }}>{r.avg.toFixed(3)}</td><td style={{ fontSize: 11, color: "var(--muted)", maxWidth: 260 }}>{r.best.slice(0, 120)}{r.best.length > 120 ? "…" : ""}</td></tr>; })}</tbody>
+              </table></div>
+            )}
           </div>
         </div>
       )}

@@ -96,6 +96,12 @@ export default function EtlLab() {
   const [storeMode, setStoreMode] = useState<"new" | "replace">("new");
   const [extMode, setExtMode] = useState<"append" | "upsert">("append");
   const [extKey, setExtKey] = useState("");
+  const [extConn, setExtConn] = useState<"url" | "fields">("url");
+  const [extHost, setExtHost] = useState("");
+  const [extPort, setExtPort] = useState("4000");
+  const [extUser, setExtUser] = useState("");
+  const [extPass, setExtPass] = useState("");
+  const [extDb, setExtDb] = useState("");
   const [models, setModels] = useState<{ name: string; sql: string }[]>([]);
   const [modelName, setModelName] = useState("");
 
@@ -234,9 +240,12 @@ export default function EtlLab() {
     setStoreBusy(false);
   }
   async function storeExternal(t: Table) {
+    const url = extConn === "fields"
+      ? `mysql://${encodeURIComponent(extUser)}:${encodeURIComponent(extPass)}@${extHost.trim()}:${extPort.trim() || "3306"}/${extDb.trim()}`
+      : extUrl;
     setStoreBusy(true);
     try {
-      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: extUrl, table: extTable, cols: t.cols, rows: t.rows, mode: extMode, keyCol: extKey || t.cols[0] }) });
+      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, table: extTable, cols: t.cols, rows: t.rows, mode: extMode, keyCol: extKey || t.cols[0] }) });
       const j = await r.json().catch(() => null);
       if (r.ok) toast(`${extMode === "upsert" ? "Upserted" : "Loaded"} ${j.rowCount} rows into \`${j.table}\` on your database`, "success");
       else toast(j?.error || "Load failed", "error");
@@ -384,8 +393,15 @@ ${mode === "stream"
           </div>
         )}
       </>) : (<>
-        <label className="fld">Your MySQL / TiDB connection URL</label>
-        <input type="text" value={extUrl} onChange={(e) => setExtUrl(e.target.value)} placeholder="mysql://user:pass@host:4000/db" />
+        <div className="seg" style={{ maxWidth: 260, marginBottom: 8 }}><button className={extConn === "url" ? "on" : ""} onClick={() => setExtConn("url")}>Connection URL</button><button className={extConn === "fields" ? "on" : ""} onClick={() => setExtConn("fields")}>Host &amp; fields</button></div>
+        {extConn === "url" ? (<>
+          <label className="fld">Your MySQL / TiDB connection URL</label>
+          <input type="text" value={extUrl} onChange={(e) => setExtUrl(e.target.value)} placeholder="mysql://user:pass@host:4000/db" />
+        </>) : (<>
+          <div className="split col-2e"><div><label className="fld">Host</label><input type="text" value={extHost} onChange={(e) => setExtHost(e.target.value)} placeholder="gateway.tidbcloud.com" /></div><div><label className="fld">Port</label><input type="text" value={extPort} onChange={(e) => setExtPort(e.target.value)} /></div></div>
+          <div className="split col-2e" style={{ marginTop: 8 }}><div><label className="fld">User</label><input type="text" value={extUser} onChange={(e) => setExtUser(e.target.value)} /></div><div><label className="fld">Database</label><input type="text" value={extDb} onChange={(e) => setExtDb(e.target.value)} /></div></div>
+          <label className="fld" style={{ marginTop: 8 }}>Password</label><input type="password" value={extPass} onChange={(e) => setExtPass(e.target.value)} />
+        </>)}
         <label className="fld" style={{ marginTop: 10 }}>Target table name</label>
         <input type="text" value={extTable} onChange={(e) => setExtTable(e.target.value)} />
         <div className="seg" style={{ maxWidth: 280, margin: "10px 0" }}><button className={extMode === "append" ? "on" : ""} onClick={() => setExtMode("append")}>Append</button><button className={extMode === "upsert" ? "on" : ""} onClick={() => setExtMode("upsert")}>Upsert</button></div>

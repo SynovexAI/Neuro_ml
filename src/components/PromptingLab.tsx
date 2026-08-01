@@ -44,6 +44,13 @@ async function streamChat(
   }
 }
 
+// One-shot (non-streaming) chat call — used by the eval runner + LLM judge.
+async function chatOnce(body: object): Promise<string> {
+  const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, streaming: false }) });
+  if (!res.ok) { const j = await res.json().catch(() => ({ error: "request failed" })); throw new Error(j.error || "request failed"); }
+  return (await res.text()).trim();
+}
+
 // ── word-level diff (LCS, max 600 words) ─────────────────────────────────────
 type DiffChunk = { text: string; kind: "same" | "a" | "b" };
 function diffWords(a: string, b: string): DiffChunk[] {
@@ -163,6 +170,12 @@ export default function PromptingLab() {
 
   const [showCode, setShowCode] = useState(false);
   const [saved, setSaved] = useState("");
+
+  // eval (test cases + LLM judge)
+  const [evalInputs, setEvalInputs] = useState("Explain recursion to a 10-year-old.\nWhat is 17% of 240?\nSummarize the water cycle in one sentence.");
+  const [rubric, setRubric] = useState("Score higher when the answer is correct, concise, and matches the requested format. Penalize verbosity and hedging.");
+  const [evalRows, setEvalRows] = useState<{ input: string; output: string; score: number; reason: string; ms: number }[]>([]);
+  const [evalBusy, setEvalBusy] = useState(false);
 
   useEffect(() => {
     fetch("/api/models")
@@ -319,6 +332,30 @@ export default function PromptingLab() {
     }
   }
 
+  async function runEval() {
+    if (!modelA) { setEvalRows([{ input: "—", output: "", score: 0, reason: "Pick a provider & model in Knobs · A first.", ms: 0 }]); return; }
+    const inputs = evalInputs.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 8);
+    if (!inputs.length) return;
+    setEvalBusy(true); setEvalRows([]);
+    const provBody = selectedProviderIdA ? { providerId: selectedProviderIdA } : {};
+    for (const input of inputs) {
+      const t0 = performance.now();
+      const userContent = prompt.includes("{input}") ? prompt.replace(/\{input\}/g, input) : `${prompt}\n\nInput: ${input}`;
+      try {
+        const output = await chatOnce({ messages: [{ role: "system", content: system }, { role: "user", content: userContent }], model: modelA, temperature: temp, maxTokens, topP, ...provBody });
+        const judge = await chatOnce({ messages: [
+          { role: "system", content: 'You are a strict evaluator. Score the OUTPUT against the CRITERIA from 0 to 100. Reply with ONLY minified JSON: {"score": <int 0-100>, "reason": "<one short sentence>"}.' },
+          { role: "user", content: `CRITERIA:\n${rubric}\n\nINPUT:\n${input}\n\nOUTPUT:\n${output}` },
+        ], model: modelA, temperature: 0, maxTokens: 200, ...provBody });
+        let score = 0, reason = "";
+        try { const j = JSON.parse(judge.slice(judge.indexOf("{"), judge.lastIndexOf("}") + 1)); score = Math.max(0, Math.min(100, Math.round(Number(j.score) || 0))); reason = String(j.reason || ""); } catch { reason = "could not parse judge output"; }
+        setEvalRows((rs) => [...rs, { input, output, score, reason, ms: Math.round(performance.now() - t0) }]);
+      } catch (e) {
+        setEvalRows((rs) => [...rs, { input, output: "⚠ " + (e as Error).message, score: 0, reason: "run failed", ms: Math.round(performance.now() - t0) }]);
+      }
+    }
+    setEvalBusy(false);
+  }
   async function save() {
     const r = await fetch("/api/projects", {
       method: "POST",
@@ -605,6 +642,30 @@ for chunk in r:
           <div className="card-b">
             <div className="out">{outB}{runningB && <span className="cur" />}</div>
           </div>
+        </div>
+      </div>
+
+      {/* Eval — test cases + LLM judge */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-h"><span className="t">Evaluate · test cases + LLM judge</span><div className="r"><button className="btn sm" onClick={runEval} disabled={evalBusy}>{evalBusy ? "Scoring…" : "▶ Run eval"}</button></div></div>
+        <div className="card-b">
+          <div className="note" style={{ marginBottom: 10 }}>Runs prompt <b>A</b> over each input (put <code>{"{input}"}</code> in the prompt to place it, otherwise it&apos;s appended), then an LLM judge scores each output 0–100 against your rubric.</div>
+          <div className="split col-2e">
+            <div><label className="fld">Test inputs (one per line, max 8)</label><textarea rows={4} value={evalInputs} onChange={(e) => setEvalInputs(e.target.value)} /></div>
+            <div><label className="fld">Grading rubric</label><textarea rows={4} value={rubric} onChange={(e) => setRubric(e.target.value)} /></div>
+          </div>
+          {evalRows.length > 0 && (<>
+            <div className="etl-metrics" style={{ margin: "14px 0" }}>
+              <div className="m">cases<b>{evalRows.length}</b></div>
+              <div className="m">avg score<b>{Math.round(evalRows.reduce((a, r) => a + r.score, 0) / evalRows.length)}</b></div>
+              <div className="m">best<b>{Math.max(...evalRows.map((r) => r.score))}</b></div>
+              <div className="m">worst<b>{Math.min(...evalRows.map((r) => r.score))}</b></div>
+            </div>
+            <div style={{ overflowX: "auto" }}><table className="tbl">
+              <thead><tr><th>Input</th><th>Output</th><th style={{ textAlign: "right" }}>Score</th><th>Why</th></tr></thead>
+              <tbody>{evalRows.map((r, i) => <tr key={i}><td style={{ fontSize: 12, maxWidth: 150 }}>{r.input}</td><td style={{ fontSize: 12, maxWidth: 240 }}>{r.output.slice(0, 160)}{r.output.length > 160 ? "…" : ""}</td><td className="mono" style={{ textAlign: "right", fontWeight: 600, color: r.score >= 70 ? "var(--good)" : r.score >= 40 ? "var(--warn)" : "var(--crit)" }}>{r.score}</td><td style={{ fontSize: 11, color: "var(--muted)", maxWidth: 200 }}>{r.reason}</td></tr>)}</tbody>
+            </table></div>
+          </>)}
         </div>
       </div>
 
