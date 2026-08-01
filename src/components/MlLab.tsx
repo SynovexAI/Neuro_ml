@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
-  decisionSurface, learningCurve, gdTrace, rootSplitMath,
+  decisionSurface, learningCurve, gdTrace, gdAnim, rootSplitMath,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
@@ -215,6 +215,9 @@ export default function MlLab() {
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mlMode, setMlMode] = useState<"package" | "maths">("package");
+  const [animIdx, setAnimIdx] = useState(0);
+  const [animPlaying, setAnimPlaying] = useState(false);
+  const [sigZ, setSigZ] = useState(1);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -500,6 +503,25 @@ ${evalBlock}`;
   // recomputes it live so the numbers + verdict update as you pick columns.
   useEffect(() => { if (lcData.length && ds && result) runLC(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lcFeats]);
+  // Frames for the gradient-descent animation (only for GD models, in maths mode).
+  const gdAnimData = useMemo(() => {
+    if (mlMode !== "maths" || step !== "train" || !ds || !result) return null;
+    if (!["LogisticRegression", "LinearRegression", "Ridge"].includes(algo)) return null;
+    try {
+      const nums = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
+      const a = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
+      if (task === "classification") { if (nums.length < 2) return null; const b = dbF2 && nums.includes(dbF2) && dbF2 !== a ? dbF2 : (nums.find((x) => x !== a) || nums[1]); return gdAnim(ds, target, a, b, cfgNow()); }
+      return nums.length ? gdAnim(ds, target, a, "", cfgNow()) : null;
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
+  useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
+  useEffect(() => {
+    if (!animPlaying || !gdAnimData) return;
+    if (animIdx >= gdAnimData.frames.length - 1) { setAnimPlaying(false); return; }
+    const t = setTimeout(() => setAnimIdx((i) => i + 1), 520);
+    return () => clearTimeout(t);
+  }, [animPlaying, animIdx, gdAnimData]);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -544,6 +566,73 @@ ${evalBlock}`;
   // ════════════ FROM-SCRATCH (MATHS) MODE ════════════
   const colNumVals = (name: string) => (ds?.columns.find((c) => c.name === name)?.values.filter((v) => v != null).map(Number) ?? []);
   const mCard = (title: string, body: React.ReactNode) => <div className="card math-card" style={{ marginBottom: 16 }}><div className="card-h"><span className="t">🧮 The maths — {title}</span></div><div className="card-b">{body}</div></div>;
+  const PAL_ML = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf"];
+
+  // Animated gradient descent: play the boundary/line improving as the loss drops.
+  function gdAnimView() {
+    if (!gdAnimData) return null;
+    const A = gdAnimData; const fr = A.frames[Math.min(animIdx, A.frames.length - 1)]; const t = plotlyTheme();
+    let data: Record<string, unknown>[]; let title: string;
+    if (!A.reg) {
+      const K = A.classes.length; const colorscale: [number, string][] = [];
+      for (let i = 0; i < K; i++) { const c = PAL_ML[i % PAL_ML.length]; colorscale.push([i / K, c]); colorscale.push([(i + 1) / K, c]); }
+      data = [
+        { type: "heatmap", x: A.xs, y: A.ys, z: fr.z, showscale: false, colorscale, zmin: -0.5, zmax: K - 0.5, opacity: 0.4, hoverinfo: "skip" },
+        ...A.classes.map((cl, ci) => ({ type: "scatter", mode: "markers", name: cl, x: A.points.filter((p) => p.c === ci).map((p) => p.x), y: A.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 6, color: PAL_ML[ci % PAL_ML.length], line: { width: 1, color: t.paper } } })),
+      ];
+      title = `epoch ${fr.ep} · loss ${fr.loss.toFixed(3)}`;
+    } else {
+      data = [
+        { type: "scatter", mode: "markers", name: "data", x: A.points.map((p) => p.x), y: A.points.map((p) => p.y), marker: { size: 6, color: "#5b7cff", opacity: 0.55 } },
+        { type: "scatter", mode: "lines", name: "fit", x: A.xs, y: fr.line, line: { color: "#f59e0b", width: 3 } },
+      ];
+      title = `epoch ${fr.ep} · MSE ${fr.loss.toFixed(2)}`;
+    }
+    const layout = { ...chartLayout(t, title, dbF1 || "x", A.reg ? target : (dbF2 || "y")), showlegend: false };
+    return <div style={{ marginTop: 10 }}>
+      <Plot data={data} layout={layout} style={{ height: 340 }} />
+      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
+        <button className="btn sm" onClick={() => { if (animIdx >= A.frames.length - 1) setAnimIdx(0); setAnimPlaying((p) => !p); }}>{animPlaying ? "⏸ Pause" : "▶ Play training"}</button>
+        <input type="range" min={0} max={A.frames.length - 1} value={Math.min(animIdx, A.frames.length - 1)} onChange={(e) => { setAnimPlaying(false); setAnimIdx(+e.target.value); }} style={{ flex: 1 }} />
+        <span className="mono note">epoch {fr.ep}</span>
+      </div>
+      <div className="note" style={{ marginTop: 4 }}>{A.reg ? "Watch the line shift & tilt to minimise squared error as w updates each epoch." : "Watch the coloured regions bend to separate the classes as the weights update — gradient descent minimising the loss, live."}</div>
+    </div>;
+  }
+  // Interactive sigmoid: drag z, see the probability.
+  function sigmoidView() {
+    const t = plotlyTheme(); const xs: number[] = [], ys: number[] = [];
+    for (let z = -6; z <= 6.001; z += 0.2) { xs.push(z); ys.push(1 / (1 + Math.exp(-z))); }
+    const pr = 1 / (1 + Math.exp(-sigZ));
+    const data = [
+      { type: "scatter", mode: "lines", x: xs, y: ys, line: { color: "#5b7cff", width: 2.5 }, hoverinfo: "skip" },
+      { type: "scatter", mode: "markers", x: [sigZ], y: [pr], marker: { size: 11, color: "#f59e0b" } },
+    ];
+    const layout = { ...chartLayout(t, "σ(z) squashes the score into a probability", "z = w·x + b", "probability"), showlegend: false, shapes: [{ type: "line", x0: -6, x1: 6, y0: 0.5, y1: 0.5, line: { color: t.grid, dash: "dot", width: 1 } }] };
+    return <div style={{ marginTop: 12 }}>
+      <label className="fld">Interactive — drag the score z</label>
+      <Plot data={data} layout={layout} style={{ height: 230 }} />
+      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 6 }}>
+        <span className="note">z</span><input type="range" min={-6} max={6} step={0.1} value={sigZ} onChange={(e) => setSigZ(+e.target.value)} style={{ flex: 1 }} />
+        <span className="mono"><Katex tex={`\\sigma(${sigZ.toFixed(1)}) = ${pr.toFixed(3)}`} /></span>
+      </div>
+      <div className="note" style={{ marginTop: 4 }}>Big positive score → probability near 1, big negative → near 0, z = 0 → exactly 0.5 (the decision line).</div>
+    </div>;
+  }
+  // Standardization: same data before → after.
+  function prepHist() {
+    if (!ds) return null;
+    const f = features.find((x) => ds.columns.find((c) => c.name === x)?.type === "num"); if (!f) return null;
+    const v = colNumVals(f); if (!v.length) return null;
+    const mu = mean(v), sd = std(v) || 1; const z = v.map((x) => (x - mu) / sd); const t = plotlyTheme();
+    return <div style={{ marginTop: 12 }}>
+      <label className="fld">Same “{f}”, before → after (centred at 0, spread 1)</label>
+      <div className="split col-2e">
+        <Plot data={[{ type: "histogram", x: v, marker: { color: "#5b7cff" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, "raw", f, "count"), showlegend: false }} style={{ height: 210 }} />
+        <Plot data={[{ type: "histogram", x: z, marker: { color: "#f59e0b" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, "standardized z", "z", "count"), showlegend: false }} style={{ height: 210 }} />
+      </div>
+    </div>;
+  }
 
   function mathData() {
     if (!ds) return null;
@@ -596,7 +685,7 @@ ${evalBlock}`;
         <div className="note">One column per category; a 1 marks which one — turns text into numbers with no fake ordering.</div>
       </div>;
     }
-    return mCard("preprocessing", <>{numBlock}{catBlock}{!numBlock && !catBlock && <div className="note">No preprocessing needed.</div>}</>);
+    return mCard("preprocessing", <>{numBlock}{numBlock && prepHist()}{catBlock}{!numBlock && !catBlock && <div className="note">No preprocessing needed.</div>}</>);
   }
   function mathModel() {
     const A = algo;
@@ -611,7 +700,7 @@ ${evalBlock}`;
       RandomForest: [["\\hat{y} = \\text{mode}\\{ T_1(\\mathbf x),\\dots,T_m(\\mathbf x)\\}", "vote across m trees"], ["\\text{each tree: bootstrap sample + random feature subset}", "de-correlates the trees"]],
     };
     const rows = eqs[A] || eqs.LogisticRegression;
-    return mCard(`${MODEL_INFO[A]?.label ?? A} — the model`, <>{rows.map(([t, cap], i) => <div key={i} className="mathrow" style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 10 }}><Katex block tex={t} /><span className="note">{cap}</span></div>)}</>);
+    return mCard(`${MODEL_INFO[A]?.label ?? A} — the model`, <>{rows.map(([t, cap], i) => <div key={i} className="mathrow" style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 10 }}><Katex block tex={t} /><span className="note">{cap}</span></div>)}{A === "LogisticRegression" && sigmoidView()}</>);
   }
   function mathValidation() {
     return mCard(`${valMethod === "kfold" ? `${cvFolds}-fold cross-validation` : "hold-out validation"}`, <>
@@ -635,7 +724,8 @@ ${evalBlock}`;
       return mCard("gradient descent — watch w update", <>
         <div className="note" style={{ marginBottom: 8 }}>Each epoch nudges every weight <b>downhill</b> on the loss by the gradient, scaled by the learning rate <Katex tex={`\\eta=${gt.lr}`} />:</div>
         <div className="mathrow"><Katex block tex={`\\mathbf{w} \\leftarrow \\mathbf{w} - \\eta\\,\\nabla_{\\mathbf w}\\mathcal{L}`} /></div>
-        <div className="mathrow"><Katex tex={`\\text{first step: } w_1: 0 - ${gt.lr}\\times(${gt.grad0[1]?.toFixed(3) ?? "0"}) = ${(-gt.lr * (gt.grad0[1] ?? 0)).toFixed(4)}`} /></div>
+        {gdAnimView()}
+        <div className="mathrow" style={{ marginTop: 10 }}><Katex tex={`\\text{first step: } w_1: 0 - ${gt.lr}\\times(${gt.grad0[1]?.toFixed(3) ?? "0"}) = ${(-gt.lr * (gt.grad0[1] ?? 0)).toFixed(4)}`} /></div>
         <label className="fld" style={{ marginTop: 12 }}>Per-epoch (loss ↓ as the gradient shrinks)</label>
         <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
           <tr><th>epoch</th><th>loss</th><th>‖∇‖</th><th>b</th><th>w₁</th><th>w₂</th></tr>
@@ -648,6 +738,7 @@ ${evalBlock}`;
       return mCard("the best split (greedy)", <>
         <div className="note" style={{ marginBottom: 8 }}>At the root the tree tries every feature/threshold and keeps the one that reduces impurity most:</div>
         <div className="mathrow"><Katex block tex={`\\text{gain} = ${sp.parent.toFixed(3)} - \\tfrac{${sp.nL}}{${sp.nL + sp.nR}}(${sp.left.toFixed(3)}) - \\tfrac{${sp.nR}}{${sp.nL + sp.nR}}(${sp.right.toFixed(3)}) = ${sp.gain.toFixed(3)}`} /></div>
+        {(() => { const t = plotlyTheme(); return <Plot data={[{ type: "bar", x: ["parent", `left (n=${sp.nL})`, `right (n=${sp.nR})`], y: [sp.parent, sp.left, sp.right], marker: { color: ["#5b7cff", "#3ecf7f", "#f59e0b"] } }]} layout={{ ...chartLayout(t, `${sp.metric} impurity — the split makes each side purer`, "", sp.metric), showlegend: false }} style={{ height: 220 }} />; })()}
         <div className="note">Chosen split: feature <b>#{sp.feat}</b> ≤ {sp.thr.toFixed(3)} · {sp.metric} drops from {sp.parent.toFixed(3)} to a weighted {(sp.parent - sp.gain).toFixed(3)}. This repeats recursively down the tree.</div>
       </>);
     }

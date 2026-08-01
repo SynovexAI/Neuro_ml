@@ -530,6 +530,72 @@ export function gdTrace(cfg: TrainConfig, X: number[][], y: number[], nClasses: 
   }
   return { kind: "logreg", d, lr, grad0, snaps };
 }
+// Animated gradient descent on a *visualisable* problem: 2 features → a decision
+// boundary that improves per epoch (classification), or 1 feature → a line that
+// fits (regression). Returns frames so the UI can play the training.
+export interface GdAnim {
+  reg: boolean; xs: number[]; ys?: number[]; classes: string[];
+  points: { x: number; y: number; c: number }[];
+  frames: { ep: number; loss: number; z?: number[][]; line?: number[] }[];
+}
+export function gdAnim(ds: Dataset, targetName: string, f1: string, f2: string, cfg: TrainConfig, res = 34): GdAnim | null {
+  const ty = ds.columns.find((c) => c.name === targetName);
+  const c1 = ds.columns.find((c) => c.name === f1);
+  if (!ty || !c1 || c1.type !== "num") return null;
+  const reg = cfg.task === "regression";
+  const epList = [0, 1, 2, 3, 5, 8, 12, 18, 26, 40, 70, 120, 200, 299];
+
+  if (!reg) {
+    const c2 = ds.columns.find((c) => c.name === f2);
+    if (!c2 || c2.type !== "num" || f1 === f2) return null;
+    const raw: [number, number, string][] = [];
+    for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], b = c2.values[i], t = ty.values[i]; if (a == null || b == null || t == null) continue; raw.push([Number(a), Number(b), String(t)]); }
+    if (raw.length < 6) return null;
+    const classes = Array.from(new Set(raw.map((r) => r[2]))); if (classes.length < 2 || classes.length > 6) return null;
+    const cmap = new Map(classes.map((c, i) => [c, i]));
+    const xs0 = raw.map((r) => r[0]), ys0 = raw.map((r) => r[1]);
+    const m1 = mean(xs0), s1 = std(xs0) || 1, m2 = mean(ys0), s2 = std(ys0) || 1;
+    const X = raw.map((r) => [(r[0] - m1) / s1, (r[1] - m2) / s2]); const y = raw.map((r) => cmap.get(r[2])!);
+    const K = classes.length, n = X.length, Xb = X.map((r) => [1, ...r]);
+    const W = Array.from({ length: K }, () => [0, 0, 0]); const lr = Number(cfg.params.learning_rate) || 0.3, l2 = 0.01 / (Number(cfg.params.C) || 1);
+    const mn1 = Math.min(...xs0), mx1 = Math.max(...xs0), mn2 = Math.min(...ys0), mx2 = Math.max(...ys0);
+    const gx: number[] = [], gy: number[] = [];
+    for (let i = 0; i < res; i++) gx.push(mn1 + ((mx1 - mn1) * i) / (res - 1));
+    for (let j = 0; j < res; j++) gy.push(mn2 + ((mx2 - mn2) * j) / (res - 1));
+    const frames: GdAnim["frames"] = [];
+    const snapSet = new Set(epList);
+    const total = 300;
+    for (let ep = 0; ep < total; ep++) {
+      if (snapSet.has(ep)) {
+        const z: number[][] = [];
+        for (const vy of gy) { const rowz: number[] = []; for (const vx of gx) { const xb = [1, (vx - m1) / s1, (vy - m2) / s2]; const sc = W.map((w) => w[0] * xb[0] + w[1] * xb[1] + w[2] * xb[2]); const p = softmax(sc); rowz.push(p.indexOf(Math.max(...p))); } z.push(rowz); }
+        let L = 0; for (let i = 0; i < n; i++) { const p = softmax(W.map((w) => dot(w, Xb[i]))); L += -Math.log(Math.max(1e-9, p[y[i]])); }
+        frames.push({ ep, loss: L / n, z });
+      }
+      const G = Array.from({ length: K }, () => [0, 0, 0]);
+      for (let i = 0; i < n; i++) { const p = softmax(W.map((w) => dot(w, Xb[i]))); for (let k = 0; k < K; k++) { const e = p[k] - (y[i] === k ? 1 : 0); for (let j = 0; j < 3; j++) G[k][j] += e * Xb[i][j]; } }
+      for (let k = 0; k < K; k++) for (let j = 0; j < 3; j++) { let g = G[k][j] / n; if (j > 0) g += l2 * W[k][j]; W[k][j] -= lr * g; }
+    }
+    return { reg: false, xs: gx, ys: gy, classes, points: raw.map((r, i) => ({ x: r[0], y: r[1], c: y[i] })), frames };
+  }
+
+  // regression: fit y = w0 + w1·x on ONE feature (f1 vs target)
+  const raw: [number, number][] = [];
+  for (let i = 0; i < ds.nrows; i++) { const a = c1.values[i], t = ty.values[i]; if (a == null || t == null) continue; raw.push([Number(a), Number(t)]); }
+  if (raw.length < 6) return null;
+  const xs0 = raw.map((r) => r[0]); const m1 = mean(xs0), s1 = std(xs0) || 1;
+  const X = raw.map((r) => (r[0] - m1) / s1), y = raw.map((r) => r[1]);
+  const n = X.length; let w0 = 0, w1 = 0; const lr = 0.1;
+  const mn = Math.min(...xs0), mx = Math.max(...xs0); const gx: number[] = [];
+  for (let i = 0; i < res; i++) gx.push(mn + ((mx - mn) * i) / (res - 1));
+  const frames: GdAnim["frames"] = []; const snapSet = new Set(epList);
+  for (let ep = 0; ep < 300; ep++) {
+    if (snapSet.has(ep)) { const line = gx.map((xv) => w0 + w1 * ((xv - m1) / s1)); let L = 0; for (let i = 0; i < n; i++) L += (w0 + w1 * X[i] - y[i]) ** 2; frames.push({ ep, loss: L / n, line }); }
+    let g0 = 0, g1 = 0; for (let i = 0; i < n; i++) { const e = w0 + w1 * X[i] - y[i]; g0 += e; g1 += e * X[i]; }
+    w0 -= lr * g0 / n; w1 -= lr * g1 / n;
+  }
+  return { reg: true, xs: gx, classes: [], points: raw.map((r) => ({ x: r[0], y: r[1], c: 0 })), frames };
+}
 export interface SplitMath { feat: number; thr: number; parent: number; left: number; right: number; gain: number; nL: number; nR: number; metric: "gini" | "variance"; }
 export function rootSplitMath(model: Model, X: number[][], y: number[], nClasses: number): SplitMath | null {
   if (model.kind !== "tree" && model.kind !== "forest") return null;
