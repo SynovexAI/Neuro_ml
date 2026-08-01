@@ -210,7 +210,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols: t.cols.map((c) => (c === from ? to : c)), rows: rows.map((r) => { const o: Rec = {}; t.cols.forEach((c) => (o[c === from ? to : c] = r[c])); return o; }) };
     }
     case "limit": { const n = Math.max(0, parseInt(op.value || "10") || 0); return { cols: t.cols, rows: rows.slice(0, n) }; }
-    case "sample": { const v = Number(op.value || "0.5"); const frac = v <= 1 ? v : v / (rows.length || 1); return { cols: t.cols, rows: rows.filter(() => Math.random() < frac) }; }
+    case "sample": { const v = Number(op.value || "0.5"); const frac = v <= 1 ? v : v / (rows.length || 1); return { cols: t.cols, rows: rows.filter((_, i) => { const h = Math.sin(i * 12.9898 + 78.233) * 43758.5453; return (h - Math.floor(h)) < frac; }) }; }
     case "map": {
       const col = op.col || t.cols[0]; const fn = op.fn || "round";
       const ap = (x: Cell): Cell => {

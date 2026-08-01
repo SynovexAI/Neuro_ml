@@ -70,7 +70,7 @@ async function runTool(name: string, input: string, kb: { index: RagIndex | null
     case "json_extract": return { obs: jsonExtractTool(input), known: true };
     case "web_fetch": return { obs: await serverWebFetch(input), known: true };
     case "http_request": return { obs: await serverHttp(input), known: true };
-    case "human_approval": return { obs: "Auto-approved (no human approver on this channel).", known: true };
+    case "human_approval": return { obs: "NOT APPROVED — human approval is required but no approver is available in this runtime (published / channel run). Do not perform the pending action; tell the user it needs approval in the interactive builder.", known: true };
     case "knowledge": {
       if (!kb.index || !kb.chunks?.length) return { obs: "No knowledge base is configured for this agent.", known: true };
       const hits = retrieve(kb.index, input, "hybrid", 3);

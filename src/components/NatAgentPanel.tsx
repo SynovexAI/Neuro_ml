@@ -354,7 +354,7 @@ export default function NatAgentPanel() {
                   <div key={t.id} className="pick-row" onClick={() => toggle(setTools, t.id)}><span style={{ fontSize: 15 }}>{t.icon}</span><b>{t.label}</b><span className="note">{t.sub}</span><span className="pick-tick">{tools.has(t.id) ? "✓ added" : "+ add"}</span></div>
                 ))}
                 <div className="note" style={{ margin: "12px 0 8px" }}>MCP servers <span style={{ color: "var(--faint)" }}>· from Studio → MCP servers</span></div>
-                {mcp.length === 0 ? <div className="note">no MCP servers — <a href="/admin/mcp">connect one</a></div>
+                {mcp.length === 0 ? <div className="note">no MCP servers — <a href="/studio/mcp">connect one</a></div>
                   : mcp.map((s) => (<div key={s.id} className="pick-row" onClick={() => toggle(setMcpIds, s.id)}><span style={{ fontSize: 15 }}>🔌</span><b>{s.name}</b><span className="badge">{s.transport}</span><span className="pick-tick">{mcpIds.has(s.id) ? "✓ added" : "+ add"}</span></div>))}
               </>) : (
                 kbs.length === 0 ? <div className="note">no knowledge bases — <a href="/kb">create one</a></div>

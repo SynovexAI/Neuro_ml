@@ -19,7 +19,7 @@ const ZONES: Zone[] = [
       { href: "/dashboard", label: "Dashboard" },
       { href: "/compose", label: "Compose" },
       { href: "/kb", label: "Knowledge bases" },
-      { href: "/admin/mcp", label: "MCP servers" },
+      { href: "/studio/mcp", label: "MCP servers" },
       { href: "/admin/providers", label: "Providers & models" },
       { href: "/projects", label: "My Projects" },
       { href: "/templates", label: "Templates" },
@@ -55,7 +55,7 @@ const ZONES: Zone[] = [
 ];
 
 function zoneOf(path: string): string {
-  if (path === "/admin/mcp" || path === "/admin/providers") return "studio"; // build tools live in Studio
+  if (path === "/studio/mcp" || path === "/admin/providers") return "studio"; // build tools live in Studio
   if (path.startsWith("/workroom")) return "workroom";
   if (path.startsWith("/labs")) return "labs";
   if (path.startsWith("/admin")) return "control";
