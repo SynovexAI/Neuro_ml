@@ -114,3 +114,17 @@ CREATE INDEX IF NOT EXISTS `audit_event_ts_idx` ON `audit_log` (`event`,`ts`);
 CREATE INDEX IF NOT EXISTS `agent_runs_user_ts_idx` ON `agent_runs` (`user_id`,`ts`);
 CREATE INDEX IF NOT EXISTS `kb_user_idx` ON `knowledge_bases` (`user_id`);
 CREATE INDEX IF NOT EXISTS `kb_chunks_kb_idx` ON `kb_chunks` (`kb_id`);
+
+-- ── Workroom: publish agents + deploy to channels (Telegram / API / widget) ──
+ALTER TABLE `projects` ADD COLUMN IF NOT EXISTS `published` boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS `channels` (
+	`id` varchar(36) NOT NULL,
+	`user_id` varchar(36) NOT NULL,
+	`project_id` varchar(36) NOT NULL,
+	`type` varchar(24) NOT NULL,
+	`secret_enc` text,
+	`enabled` boolean NOT NULL DEFAULT true,
+	`created_at` timestamp DEFAULT (now()),
+	CONSTRAINT `channels_id` PRIMARY KEY(`id`)
+);
+CREATE INDEX IF NOT EXISTS `channels_project_idx` ON `channels` (`project_id`);

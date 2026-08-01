@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { estCostUsd, fmtUsd } from "@/lib/pricing";
 import { toast } from "@/lib/toast";
+import Markdown from "@/components/Markdown";
 
 type ProviderOpt = { id: string; provider: string; label: string | null };
 type McpOpt = { id: string; name: string; transport: string };
@@ -49,6 +50,8 @@ export default function NatAgentPanel() {
   const [tplOpen, setTplOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
   const [saved, setSaved] = useState<Saved[]>([]);
+  const [savedId, setSavedId] = useState("");
+  const [publishing, setPublishing] = useState(false);
 
   // chat + test
   const [chat, setChat] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
@@ -120,19 +123,42 @@ export default function NatAgentPanel() {
   function agentConfig() {
     return { runtime: "nat", agentName, agentType, providerId, model, temperature, systemPrompt, tools: [...tools], mcpIds: [...mcpIds], kbIds: [...kbIds], task };
   }
+  // Create-or-update the saved project. Returns its id (or "" on failure) so
+  // Publish can flip the flag on the same row instead of duplicating it.
+  async function persist(): Promise<string> {
+    const cfg = agentConfig();
+    if (savedId) {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedId, name: agentName || "NAT agent", config: cfg }) });
+      return r.ok ? savedId : "";
+    }
+    const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent-nat", name: agentName || "NAT agent", config: cfg }) });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j?.id) { setSavedId(j.id); return j.id; }
+    return "";
+  }
   async function save() {
+    const id = await persist();
+    toast(id ? `Saved “${agentName}”` : "Save failed", id ? "success" : "error");
+  }
+  async function publish() {
+    setPublishing(true);
     try {
-      const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent-nat", name: agentName || "NAT agent", config: agentConfig() }) });
-      toast(r.ok ? `Saved “${agentName}”` : "Save failed", r.ok ? "success" : "error");
-    } catch { toast("Save failed", "error"); }
+      const id = await persist();
+      if (!id) { toast("Publish failed", "error"); return; }
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      if (r.ok) toast(`Published “${agentName}” — open it in the Workroom`, "success");
+      else toast("Publish failed", "error");
+    } catch { toast("Publish failed", "error"); }
+    finally { setPublishing(false); }
   }
   async function openLoad() {
     if (loadOpen) { setLoadOpen(false); return; }
     try { const j = await fetch("/api/projects?lab=agent-nat").then((r) => r.json()); setSaved(j.projects || []); } catch { setSaved([]); }
     setLoadOpen(true);
   }
-  function applyConfig(c: any) {
+  function applyConfig(c: any, id?: string) {
     if (!c) return;
+    setSavedId(id || "");
     if (c.agentName) setAgentName(c.agentName);
     if (c.agentType) setAgentType(c.agentType);
     if (c.providerId) setProviderId(c.providerId);
@@ -176,8 +202,9 @@ export default function NatAgentPanel() {
         <button className="btn ghost sm" onClick={save}>💾 Save</button>
         <div style={{ position: "relative" }}>
           <button className="btn ghost sm" onClick={openLoad}>📂 Load</button>
-          {loadOpen && <div className="menu-pop"><div className="menu-hd">Saved agents</div>{saved.length ? saved.map((s) => <div key={s.id} className="menu-item" onClick={() => applyConfig(s.config)}>{s.name}</div>) : <div className="menu-item" style={{ color: "var(--faint)" }}>none saved</div>}</div>}
+          {loadOpen && <div className="menu-pop"><div className="menu-hd">Saved agents</div>{saved.length ? saved.map((s) => <div key={s.id} className="menu-item" onClick={() => applyConfig(s.config, s.id)}>{s.name}</div>) : <div className="menu-item" style={{ color: "var(--faint)" }}>none saved</div>}</div>}
         </div>
+        <button className="btn sm" onClick={publish} disabled={publishing || !providerId || !model} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
@@ -259,7 +286,7 @@ export default function NatAgentPanel() {
                 </div>
               </>)}
               <label className="fld">Answer</label>
-              <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 12px", fontSize: 13, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{result.answer}</div>
+              <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 14px" }}><Markdown text={result.answer} /></div>
             </>)}
           </div>
         </div>
@@ -272,7 +299,7 @@ export default function NatAgentPanel() {
             <div style={{ maxHeight: 380, overflow: "auto", display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
               {chat.length === 0 && <div className="note">Say hello — the agent keeps the conversation in context.</div>}
               {chat.map((m, i) => (
-                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "82%", background: m.role === "user" ? "var(--accent-weak)" : "var(--panel)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 11px", fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "82%", background: m.role === "user" ? "var(--accent-weak)" : "var(--panel)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 12px", fontSize: 13, lineHeight: 1.5 }}>{m.role === "user" ? <span style={{ whiteSpace: "pre-wrap" }}>{m.text}</span> : <Markdown text={m.text} />}</div>
               ))}
               {running && mode === "chat" && <div className="note">thinking…</div>}
             </div>

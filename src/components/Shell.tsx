@@ -36,6 +36,13 @@ const ZONES: Zone[] = [
     ],
   },
   {
+    id: "workroom", label: "Workroom", desc: "Use & deploy your agents", icon: "◐", home: "/workroom",
+    items: [
+      { href: "/workroom", label: "Published agents" },
+      { href: "/workroom/channels", label: "Channels & deploy" },
+    ],
+  },
+  {
     id: "control", label: "Control Room", desc: "Users, usage, monitoring", icon: "▤", home: "/admin", adminOnly: true,
     items: [
       { href: "/admin", label: "Overview" },
@@ -48,6 +55,7 @@ const ZONES: Zone[] = [
 
 function zoneOf(path: string): string {
   if (path === "/admin/mcp" || path === "/admin/providers") return "studio"; // build tools live in Studio
+  if (path.startsWith("/workroom")) return "workroom";
   if (path.startsWith("/labs")) return "labs";
   if (path.startsWith("/admin")) return "control";
   return "studio";
@@ -55,7 +63,7 @@ function zoneOf(path: string): string {
 
 export default function Shell({ user, title, children }: { user: ShellUser; title: string; children: React.ReactNode }) {
   const path = usePathname();
-  const on = (href: string) => path === href || (href !== "/dashboard" && href !== "/admin" && path.startsWith(href));
+  const on = (href: string) => path === href || (href !== "/dashboard" && href !== "/admin" && href !== "/workroom" && path.startsWith(href));
   const initial = (user.name || user.email).charAt(0).toUpperCase();
 
   const [focus, setFocus] = useState(false);

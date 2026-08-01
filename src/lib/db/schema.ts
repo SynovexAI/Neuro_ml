@@ -46,9 +46,21 @@ export const projects = mysqlTable("projects", {
   name: varchar("name", { length: 160 }).notNull(),
   config: json("config"),
   shared: boolean("shared").notNull().default(false),
+  published: boolean("published").notNull().default(false), // usable in Workroom
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
+
+// Deployments of a published agent to a channel (Telegram bot, API key, web widget).
+export const channels = mysqlTable("channels", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  projectId: varchar("project_id", { length: 36 }).notNull(),
+  type: varchar("type", { length: 24 }).notNull(),   // telegram | api | widget
+  secretEnc: text("secret_enc"),                     // encrypted bot token / API key
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [index("channels_project_idx").on(t.projectId)]);
 
 // Every LLM call is metered here (one row per completion). Powers per-user
 // quota enforcement and admin usage reporting.
@@ -160,3 +172,4 @@ export type McpServer = typeof mcpServers.$inferSelect;
 export type AgentRun = typeof agentRuns.$inferSelect;
 export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
 export type KbChunk = typeof kbChunks.$inferSelect;
+export type Channel = typeof channels.$inferSelect;
