@@ -5,7 +5,7 @@ import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
   decisionSurface, learningCurve, gdTrace, gdAnim, rootSplitMath,
-  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace, imputeMethodFills,
+  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
 } from "@/lib/mlUtils";
@@ -223,7 +223,7 @@ export default function MlLab() {
   const [prepStepIdx, setPrepStepIdx] = useState(1);
   const [prepT, setPrepT] = useState(0);
   const [prepPlaying, setPrepPlaying] = useState(false);
-  const [prepMissRow, setPrepMissRow] = useState(0);
+  const [prepImputeMethod, setPrepImputeMethod] = useState("Mean");
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -522,7 +522,7 @@ ${evalBlock}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
   useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
-  useEffect(() => { setPrepT(0); setPrepPlaying(false); }, [prepStepIdx, prepCol, steps]);
+  useEffect(() => { setPrepT(0); setPrepPlaying(false); const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); }, [prepStepIdx, prepCol, steps]);
   useEffect(() => {
     if (!prepPlaying) return;
     if (prepT >= 1) { setPrepPlaying(false); return; }
@@ -632,77 +632,111 @@ ${evalBlock}`;
       <div className="note" style={{ marginTop: 4 }}>Big positive score → probability near 1, big negative → near 0, z = 0 → exactly 0.5 (the decision line).</div>
     </div>;
   }
-  // The formula for one preprocessing op/method, with params from the data.
-  function prepFormula(s: PrepStep, bn: number[]): React.ReactNode {
-    if (!bn.length) return null;
-    const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn);
-    const sorted = [...bn].sort((a, b) => a - b); const q = (p: number) => { const i = (sorted.length - 1) * p, lo = Math.floor(i); return sorted[lo] + (sorted[Math.ceil(i)] - sorted[lo]) * (i - lo); };
-    const med = q(0.5), q1 = q(0.25), q3 = q(0.75), iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1, x0 = bn[0];
-    const K = (tex: string) => <div className="mathrow"><Katex block tex={tex} /></div>;
+  // A formula revealed stage by stage as the animation (prepT) advances.
+  const stagedFormula = (lines: { tex: string; at: number }[]) => <div style={{ margin: "4px 0 8px" }}>{lines.map((l, i) => <div key={i} className="mathrow" style={{ opacity: prepT >= l.at ? 1 : 0.25, transition: "opacity .25s" }}><Katex block tex={l.tex} /></div>)}</div>;
+  const quart = (bn: number[]) => { const s = [...bn].sort((a, b) => a - b); const q = (p: number) => { const i = (s.length - 1) * p, lo = Math.floor(i); return s[lo] + (s[Math.ceil(i)] - s[lo]) * (i - lo); }; return { med: q(0.5), q1: q(0.25), q3: q(0.75) }; };
+  function scaleStages(s: PrepStep, bn: number[]): { tex: string; at: number }[] {
+    if (!bn.length) return [];
+    const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn), x0 = bn[0];
+    const { med, q1, q3 } = quart(bn); const iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1;
     if (s.op === "Scale / normalize") {
-      if (s.method === "StandardScaler") return K(`z=\\frac{x-\\mu}{\\sigma}=\\frac{x-${mu.toFixed(2)}}{${sd.toFixed(2)}}\\qquad ${x0.toFixed(2)}\\to ${((x0 - mu) / sd).toFixed(2)}`);
-      if (s.method === "MinMaxScaler") return K(`z=\\frac{x-\\min}{\\max-\\min}=\\frac{x-${mn.toFixed(2)}}{${(mx - mn).toFixed(2)}}\\qquad ${x0.toFixed(2)}\\to ${((x0 - mn) / ((mx - mn) || 1)).toFixed(2)}`);
-      if (s.method === "RobustScaler") return K(`z=\\frac{x-\\text{median}}{\\text{IQR}}=\\frac{x-${med.toFixed(2)}}{${iqr.toFixed(2)}}`);
-      if (s.method === "MaxAbsScaler") return K(`z=\\frac{x}{\\max|x|}=\\frac{x}{${maxabs.toFixed(2)}}`);
-      return K(`z=\\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`);
+      if (s.method === "StandardScaler") return [{ tex: `z=\\frac{x-\\mu}{\\sigma}`, at: 0 }, { tex: `z=\\frac{${x0.toFixed(1)}-${mu.toFixed(1)}}{${sd.toFixed(1)}}`, at: 0.15 }, { tex: `z=\\frac{${(x0 - mu).toFixed(1)}}{${sd.toFixed(1)}}`, at: 0.45 }, { tex: `z=${((x0 - mu) / sd).toFixed(2)}`, at: 0.75 }];
+      if (s.method === "MinMaxScaler") return [{ tex: `z=\\frac{x-\\min}{\\max-\\min}`, at: 0 }, { tex: `z=\\frac{${x0.toFixed(1)}-${mn.toFixed(1)}}{${(mx - mn).toFixed(1)}}`, at: 0.3 }, { tex: `z=${((x0 - mn) / ((mx - mn) || 1)).toFixed(2)}`, at: 0.7 }];
+      if (s.method === "RobustScaler") return [{ tex: `z=\\frac{x-\\text{median}}{\\text{IQR}}`, at: 0 }, { tex: `z=\\frac{${x0.toFixed(1)}-${med.toFixed(1)}}{${iqr.toFixed(1)}}`, at: 0.3 }, { tex: `z=${((x0 - med) / iqr).toFixed(2)}`, at: 0.7 }];
+      if (s.method === "MaxAbsScaler") return [{ tex: `z=\\frac{x}{\\max|x|}`, at: 0 }, { tex: `z=\\frac{${x0.toFixed(1)}}{${maxabs.toFixed(1)}}=${(x0 / maxabs).toFixed(2)}`, at: 0.5 }];
+      return [{ tex: `z=\\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`, at: 0 }];
     }
-    if (s.op === "Impute missing") return K(`\\text{null}\\ \\to\\ ${s.method === "Median" ? `\\text{median}=${med.toFixed(2)}` : s.method === "Most frequent" ? "\\text{mode}" : s.method === "Constant" ? "0" : `\\mu=${mu.toFixed(2)}`}`);
-    if (s.op === "Handle outliers") return K(`\\text{clip to}\\ [Q_1-1.5\\,\\text{IQR},\\ Q_3+1.5\\,\\text{IQR}]=[${(q1 - 1.5 * iqr).toFixed(1)},\\ ${(q3 + 1.5 * iqr).toFixed(1)}]`);
-    if (s.op === "Transform") { const m = s.method.toLowerCase(); if (m.includes("log")) return K(`x\\ \\to\\ \\log(1+x)`); if (m.includes("sqrt")) return K(`x\\ \\to\\ \\sqrt{x}`); return K(`x\\ \\to\\ \\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`); }
-    if (s.op === "Bin / discretize") return K(`x\\ \\to\\ \\left\\lfloor \\frac{x-\\min}{\\max-\\min}\\times k\\right\\rfloor\\quad(\\text{bin index})`);
-    return null;
+    if (s.op === "Transform") { const m = s.method.toLowerCase(); if (m.includes("log")) return [{ tex: `x\\to\\log(1+x)`, at: 0 }, { tex: `${x0.toFixed(1)}\\to${Math.log(1 + Math.max(0, x0)).toFixed(2)}`, at: 0.5 }]; if (m.includes("sqrt")) return [{ tex: `x\\to\\sqrt{x}`, at: 0 }, { tex: `${x0.toFixed(1)}\\to${Math.sqrt(Math.max(0, x0)).toFixed(2)}`, at: 0.5 }]; return [{ tex: `x\\to\\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`, at: 0 }]; }
+    if (s.op === "Handle outliers") return [{ tex: `\\text{clip to } [Q_1-1.5\\,\\text{IQR},\\ Q_3+1.5\\,\\text{IQR}]`, at: 0 }, { tex: `=[${(q1 - 1.5 * iqr).toFixed(1)},\\ ${(q3 + 1.5 * iqr).toFixed(1)}]`, at: 0.4 }];
+    if (s.op === "Bin / discretize") return [{ tex: `x\\to\\left\\lfloor\\frac{x-\\min}{\\max-\\min}\\times k\\right\\rfloor`, at: 0 }];
+    return [];
+  }
+  function subsamplePairs(before: (number | string | null)[], after: (number | string | null)[], max = 36): [number, number][] {
+    const all: [number, number][] = [];
+    for (let i = 0; i < before.length; i++) { if (typeof before[i] === "number" && typeof after[i] === "number") all.push([before[i] as number, after[i] as number]); }
+    if (all.length <= max) return all;
+    const out: [number, number][] = []; const stp = all.length / max; for (let k = 0; k < max; k++) out.push(all[Math.floor(k * stp)]); return out;
+  }
+  // Numeric transform (scale / transform / bin / outliers): staged formula + points sliding raw → transformed.
+  function numTransformView(colName: string, before: (number | string | null)[], after: (number | string | null)[], s: PrepStep): React.ReactNode {
+    const bn = before.filter((v) => typeof v === "number") as number[];
+    const pairs = subsamplePairs(before, after);
+    if (!pairs.length) return <div className="note">Nothing numeric to animate here.</div>;
+    const rb = pairs.map((p) => p[0]), ra = pairs.map((p) => p[1]);
+    const rmin = Math.min(...rb), rmax = Math.max(...rb), amin = Math.min(...ra), amax = Math.max(...ra);
+    const rpx = rb.map((x) => 4 + 92 * (x - rmin) / ((rmax - rmin) || 1));
+    const apx = ra.map((x) => 4 + 92 * (x - amin) / ((amax - amin) || 1));
+    return <>
+      {stagedFormula(scaleStages(s, bn))}
+      <label className="fld" style={{ marginTop: 6 }}>Every value slides raw → transformed (drag t or ▶ Play)</label>
+      <div className="num-line"><div className="num-mid" />{pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * prepT}%` }} />)}</div>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
+        <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Play"}</button>
+        <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
+        <span className="mono note">t={prepT.toFixed(2)}</span>
+      </div>
+      <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(after)}</div>
+    </>;
   }
   const prepStat = (vs: (number | string | null)[]) => { const a = vs.filter((v) => typeof v === "number") as number[]; return a.length ? `μ=${mean(a).toFixed(2)}, σ=${std(a).toFixed(2)}, min=${Math.min(...a).toFixed(1)}, max=${Math.max(...a).toFixed(1)}` : "—"; };
 
-  // Imputation: show every method's fill + animate one missing cell filling in.
+  // Imputation: pick a method → its formula computes, then every ∅ fills with it.
   function imputeView(colName: string, before: (number | string | null)[], s: PrepStep, numeric: boolean): React.ReactNode {
-    if (!ds) return null;
-    const fills = imputeMethodFills(before, numeric);
-    if (!fills.length) return <div className="note">No non-missing values to impute from.</div>;
-    const chosen = fills.find((f) => f.name === s.method) || fills[0];
+    const methods = numeric ? ["Mean", "Median", "Most frequent", "Constant"] : ["Most frequent", "Constant"];
+    const method = methods.includes(prepImputeMethod) ? prepImputeMethod : (methods.includes(s.method) ? s.method : methods[0]);
+    const present = before.filter((v) => v != null);
+    let fill = "0"; let stages: { tex: string; at: number }[] = [];
+    if (numeric) {
+      const nums = present as number[]; const sum = nums.reduce((a, b) => a + b, 0); const { med } = quart(nums.length ? nums : [0]);
+      const cnt = new Map<number, number>(); nums.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (method === "Mean") { fill = (sum / (nums.length || 1)).toFixed(2); stages = [{ tex: `\\mu=\\frac{\\sum x}{n}`, at: 0 }, { tex: `\\mu=\\frac{${sum.toFixed(1)}}{${nums.length}}`, at: 0.2 }, { tex: `\\mu=${fill}`, at: 0.45 }]; }
+      else if (method === "Median") { fill = String(Math.round(med * 100) / 100); stages = [{ tex: `\\text{sort the values, take the middle}`, at: 0 }, { tex: `\\text{median}=${fill}`, at: 0.4 }]; }
+      else if (method === "Most frequent") { fill = String(mode ? mode[0] : 0); stages = [{ tex: `\\text{mode}=${fill}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; }
+      else { fill = "0"; stages = [{ tex: `\\text{fill}=0\\ (\\text{constant})`, at: 0 }]; }
+    } else {
+      const strs = present as string[]; const cnt = new Map<string, number>(); strs.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (method === "Most frequent") { fill = mode ? mode[0] : "missing"; stages = [{ tex: `\\text{mode}=\\text{${String(fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; }
+      else { fill = "missing"; stages = [{ tex: `\\text{fill}=\\text{missing (constant)}`, at: 0 }]; }
+    }
     const missIdx = before.map((v, i) => (v == null ? i : -1)).filter((i) => i >= 0);
-    const nMiss = missIdx.length;
-    const row = nMiss ? missIdx[prepMissRow % nMiss] : -1;
-    const otherFeats = features.filter((f) => f !== colName).slice(0, 4);
+    const showIdx = Array.from(new Set([0, 1, 2, 3, ...missIdx.slice(0, 4)])).filter((i) => i < before.length).sort((a, b) => a - b).slice(0, 8);
     return <>
-      <label className="fld">Fill value by method — this column has <b>{nMiss}</b> missing ({((nMiss / (before.length || 1)) * 100).toFixed(0)}%). The <b>selected</b> method is applied:</label>
-      <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
-        <tr><th>method</th><th>fill value</th><th></th></tr>
-        {fills.map((f) => <tr key={f.name} style={{ background: f.name === s.method ? "var(--accent-weak)" : undefined }}><td>{f.name}</td><td className="mono">{f.fill}</td><td className="note">{f.name === s.method ? "◀ selected" : ""}</td></tr>)}
-      </tbody></table></div>
-      {numeric && s.method === "Mean" && (() => { const nums = before.filter((v) => typeof v === "number") as number[]; const sum = nums.reduce((a, b) => a + b, 0); return <div className="mathrow" style={{ marginTop: 8 }}><Katex block tex={`\\text{fill} = \\mu = \\tfrac{1}{n}\\sum x_i = \\tfrac{${sum.toFixed(1)}}{${nums.length}} = ${(sum / nums.length).toFixed(2)}`} /></div>; })()}
-      {row >= 0 ? <>
-        <div className="row" style={{ alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <label className="fld" style={{ margin: 0 }}>Watch a missing cell fill in — row {row}</label>
-          {nMiss > 1 && <button className="btn ghost sm" onClick={() => { setPrepMissRow((r) => r + 1); setPrepT(0); setPrepPlaying(false); }}>↻ another missing row</button>}
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <label className="fld" style={{ margin: 0 }}>Method</label>
+        <select value={method} onChange={(e) => { setPrepImputeMethod(e.target.value); setPrepT(0); setPrepPlaying(false); }} style={{ maxWidth: 170 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
+        <span className="note">{missIdx.length} missing → fill with <b>{fill}</b></span>
+      </div>
+      {stagedFormula(stages)}
+      {missIdx.length ? <>
+        <label className="fld" style={{ marginTop: 6 }}>Every ∅ fills with the {method.toLowerCase()} value (▶ Play)</label>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, maxWidth: 300 }}>
+          {showIdx.map((i) => { const miss = before[i] == null; const order = miss ? missIdx.indexOf(i) : 0; const th = 0.5 + order * 0.13; const p = miss ? Math.max(0, Math.min(1, (prepT - th) / 0.12)) : 0;
+            return <div key={i} className="icell"><span className="irow-lab">row {i}</span><span className={`ibox ${miss ? "miss" : ""}`}>{miss ? <span style={{ position: "relative" }}><span style={{ opacity: 1 - p, color: "var(--crit)" }}>∅</span><span style={{ position: "absolute", left: 0, opacity: p, color: "var(--good)", fontWeight: 600 }}>{fill}</span></span> : String(before[i])}</span></div>; })}
         </div>
-        <div className="impute-anim">
-          {otherFeats.map((f) => { const c = ds.columns.find((x) => x.name === f)!; return <div key={f} className="ia-cell"><div className="ia-h">{f}</div><div className="ia-v">{String(c.values[row] ?? "∅")}</div></div>; })}
-          <div className="ia-cell tgt"><div className="ia-h">{colName}</div><div className="ia-v" style={{ position: "relative" }}><span style={{ opacity: 1 - prepT, color: "var(--crit)" }}>∅</span><span style={{ position: "absolute", left: 0, right: 0, opacity: prepT, color: "var(--good)", fontWeight: 600 }}>{chosen.fill}</span></div></div>
-        </div>
-        <div className="mathrow" style={{ marginTop: 8 }}><Katex tex={`\\text{row ${row}:}\\ \\varnothing\\ \\to\\ \\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}} = ${numeric ? chosen.fill : `\\text{${String(chosen.fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}`}`} /></div>
         <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-          <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Fill it"}</button>
+          <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Compute & fill"}</button>
           <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
         </div>
-      </> : <div className="note" style={{ marginTop: 10 }}>No missing values in this column — nothing to fill.</div>}
+      </> : <div className="note" style={{ marginTop: 8 }}>No missing values in “{colName}” — nothing to fill.</div>}
     </>;
   }
-  // One-hot encode: animate a row's category → its indicator vector.
+  // One-hot: the indicator matrix builds row by row as the animation advances.
   function catOneHotView(colName: string): React.ReactNode {
     if (!ds) return null;
     const col = ds.columns.find((c) => c.name === colName)!;
-    const cats = Array.from(new Set(col.values.filter((v) => v != null).map(String))).slice(0, 6);
-    const ri = col.values.findIndex((v) => v != null); const val = ri >= 0 ? String(col.values[ri]) : cats[0];
+    const cats = Array.from(new Set(col.values.filter((v) => v != null).map(String))).slice(0, 4);
+    const rowIdx = col.values.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0).slice(0, 5);
+    const cells: React.ReactNode[] = [<div key="corner" />, ...cats.map((c) => <div key={`h${c}`} className="oh-h">{c}</div>)];
+    rowIdx.forEach((ri, r) => {
+      const val = String(col.values[ri]); const th = r / rowIdx.length; const on = prepT > th;
+      cells.push(<div key={`l${ri}`} className="oh-lab">“{val}”</div>);
+      cats.forEach((c) => { const hit = c === val; cells.push(<div key={`${ri}-${c}`} className={`oh-c ${hit && on ? "on" : ""}`}>{hit ? (on ? "1" : "0") : "0"}</div>); });
+    });
     return <>
-      <label className="fld">One-hot: each category → an indicator vector (a 1 in its own column)</label>
-      {cats.map((c, i) => <div key={c} className="mathrow"><Katex tex={`\\text{${c.replace(/[^a-zA-Z0-9 ]/g, " ")}}\\ \\to\\ [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}
-      <label className="fld" style={{ marginTop: 10 }}>Watch row {ri} — “{val}” → its vector</label>
-      <div className="impute-anim">
-        {cats.map((c) => { const on = c === val; return <div key={c} className="ia-cell"><div className="ia-h">{c}</div><div className="ia-v">{on ? <span style={{ opacity: prepT, color: "var(--good)", fontWeight: 600 }}>1</span> : <span style={{ color: "var(--faint)" }}>0</span>}</div></div>; })}
-      </div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-        <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Encode it"}</button>
+      <label className="fld">Each category → a 1 in its own column. The indicator matrix builds row by row (▶ Play):</label>
+      <div className="oh-grid" style={{ gridTemplateColumns: `auto repeat(${cats.length}, minmax(60px, 1fr))` }}>{cells}</div>
+      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 10 }}>
+        <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Encode rows"}</button>
         <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
       </div>
     </>;
@@ -767,32 +801,19 @@ ${evalBlock}`;
     const stepCount = trace.length - 1;
     const selRow = <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
       <label className="fld" style={{ margin: 0 }}>Watch column</label>
-      <select value={colName} onChange={(e) => { setPrepCol(e.target.value); setPrepStepIdx(1); setPrepMissRow(0); }} style={{ maxWidth: 200 }}>{feats.map((f) => <option key={f} value={f}>{f}{ds.columns.find((c) => c.name === f)?.type === "cat" ? " (text)" : ""}</option>)}</select>
+      <select value={colName} onChange={(e) => { setPrepCol(e.target.value); setPrepStepIdx(1); }} style={{ maxWidth: 200 }}>{feats.map((f) => <option key={f} value={f}>{f}{ds.columns.find((c) => c.name === f)?.type === "cat" ? " (text)" : ""}</option>)}</select>
     </div>;
     if (stepCount === 0) return mCard("preprocessing — step by step", <>{selRow}<div className="note">Add a preprocessing step (Impute, Scale, Encode, …) that touches “{colName}”, then step through it here.</div></>);
     const idx = Math.min(Math.max(1, prepStepIdx), stepCount);
     const s = steps[idx - 1];
     const before = trace[idx - 1].values, after = trace[idx].values;
     const touches = s.cols.includes(colName);
-    const t = plotlyTheme();
 
     let body: React.ReactNode;
     if (s.op === "Impute missing" && touches) body = imputeView(colName, before, s, numeric);
     else if (s.op === "Encode categorical" && touches && !numeric) body = catOneHotView(colName);
-    else if (numeric && trace[idx].changed) {
-      const bn = before.filter((v) => typeof v === "number") as number[];
-      const interp = before.map((b, i) => (typeof b !== "number" || typeof after[i] !== "number" ? null : b * (1 - prepT) + (after[i] as number) * prepT)).filter((v) => v != null) as number[];
-      body = <>
-        {prepFormula(s, bn)}
-        <label className="fld" style={{ marginTop: 10 }}>Animate the transform — drag t, or ▶ Play (0 = before → 1 = after)</label>
-        <Plot data={[{ type: "histogram", x: interp, marker: { color: prepT < 0.5 ? "#5b7cff" : "#f59e0b" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, `t = ${prepT.toFixed(2)}`, colName, "count"), showlegend: false }} style={{ height: 240 }} />
-        <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-          <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Play"}</button>
-          <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
-        </div>
-        <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(after)}</div>
-      </>;
-    } else body = <div className="note">Step “{s.op} · {s.method}” doesn’t transform “{colName}”. Pick a step that affects it, or switch columns.</div>;
+    else if (numeric && trace[idx].changed) body = numTransformView(colName, before, after, s);
+    else body = <div className="note">Step “{s.op} · {s.method}” doesn’t transform “{colName}”. Pick a step that affects it, or switch columns.</div>;
 
     return mCard("preprocessing — step by step", <>
       {selRow}
