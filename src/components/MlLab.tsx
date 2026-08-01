@@ -5,7 +5,7 @@ import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
   decisionSurface, learningCurve, gdTrace, gdAnim, rootSplitMath,
-  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots,
+  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
 } from "@/lib/mlUtils";
@@ -219,6 +219,10 @@ export default function MlLab() {
   const [animPlaying, setAnimPlaying] = useState(false);
   const [sigZ, setSigZ] = useState(1);
   const [summaryCol, setSummaryCol] = useState("");
+  const [prepCol, setPrepCol] = useState("");
+  const [prepStepIdx, setPrepStepIdx] = useState(1);
+  const [prepT, setPrepT] = useState(0);
+  const [prepPlaying, setPrepPlaying] = useState(false);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -517,6 +521,13 @@ ${evalBlock}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
   useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
+  useEffect(() => { setPrepT(0); setPrepPlaying(false); }, [prepStepIdx, prepCol, steps]);
+  useEffect(() => {
+    if (!prepPlaying) return;
+    if (prepT >= 1) { setPrepPlaying(false); return; }
+    const tm = setTimeout(() => setPrepT((x) => Math.min(1, Math.round((x + 0.04) * 100) / 100)), 55);
+    return () => clearTimeout(tm);
+  }, [prepPlaying, prepT]);
   useEffect(() => {
     if (!animPlaying || !gdAnimData) return;
     if (animIdx >= gdAnimData.frames.length - 1) { setAnimPlaying(false); return; }
@@ -620,20 +631,27 @@ ${evalBlock}`;
       <div className="note" style={{ marginTop: 4 }}>Big positive score → probability near 1, big negative → near 0, z = 0 → exactly 0.5 (the decision line).</div>
     </div>;
   }
-  // Standardization: same data before → after.
-  function prepHist() {
-    if (!ds) return null;
-    const f = features.find((x) => ds.columns.find((c) => c.name === x)?.type === "num"); if (!f) return null;
-    const v = colNumVals(f); if (!v.length) return null;
-    const mu = mean(v), sd = std(v) || 1; const z = v.map((x) => (x - mu) / sd); const t = plotlyTheme();
-    return <div style={{ marginTop: 12 }}>
-      <label className="fld">Same “{f}”, before → after (centred at 0, spread 1)</label>
-      <div className="split col-2e">
-        <Plot data={[{ type: "histogram", x: v, marker: { color: "#5b7cff" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, "raw", f, "count"), showlegend: false }} style={{ height: 210 }} />
-        <Plot data={[{ type: "histogram", x: z, marker: { color: "#f59e0b" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, "standardized z", "z", "count"), showlegend: false }} style={{ height: 210 }} />
-      </div>
-    </div>;
+  // The formula for one preprocessing op/method, with params from the data.
+  function prepFormula(s: PrepStep, bn: number[]): React.ReactNode {
+    if (!bn.length) return null;
+    const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn);
+    const sorted = [...bn].sort((a, b) => a - b); const q = (p: number) => { const i = (sorted.length - 1) * p, lo = Math.floor(i); return sorted[lo] + (sorted[Math.ceil(i)] - sorted[lo]) * (i - lo); };
+    const med = q(0.5), q1 = q(0.25), q3 = q(0.75), iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1, x0 = bn[0];
+    const K = (tex: string) => <div className="mathrow"><Katex block tex={tex} /></div>;
+    if (s.op === "Scale / normalize") {
+      if (s.method === "StandardScaler") return K(`z=\\frac{x-\\mu}{\\sigma}=\\frac{x-${mu.toFixed(2)}}{${sd.toFixed(2)}}\\qquad ${x0.toFixed(2)}\\to ${((x0 - mu) / sd).toFixed(2)}`);
+      if (s.method === "MinMaxScaler") return K(`z=\\frac{x-\\min}{\\max-\\min}=\\frac{x-${mn.toFixed(2)}}{${(mx - mn).toFixed(2)}}\\qquad ${x0.toFixed(2)}\\to ${((x0 - mn) / ((mx - mn) || 1)).toFixed(2)}`);
+      if (s.method === "RobustScaler") return K(`z=\\frac{x-\\text{median}}{\\text{IQR}}=\\frac{x-${med.toFixed(2)}}{${iqr.toFixed(2)}}`);
+      if (s.method === "MaxAbsScaler") return K(`z=\\frac{x}{\\max|x|}=\\frac{x}{${maxabs.toFixed(2)}}`);
+      return K(`z=\\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`);
+    }
+    if (s.op === "Impute missing") return K(`\\text{null}\\ \\to\\ ${s.method === "Median" ? `\\text{median}=${med.toFixed(2)}` : s.method === "Most frequent" ? "\\text{mode}" : s.method === "Constant" ? "0" : `\\mu=${mu.toFixed(2)}`}`);
+    if (s.op === "Handle outliers") return K(`\\text{clip to}\\ [Q_1-1.5\\,\\text{IQR},\\ Q_3+1.5\\,\\text{IQR}]=[${(q1 - 1.5 * iqr).toFixed(1)},\\ ${(q3 + 1.5 * iqr).toFixed(1)}]`);
+    if (s.op === "Transform") { const m = s.method.toLowerCase(); if (m.includes("log")) return K(`x\\ \\to\\ \\log(1+x)`); if (m.includes("sqrt")) return K(`x\\ \\to\\ \\sqrt{x}`); return K(`x\\ \\to\\ \\text{${s.method.replace(/[^a-zA-Z0-9 ]/g, " ")}}(x)`); }
+    if (s.op === "Bin / discretize") return K(`x\\ \\to\\ \\left\\lfloor \\frac{x-\\min}{\\max-\\min}\\times k\\right\\rfloor\\quad(\\text{bin index})`);
+    return null;
   }
+  const prepStat = (vs: (number | null)[]) => { const a = vs.filter((v) => v != null) as number[]; return a.length ? `μ=${mean(a).toFixed(2)}, σ=${std(a).toFixed(2)}, min=${Math.min(...a).toFixed(1)}, max=${Math.max(...a).toFixed(1)}` : "—"; };
 
   // "How the summary statistics come from the data" — formulas applied + visualized.
   function mathSummary() {
@@ -686,29 +704,49 @@ ${evalBlock}`;
   }
   function mathPrep() {
     if (!ds) return null;
-    const numF = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
+    const numFeats = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
     const catF = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "cat");
-    const f = numF[0];
-    let numBlock: React.ReactNode = null;
-    if (f) {
-      const v = colNumVals(f); const mu = mean(v), sd = std(v) || 1; const x0 = v[0] ?? mu;
-      numBlock = <>
-        <label className="fld">Standardize numeric — <b>{f}</b></label>
-        <div className="mathrow"><Katex block tex={`z = \\frac{x-\\mu}{\\sigma} = \\frac{${x0.toFixed(2)} - ${mu.toFixed(2)}}{${sd.toFixed(2)}} = ${((x0 - mu) / sd).toFixed(3)}`} /></div>
-        <div className="note">Row 1 of “{f}” ({x0.toFixed(2)}) becomes {((x0 - mu) / sd).toFixed(3)} — centred at 0, unit spread. Every feature is put on the same scale so none dominates by its units.</div>
-      </>;
-    }
     const cf = catF[0];
-    let catBlock: React.ReactNode = null;
-    if (cf) {
-      const cats = Array.from(new Set(ds.columns.find((c) => c.name === cf)!.values.filter((v) => v != null).map(String))).slice(0, 4);
-      catBlock = <div style={{ marginTop: 14 }}>
-        <label className="fld">One-hot encode — <b>{cf}</b></label>
-        {cats.map((cat, i) => <div key={cat} className="mathrow"><Katex tex={`\\text{${cat.replace(/[^a-zA-Z0-9 ]/g, " ")}} \\;\\rightarrow\\; [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}
-        <div className="note">One column per category; a 1 marks which one — turns text into numbers with no fake ordering.</div>
-      </div>;
-    }
-    return mCard("preprocessing", <>{numBlock}{numBlock && prepHist()}{catBlock}{!numBlock && !catBlock && <div className="note">No preprocessing needed.</div>}</>);
+    const catBlock = cf ? (() => { const cats = Array.from(new Set(ds.columns.find((c) => c.name === cf)!.values.filter((v) => v != null).map(String))).slice(0, 4); return <div style={{ marginTop: 16, borderTop: "1px solid var(--border)", paddingTop: 12 }}><label className="fld">Categorical → one-hot — <b>{cf}</b></label>{cats.map((cat, i) => <div key={cat} className="mathrow"><Katex tex={`\\text{${cat.replace(/[^a-zA-Z0-9 ]/g, " ")}} \\;\\rightarrow\\; [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}<div className="note">One column per category; a 1 marks which one — numbers with no fake ordering.</div></div>; })() : null;
+
+    if (!numFeats.length) return mCard("preprocessing", <>{catBlock || <div className="note">No numeric features to animate.</div>}</>);
+    const colName = numFeats.includes(prepCol) ? prepCol : numFeats[0];
+    const trace = prepColTrace(ds, steps, colName);
+    const stepCount = trace.length - 1;
+    if (stepCount === 0) return mCard("preprocessing — step by step", <><div className="note">Add a preprocessing step (Scale, Impute, Transform, …) that touches a numeric column, then step through it here.</div>{catBlock}</>);
+    const idx = Math.min(Math.max(1, prepStepIdx), stepCount);
+    const s = steps[idx - 1];
+    const before = trace[idx - 1].values, after = trace[idx].values;
+    const bn = before.filter((v) => v != null) as number[];
+    const interp = before.map((b, i) => (b == null || after[i] == null ? null : (b as number) * (1 - prepT) + (after[i] as number) * prepT)).filter((v) => v != null) as number[];
+    const t = plotlyTheme();
+
+    return mCard("preprocessing — step by step", <>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <label className="fld" style={{ margin: 0 }}>Watch column</label>
+        <select value={colName} onChange={(e) => { setPrepCol(e.target.value); setPrepStepIdx(1); }} style={{ maxWidth: 190 }}>{numFeats.map((f) => <option key={f}>{f}</option>)}</select>
+      </div>
+      <div className="chips" style={{ marginBottom: 10 }}>
+        <span className="chip" style={{ cursor: "default", opacity: 0.55 }}>raw</span>
+        {steps.map((st, i) => <span key={i} className={`chip ${i + 1 === idx ? "on" : ""}`} style={{ cursor: "pointer", opacity: trace[i + 1].changed ? 1 : 0.4 }} onClick={() => setPrepStepIdx(i + 1)}>{i + 1}. {st.op}</span>)}
+      </div>
+      <div className="note" style={{ marginBottom: 6 }}>Step {idx}/{stepCount}: <b>{s.op} · {s.method}</b> on {s.cols.join(", ")}{!trace[idx].changed && " — doesn’t touch this column"}</div>
+      {prepFormula(s, bn)}
+      {trace[idx].changed ? <>
+        <label className="fld" style={{ marginTop: 10 }}>Animate the transform — drag t, or ▶ Play (0 = before → 1 = after)</label>
+        <Plot data={[{ type: "histogram", x: interp, marker: { color: prepT < 0.5 ? "#5b7cff" : "#f59e0b" }, opacity: 0.85 }]} layout={{ ...chartLayout(t, `t = ${prepT.toFixed(2)}`, colName, "count"), showlegend: false }} style={{ height: 240 }} />
+        <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
+          <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Play"}</button>
+          <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
+        </div>
+        <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(after)}</div>
+      </> : <div className="note" style={{ marginTop: 8 }}>This step changes other columns, so “{colName}” is unchanged here — pick a step that affects it, or switch columns.</div>}
+      <div className="row" style={{ gap: 8, marginTop: 12 }}>
+        <button className="btn ghost sm" disabled={idx <= 1} onClick={() => setPrepStepIdx(idx - 1)}>← Prev step</button>
+        <button className="btn ghost sm" disabled={idx >= stepCount} onClick={() => setPrepStepIdx(idx + 1)}>Next step →</button>
+      </div>
+      {catBlock}
+    </>);
   }
   function mathModel() {
     const A = algo;

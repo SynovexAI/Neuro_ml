@@ -609,6 +609,28 @@ export function rootSplitMath(model: Model, X: number[][], y: number[], nClasses
   return { feat: root.feat, thr: root.thr, parent, left, right, gain: parent - (yl.length / y.length) * left - (yr.length / y.length) * right, nL: yl.length, nR: yr.length, metric: reg ? "variance" : "gini" };
 }
 
+// Full numeric-column values after EACH preprocessing step (cumulative) — powers
+// the maths-mode step-by-step animation of a numeric feature transforming.
+export interface PrepColStep { label: string; op: string; method: string; changed: boolean; values: (number | null)[]; }
+export function prepColTrace(ds: Dataset, steps: PrepStep[], colName: string): PrepColStep[] {
+  const col = ds.columns.find((c) => c.name === colName);
+  if (!col || col.type !== "num") return [];
+  let cur: (number | null)[] = col.values.map((v) => (v == null ? null : Number(v)));
+  const out: PrepColStep[] = [{ label: "raw", op: "raw", method: "source", changed: true, values: [...cur] }];
+  for (const s of steps) {
+    let changed = false;
+    if (s.cols.includes(colName)) {
+      if (s.op === "Impute missing") { cur = imputeNumCol(cur, s.method); changed = true; }
+      else if (s.op === "Scale / normalize") { cur = scaleNumCol(cur, s.method); changed = true; }
+      else if (s.op === "Handle outliers") { cur = outlierNumCol(cur, s.method); changed = true; }
+      else if (s.op === "Transform") { cur = transformNumCol(cur, s.method); changed = true; }
+      else if (s.op === "Bin / discretize") { cur = binNumCol(cur, s.method); changed = true; }
+    }
+    out.push({ label: `${s.op} · ${s.method}`, op: s.op, method: s.method, changed, values: [...cur] });
+  }
+  return out;
+}
+
 export function mean(a: number[]): number { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0; }
 export function std(a: number[]): number { if (a.length < 2) return 0; const m = mean(a); return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); }
 
