@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
-  decisionSurface, learningCurve, gdTrace, gdAnim, rootSplitMath,
+  decisionSurface, learningCurve, gdTrace,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace, scaleNumCol,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
@@ -215,8 +215,6 @@ export default function MlLab() {
   const [showCode, setShowCode] = useState(false);
   const [copied, setCopied] = useState(false);
   const [mlMode, setMlMode] = useState<"package" | "maths">("package");
-  const [animIdx, setAnimIdx] = useState(0);
-  const [animPlaying, setAnimPlaying] = useState(false);
   const [sigZ, setSigZ] = useState(1);
   const [summaryCol, setSummaryCol] = useState("");
   const [prepCol, setPrepCol] = useState("");
@@ -234,6 +232,14 @@ export default function MlLab() {
   const [modelSpeed, setModelSpeed] = useState(260); // ms per row when applying (bigger = slower)
   const modelApplyTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const modelSpeedRef = useRef(260);
+  // Train step: fitting animation → check-metric → verdict.
+  const [trainT, setTrainT] = useState(0);
+  const [checkT, setCheckT] = useState(0);
+  const [trainPhase, setTrainPhase] = useState<"train" | "check">("train");
+  const [trainRunning, setTrainRunning] = useState(false);
+  const [trainSpeed, setTrainSpeed] = useState(200);
+  const trainTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const trainSpeedRef = useRef(200);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -519,19 +525,6 @@ ${evalBlock}`;
   // recomputes it live so the numbers + verdict update as you pick columns.
   useEffect(() => { if (lcData.length && ds && result) runLC(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lcFeats]);
-  // Frames for the gradient-descent animation (only for GD models, in maths mode).
-  const gdAnimData = useMemo(() => {
-    if (mlMode !== "maths" || step !== "train" || !ds || !result) return null;
-    if (!["LogisticRegression", "LinearRegression", "Ridge"].includes(algo)) return null;
-    try {
-      const nums = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
-      const a = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
-      if (task === "classification") { if (nums.length < 2) return null; const b = dbF2 && nums.includes(dbF2) && dbF2 !== a ? dbF2 : (nums.find((x) => x !== a) || nums[1]); return gdAnim(ds, target, a, b, cfgNow()); }
-      return nums.length ? gdAnim(ds, target, a, "", cfgNow()) : null;
-    } catch { return null; }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
-  useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
   const resetStage = () => { setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } };
   // When you move to a different step/column, restart the animation and default the method from that step.
   useEffect(() => { resetStage(); const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); else if (st && st.op === "Scale / normalize") setPrepScaleMethod(st.method); else if (st && st.op === "Encode categorical") setPrepEncodeMethod(st.method); }, [prepStepIdx, prepCol, steps]);
@@ -541,12 +534,9 @@ ${evalBlock}`;
   // Model-step walkthrough resets when the algorithm / task / features change.
   useEffect(() => { setModelStage(0); setModelApplied(0); setModelApplying(false); if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } if (modelApplyTimer.current) { clearInterval(modelApplyTimer.current); modelApplyTimer.current = null; } }, [algo, task, features, target]);
   useEffect(() => () => { if (modelTimer.current) clearInterval(modelTimer.current); if (modelApplyTimer.current) clearInterval(modelApplyTimer.current); }, []);
-  useEffect(() => {
-    if (!animPlaying || !gdAnimData) return;
-    if (animIdx >= gdAnimData.frames.length - 1) { setAnimPlaying(false); return; }
-    const t = setTimeout(() => setAnimIdx((i) => i + 1), 520);
-    return () => clearTimeout(t);
-  }, [animPlaying, animIdx, gdAnimData]);
+  // Train-step walkthrough resets when the model / task / features / retrain change.
+  useEffect(() => { setTrainT(0); setCheckT(0); setTrainPhase("train"); setTrainRunning(false); if (trainTimer.current) { clearInterval(trainTimer.current); trainTimer.current = null; } }, [algo, task, features, target, result]);
+  useEffect(() => () => { if (trainTimer.current) clearInterval(trainTimer.current); }, []);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -646,37 +636,20 @@ ${evalBlock}`;
       <span className="note mono" style={{ marginLeft: "auto" }}>step {Math.min(modelStage, maxStage)} / {maxStage}</span>
     </div>
   );
-  // Animated gradient descent: play the boundary/line improving as the loss drops.
-  function gdAnimView() {
-    if (!gdAnimData) return null;
-    const A = gdAnimData; const fr = A.frames[Math.min(animIdx, A.frames.length - 1)]; const t = plotlyTheme();
-    let data: Record<string, unknown>[]; let title: string;
-    if (!A.reg) {
-      const K = A.classes.length; const colorscale: [number, string][] = [];
-      for (let i = 0; i < K; i++) { const c = PAL_ML[i % PAL_ML.length]; colorscale.push([i / K, c]); colorscale.push([(i + 1) / K, c]); }
-      data = [
-        { type: "heatmap", x: A.xs, y: A.ys, z: fr.z, showscale: false, colorscale, zmin: -0.5, zmax: K - 0.5, opacity: 0.4, hoverinfo: "skip" },
-        ...A.classes.map((cl, ci) => ({ type: "scatter", mode: "markers", name: cl, x: A.points.filter((p) => p.c === ci).map((p) => p.x), y: A.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 6, color: PAL_ML[ci % PAL_ML.length], line: { width: 1, color: t.paper } } })),
-      ];
-      title = `epoch ${fr.ep} · loss ${fr.loss.toFixed(3)}`;
-    } else {
-      data = [
-        { type: "scatter", mode: "markers", name: "data", x: A.points.map((p) => p.x), y: A.points.map((p) => p.y), marker: { size: 6, color: "#5b7cff", opacity: 0.55 } },
-        { type: "scatter", mode: "lines", name: "fit", x: A.xs, y: fr.line, line: { color: "#f59e0b", width: 3 } },
-      ];
-      title = `epoch ${fr.ep} · MSE ${fr.loss.toFixed(2)}`;
-    }
-    const layout = { ...chartLayout(t, title, dbF1 || "x", A.reg ? target : (dbF2 || "y")), showlegend: false };
-    return <div style={{ marginTop: 10 }}>
-      <Plot data={data} layout={layout} style={{ height: 340 }} />
-      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-        <button className="btn sm" onClick={() => { if (animIdx >= A.frames.length - 1) setAnimIdx(0); setAnimPlaying((p) => !p); }}>{animPlaying ? "⏸ Pause" : "▶ Play training"}</button>
-        <input type="range" min={0} max={A.frames.length - 1} value={Math.min(animIdx, A.frames.length - 1)} onChange={(e) => { setAnimPlaying(false); setAnimIdx(+e.target.value); }} style={{ flex: 1 }} />
-        <span className="mono note">epoch {fr.ep}</span>
-      </div>
-      <div className="note" style={{ marginTop: 4 }}>{A.reg ? "Watch the line shift & tilt to minimise squared error as w updates each epoch." : "Watch the coloured regions bend to separate the classes as the weights update — gradient descent minimising the loss, live."}</div>
-    </div>;
+  // Train-step controls: fit the model (fills the table + animation), then check the metric.
+  const trainStop = () => { if (trainTimer.current) { clearInterval(trainTimer.current); trainTimer.current = null; } setTrainRunning(false); };
+  function trainRun(kind: "train" | "check", total: number) {
+    if (trainTimer.current) { trainStop(); return; } // toggle pause
+    setTrainPhase(kind);
+    if (kind === "train") setTrainT((a) => (a >= total ? 0 : a)); else setCheckT((a) => (a >= total ? 0 : a));
+    setTrainRunning(true);
+    trainTimer.current = setInterval(() => {
+      const bump = (a: number) => { if (a >= total) { if (trainTimer.current) { clearInterval(trainTimer.current); trainTimer.current = null; } setTrainRunning(false); return a; } return a + 1; };
+      if (kind === "train") setTrainT(bump); else setCheckT(bump);
+    }, trainSpeedRef.current);
   }
+  const setTrainSpeedFn = (ms: number) => { setTrainSpeed(ms); trainSpeedRef.current = ms; };
+  const trainReset = () => { trainStop(); setTrainT(0); setCheckT(0); setTrainPhase("train"); };
   // Interactive sigmoid: drag z, see the probability.
   function sigmoidView() {
     const t = plotlyTheme(); const xs: number[] = [], ys: number[] = [];
@@ -1239,43 +1212,207 @@ ${evalBlock}`;
     </>);
   }
   function mathTrain() {
-    if (!ds || !result) return <div className="note">Train the model to see the numbers.</div>;
-    let gt = null, sp = null, X0: number[] | undefined;
-    try { const b = buildMatrix(ds, features, target, task, steps); const nc = b.classes?.length || 0; gt = gdTrace(cfgNow(), b.X, b.y, nc); sp = modelRef.current ? rootSplitMath(modelRef.current, b.X, b.y, nc) : null; X0 = b.X[0]; } catch { /* ignore */ }
-    void X0;
-    if (gt && gt.snaps.length) {
-      const last = gt.snaps[gt.snaps.length - 1];
-      return mCard("gradient descent — watch w update", <>
-        <div className="note" style={{ marginBottom: 8 }}>Each epoch nudges every weight <b>downhill</b> on the loss by the gradient, scaled by the learning rate <Katex tex={`\\eta=${gt.lr}`} />:</div>
-        <div className="mathrow"><Katex block tex={`\\mathbf{w} \\leftarrow \\mathbf{w} - \\eta\\,\\nabla_{\\mathbf w}\\mathcal{L}`} /></div>
-        {gdAnimView()}
-        <div className="mathrow" style={{ marginTop: 10 }}><Katex tex={`\\text{first step: } w_1: 0 - ${gt.lr}\\times(${gt.grad0[1]?.toFixed(3) ?? "0"}) = ${(-gt.lr * (gt.grad0[1] ?? 0)).toFixed(4)}`} /></div>
-        <label className="fld" style={{ marginTop: 12 }}>Per-epoch (loss ↓ as the gradient shrinks)</label>
-        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
-          <tr><th>epoch</th><th>loss</th><th>‖∇‖</th><th>b</th><th>w₁</th><th>w₂</th></tr>
-          {gt.snaps.map((s) => <tr key={s.ep}><td>{s.ep}</td><td className="mono">{s.loss.toFixed(4)}</td><td className="mono">{s.gnorm.toFixed(4)}</td><td className="mono">{s.w[0]?.toFixed(3)}</td><td className="mono">{s.w[1]?.toFixed(3)}</td><td className="mono">{s.w[2]?.toFixed(3)}</td></tr>)}
-        </tbody></table></div>
-        <div className="note" style={{ marginTop: 8 }}>After {gt.snaps[gt.snaps.length - 1].ep + 1} epochs the loss settled at <b>{last.loss.toFixed(4)}</b> and the gradient is tiny ({last.gnorm.toFixed(4)}) — it has converged.</div>
-      </>);
+    if (!ds || !result || !modelRef.current) return <div className="note">Train the model first (▶ Train model, above) — then this walks through how it was fitted and how well it scores.</div>;
+    let b: ReturnType<typeof buildMatrix> | null = null;
+    try { b = buildMatrix(ds, features, target, task, steps); } catch { b = null; }
+    if (!b || !b.X.length) return <div className="note">Train the model first to see how it learns.</div>;
+    const isReg = task === "regression";
+    const kind = modelKind;
+    const m = modelRef.current;
+    const names = b.featureNames, classes = b.classes, K = classes?.length ?? 0;
+    const label = MODEL_INFO[algo]?.label ?? algo;
+    // geometry (own copy so it's independent of the model card)
+    const PX0 = 30, PX1 = 344, PYb = 288, PYt = 22;
+    const c01 = (t: number) => (Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0);
+    const sx = (t: number) => PX0 + (PX1 - PX0) * c01(t);
+    const sy = (t: number) => PYb + (PYt - PYb) * c01(t);
+    const fv = (x: number | undefined, dp = 2) => (typeof x === "number" && Number.isFinite(x) ? x.toFixed(dp) : "—");
+    const svg = (kids: React.ReactNode) => <svg viewBox="0 0 360 310" style={{ width: "100%", borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}><rect x={PX0} y={PYt} width={PX1 - PX0} height={PYb - PYt} fill="none" stroke="var(--border)" />{kids}</svg>;
+    const idxF = names.indexOf(dbF1) >= 0 ? names.indexOf(dbF1) : 0;
+    const idxG = names.indexOf(dbF2) >= 0 && names.indexOf(dbF2) !== idxF ? names.indexOf(dbF2) : Math.min(names.length - 1, idxF + 1);
+    const col = (j: number) => b!.X.map((r) => (Number.isFinite(r[j]) ? r[j] : NaN));
+    const nrm = (arr: number[]) => { const f = arr.filter((v) => Number.isFinite(v)); const mn = f.length ? Math.min(...f) : 0, mx = f.length ? Math.max(...f) : 1, d = (mx - mn) || 1; return { mn, mx, z: arr.map((v) => (Number.isFinite(v) ? (v - mn) / d : 0)) }; };
+    const PAL = PAL_ML;
+
+    // ── test split + predictions (for the check phase) ──
+    const { Xte, yte } = split(b.X, b.y, testSize);
+    const preds = predict(m, Xte);
+    const nTe = Xte.length;
+
+    // ── TRAINING spec ──
+    let trainIntro = "", trainTotal = 0, trainUnit = "step", trainNote = "";
+    let trainCols: string[] = [], trainRows: (string | number)[][] = [];
+    let trainMath: (t: number) => [string, string][] = () => [];
+    let trainViz: (t: number) => React.ReactNode = () => svg(null);
+
+    if (kind === "gd") {
+      const gt = gdTrace(cfgNow(), b.X, b.y, K);
+      const snaps = gt?.snaps ?? [];
+      trainTotal = snaps.length; trainUnit = "epoch";
+      trainIntro = "Training loops over epochs: each one computes the gradient of the loss and steps every weight downhill. Watch the loss and ‖∇‖ shrink until they flatten — that's convergence.";
+      trainCols = ["epoch", "loss", "‖∇‖", "b", "w₁", "w₂"];
+      trainRows = snaps.map((s) => [s.ep, fv(s.loss, 4), fv(s.gnorm, 4), fv(s.w[0], 3), fv(s.w[1], 3), fv(s.w[2], 3)]);
+      trainMath = (t) => { const s = snaps[Math.min(Math.max(t - 1, 0), snaps.length - 1)]; if (!s) return []; return [
+        ["update rule", "\\mathbf w \\leftarrow \\mathbf w - \\eta\\,\\nabla_{\\mathbf w}\\mathcal L"],
+        [`epoch ${s.ep} (η=${gt!.lr})`, `\\mathcal L = ${fv(s.loss, 4)},\\ \\lVert\\nabla\\rVert = ${fv(s.gnorm, 4)}`],
+        ["weights now", `b=${fv(s.w[0], 3)},\\ w_1=${fv(s.w[1], 3)},\\ w_2=${fv(s.w[2], 3)}`],
+      ]; };
+      const fA = nrm(col(idxF)), fB = nrm(col(idxG)); const yn = nrm(b.y);
+      trainNote = isReg ? "loss falls as the line tilts to fit; " : "loss falls as the boundary rotates to separate the classes; ";
+      trainViz = (t) => {
+        const s = snaps[Math.min(Math.max(t - 1, 0), snaps.length - 1)]; const w = s?.w ?? [];
+        const lmax = Math.max(...snaps.map((q) => q.loss), 1e-6), lmin = Math.min(...snaps.map((q) => q.loss));
+        const lx = (e: number) => PX0 + (PX1 - PX0) * (e / ((trainTotal - 1) || 1));
+        const lyv = (v: number) => 40 + (120 - 40) * (1 - (v - lmin) / ((lmax - lmin) || 1));
+        const shown = Math.max(1, Math.min(t, trainTotal));
+        // bottom band scatter map (y 160..292)
+        const bY = (v01: number) => 292 - v01 * 132;
+        const kids: React.ReactNode[] = [
+          <text key="lh" x={PX0} y={32} fill="var(--faint)" fontSize={10} fontFamily="monospace">loss ↓ over epochs</text>,
+          <polyline key="lc" points={snaps.slice(0, shown).map((q, e) => `${lx(e)},${lyv(q.loss)}`).join(" ")} fill="none" stroke="#3ecf7f" strokeWidth={2} />,
+          <line key="sep" x1={PX0} y1={140} x2={PX1} y2={140} stroke="var(--border)" />,
+          <text key="bh" x={PX0} y={156} fill="var(--faint)" fontSize={10} fontFamily="monospace">{isReg ? "fitted line vs data" : "decision boundary"}</text>,
+        ];
+        b!.X.forEach((_, i) => kids.push(<circle key={"p" + i} cx={sx(fA.z[i])} cy={bY(isReg ? yn.z[i] : fB.z[i])} r={3.5} fill={isReg ? "#5b7cff" : PAL[b!.y[i] % PAL.length]} opacity={0.7} />));
+        if (w.length) {
+          if (isReg) { const line: string[] = []; for (let q = 0; q <= 20; q++) { const xf = fA.mn + (fA.mx - fA.mn) * (q / 20); const yh = w[0] + (w[idxF + 1] || 0) * xf; line.push(`${sx((xf - fA.mn) / ((fA.mx - fA.mn) || 1))},${bY((yh - (nrm(b!.y).mn)) / (((nrm(b!.y).mx) - (nrm(b!.y).mn)) || 1))}`); } kids.push(<polyline key="fit" points={line.join(" ")} fill="none" stroke="#f59e0b" strokeWidth={2.5} />); }
+          else { const wF = w[idxF + 1] || 1e-6, wG = w[idxG + 1] || 1e-6, w0 = w[0] || 0; const line: string[] = []; for (let q = 0; q <= 20; q++) { const xf = fA.mn + (fA.mx - fA.mn) * (q / 20); const xg = -(w0 + wF * xf) / wG; line.push(`${sx((xf - fA.mn) / ((fA.mx - fA.mn) || 1))},${bY((xg - fB.mn) / ((fB.mx - fB.mn) || 1))}`); } kids.push(<polyline key="bd" points={line.join(" ")} fill="none" stroke="#a855f7" strokeWidth={2} />); }
+        }
+        return svg(kids);
+      };
+    } else if (kind === "tree" || kind === "forest") {
+      const roots = kind === "forest" ? ((m as unknown as { trees: unknown[] }).trees || []) : [(m as unknown as { root: unknown }).root];
+      type TN = { leaf: boolean; feat?: number; thr?: number; n: number; left?: TN; right?: TN; value?: number };
+      const laidOut: { node: TN; x: number; y: number; px?: number; py?: number; ri: number }[] = [];
+      const lay = (node: TN | undefined, depth: number, x0: number, x1: number, px?: number, py?: number) => { if (!node || depth > 3) return; const x = (x0 + x1) / 2, y = 40 + depth * 58; laidOut.push({ node, x, y, px, py, ri: 0 }); if (!node.leaf) { lay(node.left, depth + 1, x0, x, x, y); lay(node.right, depth + 1, x, x1, x, y); } };
+      lay(roots[0] as TN, 0, PX0 + 8, PX1 - 8);
+      laidOut.sort((a, c) => a.y - c.y || a.x - c.x).forEach((nd, i) => { nd.ri = i; });
+      trainTotal = kind === "forest" ? Math.min(roots.length, 8) : laidOut.length;
+      trainUnit = kind === "forest" ? "tree" : "node";
+      trainIntro = kind === "forest"
+        ? "Training fits many trees — each on its own bootstrap resample with a random feature subset. More trees cut variance; predictions are averaged/voted."
+        : "Training grows the tree greedily: at each node it keeps the split with the highest impurity gain, then recurses on each side until pure or max depth.";
+      trainCols = kind === "forest" ? ["tree", "depth", "nodes"] : ["node", "feature", "≤ thr", "samples"];
+      const depthOf = (nd: TN): number => (nd.leaf ? 1 : 1 + Math.max(depthOf(nd.left as TN), depthOf(nd.right as TN)));
+      const countOf = (nd: TN): number => (nd.leaf ? 1 : 1 + countOf(nd.left as TN) + countOf(nd.right as TN));
+      trainRows = kind === "forest"
+        ? (roots.slice(0, trainTotal) as TN[]).map((r, i) => [`T${i + 1}`, depthOf(r), countOf(r)])
+        : laidOut.map((l, i) => [i === 0 ? "root" : `n${i}`, l.node.leaf ? "leaf" : (names[l.node.feat ?? 0] ?? `#${l.node.feat}`).slice(0, 10), l.node.leaf ? "—" : fv(l.node.thr), l.node.n]);
+      trainMath = (t) => kind === "forest"
+        ? [["for each tree", "\\text{bootstrap } n \\text{ rows} + \\text{random features}"], [`tree ${Math.min(t, trainTotal) || 1}`, `\\text{fit } T_{${Math.min(t, trainTotal) || 1}} \\text{ independently}`], ["combine", isReg ? "\\hat y = \\tfrac1m\\sum_i T_i" : "\\hat y = \\text{mode}\\{T_i\\}"]]
+        : (() => { const l = laidOut[Math.min(Math.max(t - 1, 0), laidOut.length - 1)]; if (!l) return []; return [["at each node", "\\text{gain} = G - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R"], [l.node.leaf ? "leaf" : "split", l.node.leaf ? "\\text{pure / max depth reached}" : `\\text{${(names[l.node.feat ?? 0] ?? "x").replace(/[^a-zA-Z0-9 ]/g, " ")}} \\le ${fv(l.node.thr)}`], ["samples here", `n = ${l.node.n}`]]; })();
+      trainNote = kind === "forest" ? "trees fit one at a time; each sees a different resample" : "the tree grows node by node, most-informative split first";
+      trainViz = (t) => {
+        if (kind === "forest") { const tx = [80, 145, 210, 275]; const kids: React.ReactNode[] = []; for (let i = 0; i < Math.min(4, trainTotal); i++) { const on = t > i; const x = tx[i]; kids.push(<circle key={"n" + i} cx={x} cy={110} r={on ? 7 : 5} fill="#a855f7" opacity={on ? 1 : 0.25} />, <line key={"la" + i} x1={x} y1={110} x2={x - 16} y2={158} stroke="var(--faint)" opacity={on ? 1 : 0.2} />, <line key={"lb" + i} x1={x} y1={110} x2={x + 16} y2={158} stroke="var(--faint)" opacity={on ? 1 : 0.2} />, <circle key={"cl" + i} cx={x - 16} cy={170} r={5} fill={PAL[0]} opacity={on ? 0.9 : 0.2} />, <circle key={"cr" + i} cx={x + 16} cy={170} r={5} fill={PAL[1]} opacity={on ? 0.9 : 0.2} />, <text key={"t" + i} x={x - 8} y={98} fill="var(--faint)" fontSize={11} fontFamily="monospace">T{i + 1}</text>); } kids.push(<text key="cap" x={100} y={240} fill="var(--faint)" fontSize={11} fontFamily="monospace">{Math.min(t, trainTotal)} / {trainTotal} trees fit</text>); return svg(kids); }
+        const kids: React.ReactNode[] = [];
+        laidOut.forEach((l, i) => { const on = t > l.ri; if (l.px != null && on) kids.push(<line key={"e" + i} x1={l.px} y1={l.py} x2={l.x} y2={l.y} stroke="var(--border-strong)" />); });
+        laidOut.forEach((l, i) => { const on = t > l.ri; const cur = t - 1 === l.ri; kids.push(<circle key={"n" + i} cx={l.x} cy={l.y} r={cur ? 9 : 7} fill={l.node.leaf ? "#3ecf7f" : "#a855f7"} opacity={on ? 1 : 0.18} stroke={cur ? "var(--text)" : undefined} strokeWidth={cur ? 1.5 : undefined} />); });
+        return svg(kids);
+      };
+    } else if (kind === "gnb") {
+      const gm = m as unknown as { means: number[][]; vars: number[][]; priors: number[] };
+      const nf = Math.min(names.length, 3);
+      const cells: { k: number; j: number }[] = [];
+      for (let k = 0; k < K; k++) for (let j = 0; j < nf; j++) cells.push({ k, j });
+      trainTotal = cells.length; trainUnit = "stat";
+      trainIntro = "“Training” Gaussian NB is one pass of bookkeeping — no iteration. For each class and feature it measures the mean and variance, and counts rows for the prior.";
+      trainCols = ["class", "feature", "μ", "σ²", "prior"];
+      trainRows = cells.map(({ k, j }) => [String(classes?.[k] ?? k), (names[j] ?? `#${j}`).slice(0, 10), fv(gm.means[k]?.[j]), fv(gm.vars[k]?.[j]), fv(gm.priors[k])]);
+      trainMath = (t) => { const c = cells[Math.min(Math.max(t - 1, 0), cells.length - 1)] || cells[0]; if (!c) return []; return [["accumulate", "\\mu = \\tfrac1n\\sum x,\\quad \\sigma^2 = \\tfrac1n\\sum (x-\\mu)^2"], [`class ${classes?.[c.k] ?? c.k}, ${names[c.j] ?? c.j}`, `\\mu = ${fv(gm.means[c.k]?.[c.j])},\\ \\sigma^2 = ${fv(gm.vars[c.k]?.[c.j])}`], ["prior", `P(y) = ${fv(gm.priors[c.k])}`]]; };
+      trainNote = "each class·feature statistic measured in one scan of the rows";
+      trainViz = (t) => { const rng = nrm(col(idxF)); const bell = (x: number, mu: number, va: number) => Math.exp(-((x - mu) ** 2) / (2 * (va || 1))); const kids: React.ReactNode[] = []; const seen = Math.min(t, trainTotal); for (let k = 0; k < K; k++) { const revealed = cells.slice(0, seen).some((c) => c.k === k && c.j === idxF); const mu = gm.means[k]?.[idxF] ?? 0, va = gm.vars[k]?.[idxF] ?? 1; const muN = (mu - rng.mn) / ((rng.mx - rng.mn) || 1); const pts: string[] = []; for (let q = 0; q <= 60; q++) { const xn = q / 60; const x = rng.mn + (rng.mx - rng.mn) * xn; pts.push(`${sx(xn)},${sy(bell(x, mu, va) * 0.9)}`); } kids.push(<polyline key={"b" + k} points={pts.join(" ")} fill="none" stroke={PAL[k % PAL.length]} strokeWidth={2} opacity={revealed ? 1 : 0.15} />); if (revealed) kids.push(<line key={"mu" + k} x1={sx(muN)} y1={sy(bell(mu, mu, va) * 0.9)} x2={sx(muN)} y2={PYb} stroke={PAL[k % PAL.length]} strokeDasharray="3 3" opacity={0.5} />); } return svg(kids); };
+    } else { // knn
+      const store = Math.min(b.X.length, 40);
+      trainTotal = store; trainUnit = "row";
+      trainIntro = "KNN has no training loop — fitting just stores every row verbatim. All the real work is deferred to prediction time (measure distance, keep k nearest, vote/average).";
+      trainCols = ["row", (names[idxF] ?? "f1").slice(0, 8), (names[idxG] ?? "f2").slice(0, 8), "label"];
+      trainRows = [...Array(store).keys()].map((i) => [i, fv(b!.X[i]?.[idxF]), fv(b!.X[i]?.[idxG]), String(isReg ? fv(b!.y[i]) : (classes?.[b!.y[i]] ?? b!.y[i]))]);
+      trainMath = (t) => [["fit", "\\text{store all rows as-is}"], ["stored", `${Math.min(t, trainTotal)} \\text{ rows kept in memory}`], ["parameters", "\\text{none learned}"]];
+      trainNote = "rows are simply memorised — no parameters are fit";
+      const fA = nrm(col(idxF)), fB = nrm(col(idxG));
+      trainViz = (t) => svg([...Array(Math.min(t, trainTotal)).keys()].map((i) => <circle key={"p" + i} cx={sx(fA.z[i])} cy={sy(fB.z[i])} r={4} fill={isReg ? "#5b7cff" : PAL[b!.y[i] % PAL.length]} opacity={0.8} />));
     }
-    if (sp) {
-      return mCard("the best split (greedy)", <>
-        <div className="note" style={{ marginBottom: 8 }}>At the root the tree tries every feature/threshold and keeps the one that reduces impurity most:</div>
-        <div className="mathrow"><Katex block tex={`\\text{gain} = ${sp.parent.toFixed(3)} - \\tfrac{${sp.nL}}{${sp.nL + sp.nR}}(${sp.left.toFixed(3)}) - \\tfrac{${sp.nR}}{${sp.nL + sp.nR}}(${sp.right.toFixed(3)}) = ${sp.gain.toFixed(3)}`} /></div>
-        {(() => { const t = plotlyTheme(); return <Plot data={[{ type: "bar", x: ["parent", `left (n=${sp.nL})`, `right (n=${sp.nR})`], y: [sp.parent, sp.left, sp.right], marker: { color: ["#5b7cff", "#3ecf7f", "#f59e0b"] } }]} layout={{ ...chartLayout(t, `${sp.metric} impurity — the split makes each side purer`, "", sp.metric), showlegend: false }} style={{ height: 220 }} />; })()}
-        <div className="note">Chosen split: feature <b>#{sp.feat}</b> ≤ {sp.thr.toFixed(3)} · {sp.metric} drops from {sp.parent.toFixed(3)} to a weighted {(sp.parent - sp.gain).toFixed(3)}. This repeats recursively down the tree.</div>
-      </>);
+
+    // ── CHECK spec ──
+    const checkTotal = nTe;
+    const finalM = result.metrics;
+    let verdict: [string, string, string] = ["", "", "#8a8a86"];
+    let checkMath: (t: number) => [string, string][] = () => [];
+    let checkTiles: (t: number) => [string, string][] = () => [];
+    let checkViz: (t: number) => React.ReactNode = () => svg(null);
+    let checkNote = "", checkH = "";
+
+    if (!isReg) {
+      const conf = (upto: number) => { const M = Array.from({ length: K }, () => new Array(K).fill(0)); for (let i = 0; i < upto; i++) { const a = yte[i], p = preds[i]; if (a < K && p < K) M[a][p]++; } return M; };
+      const correct = (upto: number) => { let c = 0; for (let i = 0; i < upto; i++) if (preds[i] === yte[i]) c++; return c; };
+      const cm = finalM.task === "classification" ? finalM : null;
+      const accF = cm?.accuracy ?? 0;
+      verdict = accF >= 0.9 ? ["Excellent — strong model", "well above baseline on held-out data", "#3ecf7f"] : accF >= 0.8 ? ["Good model", "solid accuracy on the test split", "#3ecf7f"] : accF >= 0.65 ? ["Fair — could improve", "try more features, scaling, or tuning", "#f59e0b"] : ["Weak — needs improvement", "near baseline; rethink features or model", "#ef4444"];
+      checkH = "confusion matrix (test set)";
+      checkMath = (t) => { const c = correct(t); return [["accuracy", "\\text{accuracy} = \\dfrac{\\text{correct}}{\\text{total}}"], ["substitute", `= \\dfrac{${c}}{${t}}`], ["result", `\\text{accuracy} = ${t ? fv(c / t, 3) : "—"}`]]; };
+      checkTiles = (t) => cm ? [["accuracy", t ? fv(correct(t) / t) : "—"], ["precision", fv(cm.precision)], ["recall", fv(cm.recall)], ["F1", fv(cm.f1)]] : [];
+      checkNote = "each test row is predicted and dropped into the matrix";
+      checkViz = (t) => { const M = conf(t); const kv = Math.min(K, 4); const cell = kv <= 2 ? 96 : 62; const gx = 100, gy = 40; const kids: React.ReactNode[] = [<text key="ph" x={gx + 30} y={28} fill="var(--faint)" fontSize={11} fontFamily="monospace">predicted →</text>]; for (let a = 0; a < kv; a++) for (let p = 0; p < kv; p++) { const cx = gx + p * cell, cy = gy + a * cell; const good = a === p; kids.push(<rect key={`r${a}${p}`} x={cx} y={cy} width={cell - 6} height={cell - 6} rx={6} fill={good ? "#3ecf7f" : "#ef4444"} opacity={0.14} />, <rect key={`b${a}${p}`} x={cx} y={cy} width={cell - 6} height={cell - 6} rx={6} fill="none" stroke="var(--border-strong)" />, <text key={`t${a}${p}`} x={cx + (cell - 6) / 2} y={cy + (cell - 6) / 2 + 6} textAnchor="middle" fill={good ? "#3ecf7f" : "#ef4444"} fontSize={cell <= 62 ? 15 : 20} fontFamily="monospace">{M[a][p]}</text>); } return svg(kids); };
+    } else {
+      const ym = yte.reduce((a, v) => a + v, 0) / (yte.length || 1);
+      const ssr = (upto: number) => { let s = 0; for (let i = 0; i < upto; i++) s += (preds[i] - yte[i]) ** 2; return s; };
+      const sst = (upto: number) => { let s = 0; for (let i = 0; i < upto; i++) s += (yte[i] - ym) ** 2; return s; };
+      const rm = finalM.task === "regression" ? finalM : null;
+      const r2F = rm?.r2 ?? 0;
+      verdict = r2F >= 0.8 ? ["Excellent — strong fit", "explains most of the variance", "#3ecf7f"] : r2F >= 0.6 ? ["Good fit", "captures the trend well", "#3ecf7f"] : r2F >= 0.3 ? ["Fair — could improve", "sizeable residuals remain", "#f59e0b"] : ["Weak — needs improvement", "barely beats predicting the mean", "#ef4444"];
+      checkH = "predicted vs actual (test set)";
+      checkMath = (t) => { const ss = ssr(t), mse = t ? ss / t : NaN; return [["MSE", "\\text{MSE} = \\tfrac1n\\sum(\\hat y - y)^2"], ["substitute", `= \\tfrac1{${t}}\\,(${fv(ss)})`], ["result", `\\text{MSE} = ${fv(mse, 3)},\\ \\text{RMSE} = ${fv(Math.sqrt(mse), 3)}`]]; };
+      checkTiles = (t) => { const ss = ssr(t), mse = t ? ss / t : NaN, st = sst(t); return rm ? [["MSE", fv(mse, 3)], ["RMSE", fv(Math.sqrt(mse), 3)], ["R²", t ? fv(1 - ss / (st || 1)) : "—"]] : []; };
+      checkNote = "each test row's prediction is placed against the ŷ = y line";
+      const allV = [...preds, ...yte]; const lo = Math.min(...allV.filter(Number.isFinite)), hi = Math.max(...allV.filter(Number.isFinite)); const sp = (hi - lo) || 1;
+      checkViz = (t) => { const p = (v: number) => (v - lo) / sp; const kids: React.ReactNode[] = [<line key="diag" x1={sx(0)} y1={sy(0)} x2={sx(1)} y2={sy(1)} stroke="var(--faint)" strokeDasharray="5 4" />, <text key="dl" x={sx(0.62)} y={sy(0.72)} fill="var(--faint)" fontSize={11} fontFamily="monospace">ŷ = y</text>]; for (let i = 0; i < Math.min(t, nTe); i++) { kids.push(<line key={"r" + i} x1={sx(p(yte[i]))} y1={sy(p(yte[i]))} x2={sx(p(yte[i]))} y2={sy(p(preds[i]))} stroke="#ef4444" strokeWidth={1} opacity={0.45} />, <circle key={"c" + i} cx={sx(p(yte[i]))} cy={sy(p(preds[i]))} r={4} fill="#5b7cff" opacity={0.8} />); } return svg(kids); };
     }
-    if (modelRef.current?.kind === "gnb") {
-      const m = modelRef.current;
-      return mCard("class statistics learned", <>
-        <div className="note" style={{ marginBottom: 8 }}>“Training” is just measuring each class’s prior and each feature’s mean &amp; variance:</div>
-        <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>class</th><th>prior P(y)</th><th>μ (feat 1)</th><th>σ² (feat 1)</th></tr>
-          {m.priors.map((pr, k) => <tr key={k}><td>{trained?.classes?.[k] ?? k}</td><td className="mono">{pr.toFixed(3)}</td><td className="mono">{m.means[k][0]?.toFixed(3)}</td><td className="mono">{m.vars[k][0]?.toFixed(3)}</td></tr>)}
-        </tbody></table></div>
-      </>);
-    }
-    return mCard("lazy learner (KNN)", <div className="note">KNN does <b>no training</b> — it just stores the {ds.nrows} rows. All the work happens at prediction time: compute the distance to every stored point, keep the {params.n_neighbors || 5} closest, and vote.</div>);
+
+    // ── render ──
+    const inTrain = trainPhase === "train";
+    const tShown = Math.min(trainT, trainTotal);
+    const mathLines = inTrain ? trainMath(trainT) : checkMath(checkT);
+    const tiles = inTrain ? [] : checkTiles(checkT);
+    const checkDone = !inTrain && checkT >= checkTotal;
+    const canCheck = trainT >= trainTotal && trainTotal > 0;
+    const pill = (n: number, txt: string, on: boolean) => <span key={n} className="fx-tag" style={{ width: "auto", padding: "3px 10px", borderRadius: 20, border: "1px solid var(--border)", background: on ? "var(--accent)" : "transparent", color: on ? "#fff" : "var(--faint)" }}>{txt}</span>;
+    return mCard(`${label} — training & evaluation`, <>
+      <div className="row" style={{ gap: 6, marginBottom: 10 }}>{pill(1, "1 · train (fit)", inTrain)}{pill(2, "2 · check", !inTrain)}{pill(3, "3 · verdict", checkDone)}</div>
+      <div className="note" style={{ marginBottom: 10, lineHeight: 1.6 }}>{inTrain ? trainIntro : (isReg ? "Score the fitted model on the held-out test rows: sum the squared errors into MSE/RMSE, and R² vs just predicting the mean." : "Score the fitted model on the held-out test rows: each prediction is checked against the truth and tallied into accuracy and the confusion matrix.")}</div>
+      <div className="prep-2col">
+        <div className="prep-col">
+          <div className="prep-col-h">{inTrain ? "how the model is fitted" : "the metric, computed on the test set"}</div>
+          {mathLines.map(([lab, tex], i) => <div key={i} className="fx-line on" style={{ marginBottom: 8 }}><div className="note" style={{ marginBottom: 2 }}>{lab}</div><Katex block tex={tex} /></div>)}
+          {tiles.length ? <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 4 }}>{tiles.map(([kk, vv], i) => <div key={i} style={{ background: "var(--panel)", borderRadius: 8, padding: "6px 12px", minWidth: 70 }}><div className="note">{kk}</div><div style={{ fontSize: 20, fontWeight: 600 }}>{vv}</div></div>)}</div> : null}
+          {checkDone ? <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 12, padding: "11px 13px", borderRadius: 10, background: `${verdict[2]}22`, color: verdict[2] }}><span style={{ fontSize: 20 }}>🏆</span><span><b style={{ fontSize: 14 }}>{verdict[0]}</b><span className="note" style={{ display: "block", color: verdict[2] }}>{verdict[1]}</span></span></div> : null}
+        </div>
+        <div className="prep-col">
+          <div className="prep-col-h">{inTrain ? (kind === "gd" ? "loss curve + " + (isReg ? "fitted line" : "boundary") : kind === "tree" ? "the tree grows" : kind === "forest" ? "trees fit one by one" : kind === "gnb" ? "class bells form" : "rows stored") : checkH}</div>
+          {inTrain ? trainViz(trainT) : checkViz(checkT)}
+          <div className="note" style={{ marginTop: 8 }}>{inTrain ? (tShown >= trainTotal ? "training complete — " + trainNote : `${trainNote} — ${trainUnit} ${tShown} / ${trainTotal}`) : (checkT >= checkTotal ? `all ${checkTotal} test rows scored` : `${checkNote} — ${Math.min(checkT, checkTotal)} / ${checkTotal}`)}</div>
+        </div>
+      </div>
+      {trainTotal > 0 && <>
+        <div className="prep-col-h" style={{ marginTop: 14 }}>{inTrain ? `the full training log — fills as it ${trainUnit === "epoch" ? "trains" : "builds"}` : "training log (complete)"}</div>
+        <div style={{ overflowX: "auto", maxHeight: 190, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
+          <table className="dtable"><tbody>
+            <tr>{trainCols.map((cc, i) => <th key={i}>{cc}</th>)}</tr>
+            {trainRows.slice(0, inTrain ? tShown : trainTotal).map((r, i) => <tr key={i} style={i === tShown - 1 && inTrain ? { background: "var(--accent)", color: "#fff" } : undefined}>{r.map((cc, j) => <td key={j} className="mono">{cc}</td>)}</tr>)}
+          </tbody></table>
+        </div>
+      </>}
+      <div className="prep-ctl" style={{ flexWrap: "wrap" }}>
+        <button className="btn sm" onClick={() => trainRun("train", trainTotal)}>{trainRunning && inTrain ? "⏸ pause" : (trainT >= trainTotal && trainTotal > 0 ? "↻ re-train" : "▶ train")}</button>
+        <button className="btn sm" disabled={!canCheck} onClick={() => trainRun("check", checkTotal)}>{trainRunning && !inTrain ? "⏸ pause" : `✓ check ${isReg ? "error" : "accuracy"}`}</button>
+        <button className="btn ghost sm" onClick={trainReset}>↺ reset</button>
+        <span className="note mono" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>speed
+          <select className="mini-sel" value={trainSpeed} onChange={(e) => setTrainSpeedFn(+e.target.value)}>
+            <option value={380}>0.5×</option><option value={200}>1×</option><option value={90}>2×</option><option value={35}>4×</option>
+          </select>
+        </span>
+        <span className="note mono" style={{ marginLeft: "auto" }}>{inTrain ? `${trainUnit} ${tShown} / ${trainTotal}` : `row ${Math.min(checkT, checkTotal)} / ${checkTotal}`}</span>
+      </div>
+    </>);
   }
   function mathPredict() {
     if (!ds || !result || !modelRef.current) return null;
