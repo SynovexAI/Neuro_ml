@@ -5,7 +5,7 @@ import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
   decisionSurface, learningCurve, gdTrace, gdAnim, rootSplitMath,
-  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace,
+  splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace, scaleNumCol,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
 } from "@/lib/mlUtils";
@@ -221,9 +221,9 @@ export default function MlLab() {
   const [summaryCol, setSummaryCol] = useState("");
   const [prepCol, setPrepCol] = useState("");
   const [prepStepIdx, setPrepStepIdx] = useState(1);
-  const [prepT, setPrepT] = useState(0);
-  const [prepPlaying, setPrepPlaying] = useState(false);
   const [prepImputeMethod, setPrepImputeMethod] = useState("Mean");
+  const [prepScaleMethod, setPrepScaleMethod] = useState("StandardScaler");
+  const [prepEncodeMethod, setPrepEncodeMethod] = useState("One-Hot");
   const [prepStage, setPrepStage] = useState(0);
   const [prepStagePlaying, setPrepStagePlaying] = useState(false);
   const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -525,14 +525,8 @@ ${evalBlock}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
   useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
-  useEffect(() => { setPrepT(0); setPrepPlaying(false); setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); }, [prepStepIdx, prepCol, steps, prepImputeMethod]);
+  useEffect(() => { setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); else if (st && st.op === "Scale / normalize") setPrepScaleMethod(st.method); else if (st && st.op === "Encode categorical") setPrepEncodeMethod(st.method); }, [prepStepIdx, prepCol, steps, prepImputeMethod, prepScaleMethod, prepEncodeMethod]);
   useEffect(() => () => { if (stageTimer.current) clearInterval(stageTimer.current); }, []);
-  useEffect(() => {
-    if (!prepPlaying) return;
-    if (prepT >= 1) { setPrepPlaying(false); return; }
-    const tm = setTimeout(() => setPrepT((x) => Math.min(1, Math.round((x + 0.02) * 100) / 100)), 120);
-    return () => clearTimeout(tm);
-  }, [prepPlaying, prepT]);
   useEffect(() => {
     if (!animPlaying || !gdAnimData) return;
     if (animIdx >= gdAnimData.frames.length - 1) { setAnimPlaying(false); return; }
@@ -656,8 +650,6 @@ ${evalBlock}`;
       <div className="note" style={{ marginTop: 4 }}>Big positive score → probability near 1, big negative → near 0, z = 0 → exactly 0.5 (the decision line).</div>
     </div>;
   }
-  // A formula revealed stage by stage as the animation (prepT) advances.
-  const stagedFormula = (lines: { tex: string; at: number }[]) => <div style={{ margin: "4px 0 8px" }}>{lines.map((l, i) => <div key={i} className="mathrow" style={{ opacity: prepT >= l.at ? 1 : 0.25, transition: "opacity .25s" }}><Katex block tex={l.tex} /></div>)}</div>;
   const quart = (bn: number[]) => { const s = [...bn].sort((a, b) => a - b); const q = (p: number) => { const i = (s.length - 1) * p, lo = Math.floor(i); return s[lo] + (s[Math.ceil(i)] - s[lo]) * (i - lo); }; return { med: q(0.5), q1: q(0.25), q3: q(0.75) }; };
   function scaleStages(s: PrepStep, bn: number[]): { tex: string; at: number }[] {
     if (!bn.length) return [];
@@ -683,36 +675,51 @@ ${evalBlock}`;
   }
   // Numeric transform (scale / transform / bin / outliers): staged formula + points sliding raw → transformed.
   function numTransformView(colName: string, before: (number | string | null)[], after: (number | string | null)[], s: PrepStep): React.ReactNode {
+    const isScale = s.op === "Scale / normalize";
+    const scaleMethods = ["StandardScaler", "MinMaxScaler", "RobustScaler", "MaxAbsScaler"];
+    const method = isScale ? (scaleMethods.includes(prepScaleMethod) ? prepScaleMethod : (scaleMethods.includes(s.method) ? s.method : "StandardScaler")) : s.method;
     const bn = before.filter((v) => typeof v === "number") as number[];
-    const pairs = subsamplePairs(before, after);
+    const eff: (number | string | null)[] = isScale ? scaleNumCol(before as (number | null)[], method) : after;
+    const pairs = subsamplePairs(before, eff);
     if (!pairs.length) return <div className="note">Nothing numeric to animate here.</div>;
     const rb = pairs.map((p) => p[0]), ra = pairs.map((p) => p[1]);
     const rmin = Math.min(...rb), rmax = Math.max(...rb), amin = Math.min(...ra), amax = Math.max(...ra);
     const rpx = rb.map((x) => 4 + 92 * (x - rmin) / ((rmax - rmin) || 1));
     const apx = ra.map((x) => 4 + 92 * (x - amin) / ((amax - amin) || 1));
+    const stages = scaleStages({ ...s, method }, bn);
+    const nFormula = stages.length; const applySteps = 4; const maxStage = nFormula - 1 + applySteps;
+    const tt = Math.max(0, Math.min(1, (prepStage - (nFormula - 1)) / applySteps));
     const items: { sym: string; desc: string; how?: string; val?: string }[] = [{ sym: "x", desc: "each raw value" }];
     if (bn.length) {
       const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn); const { med, q1, q3 } = quart(bn); const iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1;
-      if (s.op === "Scale / normalize") {
-        if (s.method === "StandardScaler") items.push({ sym: "\\mu", desc: "mean", how: "average of x", val: mu.toFixed(2) }, { sym: "\\sigma", desc: "std deviation", how: "spread of x", val: sd.toFixed(2) });
-        else if (s.method === "MinMaxScaler") items.push({ sym: "\\min", desc: "smallest value", val: mn.toFixed(2) }, { sym: "\\max", desc: "largest value", val: mx.toFixed(2) });
-        else if (s.method === "RobustScaler") items.push({ sym: "\\text{median}", desc: "middle value", val: med.toFixed(2) }, { sym: "\\text{IQR}", desc: "Q3 − Q1", how: "robust spread", val: iqr.toFixed(2) });
-        else if (s.method === "MaxAbsScaler") items.push({ sym: "\\max|x|", desc: "largest magnitude", val: maxabs.toFixed(2) });
+      if (isScale) {
+        if (method === "StandardScaler") items.push({ sym: "\\mu", desc: "mean", how: "average of x", val: mu.toFixed(2) }, { sym: "\\sigma", desc: "std deviation", how: "spread of x", val: sd.toFixed(2) });
+        else if (method === "MinMaxScaler") items.push({ sym: "\\min", desc: "smallest value", val: mn.toFixed(2) }, { sym: "\\max", desc: "largest value", val: mx.toFixed(2) });
+        else if (method === "RobustScaler") items.push({ sym: "\\text{median}", desc: "middle value", val: med.toFixed(2) }, { sym: "\\text{IQR}", desc: "Q3 − Q1", how: "robust spread", val: iqr.toFixed(2) });
+        else if (method === "MaxAbsScaler") items.push({ sym: "\\max|x|", desc: "largest magnitude", val: maxabs.toFixed(2) });
         items.push({ sym: "z", desc: "the scaled output value" });
       } else if (s.op === "Handle outliers") items.push({ sym: "Q_1,\\ Q_3", desc: "quartiles", val: `${q1.toFixed(1)}, ${q3.toFixed(1)}` }, { sym: "\\text{IQR}", desc: "Q3 − Q1", val: iqr.toFixed(2) });
       else if (s.op === "Bin / discretize") items.push({ sym: "\\min,\\max", desc: "column range", val: `${mn.toFixed(1)}, ${mx.toFixed(1)}` }, { sym: "k", desc: "number of bins" });
     }
     return <>
-      {stagedFormula(scaleStages(s, bn))}
+      {isScale && <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <label className="fld" style={{ margin: 0 }}>Method</label>
+        <select value={method} onChange={(e) => setPrepScaleMethod(e.target.value)} style={{ maxWidth: 190 }}>{scaleMethods.map((m) => <option key={m}>{m}</option>)}</select>
+      </div>}
       {varLegend(items)}
-      <label className="fld" style={{ marginTop: 6 }}>Every value slides raw → transformed (drag t or ▶ Play)</label>
-      <div className="num-line"><div className="num-mid" />{pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * prepT}%` }} />)}</div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-        <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Play"}</button>
-        <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
-        <span className="mono note">t={prepT.toFixed(2)}</span>
+      <div className="prep-2col">
+        <div className="prep-col">
+          <div className="prep-col-h">the formula, step by step</div>
+          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
+        </div>
+        <div className="prep-col">
+          <div className="prep-col-h">every value slides raw → transformed</div>
+          <div className="num-line"><div className="num-mid" />{pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * tt}%` }} />)}</div>
+          <div className="note" style={{ marginTop: 8 }}>{tt < 1 ? "keep stepping — z is applied to more of the column" : "all values are now scaled"}</div>
+        </div>
       </div>
-      <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(after)}</div>
+      {stageControls(maxStage)}
+      <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(eff)}</div>
     </>;
   }
   const prepStat = (vs: (number | string | null)[]) => { const a = vs.filter((v) => typeof v === "number") as number[]; return a.length ? `μ=${mean(a).toFixed(2)}, σ=${std(a).toFixed(2)}, min=${Math.min(...a).toFixed(1)}, max=${Math.max(...a).toFixed(1)}` : "—"; };
@@ -768,19 +775,35 @@ ${evalBlock}`;
   function catOneHotView(colName: string): React.ReactNode {
     if (!ds) return null;
     const col = ds.columns.find((c) => c.name === colName)!;
-    const cats = Array.from(new Set(col.values.filter((v) => v != null).map(String))).slice(0, 4);
+    const methods = ["One-Hot", "Ordinal", "Frequency", "Count", "Binary"];
+    const method = methods.includes(prepEncodeMethod) ? prepEncodeMethod : "One-Hot";
+    const cats = Array.from(new Set(col.values.filter((v) => v != null).map(String)));
+    const catsShown = cats.slice(0, 6);
+    const idxMap = new Map(cats.map((c, i) => [c, i]));
+    const counts = new Map<string, number>(); let n = 0; col.values.forEach((v) => { if (v != null) { const k = String(v); counts.set(k, (counts.get(k) || 0) + 1); n++; } });
     const rowIdx = col.values.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0).slice(0, 5);
+    let headers: string[]; let valsOf: (v: string) => string[]; let note: React.ReactNode; let oneHot = false;
+    if (method === "Ordinal") { headers = [`${colName}_idx`]; valsOf = (v) => [String(idxMap.get(v) ?? 0)]; note = <>Each category → an integer <b>index</b> (compact — but implies a fake order).</>; }
+    else if (method === "Frequency") { headers = [`${colName}_freq`]; valsOf = (v) => [((counts.get(v) || 0) / (n || 1)).toFixed(2)]; note = <>Each category → how often it appears: <b>count ÷ n</b>.</>; }
+    else if (method === "Count") { headers = [`${colName}_count`]; valsOf = (v) => [String(counts.get(v) || 0)]; note = <>Each category → its raw <b>count</b> in the data.</>; }
+    else if (method === "Binary") { const bits = Math.max(1, Math.ceil(Math.log2(cats.length || 1))); headers = Array.from({ length: bits }, (_, b) => `b${b}`); valsOf = (v) => { const i = idxMap.get(v) ?? 0; return Array.from({ length: bits }, (_, b) => String((i >> b) & 1)); }; note = <>Each category’s index written in <b>binary bits</b> — fewer columns than one-hot.</>; }
+    else { headers = catsShown; valsOf = (v) => catsShown.map((c) => (c === v ? "1" : "0")); note = <>A column per category; each row puts a <b>1</b> in its own column, 0 elsewhere.</>; oneHot = true; }
     const maxStage = Math.max(0, rowIdx.length - 1);
-    const cells: React.ReactNode[] = [<div key="corner" />, ...cats.map((c) => <div key={`h${c}`} className="oh-h">{c}</div>)];
+    const cells: React.ReactNode[] = [<div key="corner" className="oh-lab" style={{ color: "var(--faint)" }}>{colName}</div>, ...headers.map((h) => <div key={`h${h}`} className="oh-h">{h}</div>)];
     rowIdx.forEach((ri, r) => {
-      const val = String(col.values[ri]); const on = prepStage >= r;
+      const val = String(col.values[ri]); const on = prepStage >= r; const vals = valsOf(val);
       cells.push(<div key={`l${ri}`} className="oh-lab" style={{ opacity: on ? 1 : 0.4 }}>“{val}”</div>);
-      cats.forEach((c) => { const hit = c === val; cells.push(<div key={`${ri}-${c}`} className={`oh-c ${hit && on ? "on" : ""}`} style={{ opacity: on ? 1 : 0.4 }}>{hit ? (on ? "1" : "0") : "0"}</div>); });
+      vals.forEach((vv, ci) => { const hit = oneHot && vv === "1"; cells.push(<div key={`${ri}-${ci}`} className={`oh-c ${hit && on ? "on" : ""}`} style={{ opacity: on ? 1 : 0.4, color: on && !oneHot ? "var(--text)" : undefined, fontWeight: on && !oneHot ? 600 : undefined }}>{on ? vv : (oneHot ? "0" : "·")}</div>); });
     });
     return <>
-      <div className="note" style={{ marginBottom: 10 }}>One-hot makes a column per category; each row puts a <b>1</b> in its own category’s column and <b>0</b> everywhere else — text becomes numbers with no fake ordering.</div>
-      <div className="prep-col-h">the indicator matrix, one row at a time</div>
-      <div className="oh-grid" style={{ gridTemplateColumns: `auto repeat(${cats.length}, minmax(60px, 1fr))` }}>{cells}</div>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+        <label className="fld" style={{ margin: 0 }}>Method</label>
+        <select value={method} onChange={(e) => setPrepEncodeMethod(e.target.value)} style={{ maxWidth: 150 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
+        <span className="note">{cats.length} categories</span>
+      </div>
+      <div className="note" style={{ marginBottom: 10 }}>{note}</div>
+      <div className="prep-col-h">the encoded output, one row at a time</div>
+      <div className="oh-grid" style={{ gridTemplateColumns: `auto repeat(${headers.length}, minmax(58px, 1fr))` }}>{cells}</div>
       {stageControls(maxStage)}
     </>;
   }
