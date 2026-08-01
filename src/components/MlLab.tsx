@@ -224,6 +224,9 @@ export default function MlLab() {
   const [prepT, setPrepT] = useState(0);
   const [prepPlaying, setPrepPlaying] = useState(false);
   const [prepImputeMethod, setPrepImputeMethod] = useState("Mean");
+  const [prepStage, setPrepStage] = useState(0);
+  const [prepStagePlaying, setPrepStagePlaying] = useState(false);
+  const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -522,7 +525,8 @@ ${evalBlock}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
   useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
-  useEffect(() => { setPrepT(0); setPrepPlaying(false); const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); }, [prepStepIdx, prepCol, steps]);
+  useEffect(() => { setPrepT(0); setPrepPlaying(false); setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); }, [prepStepIdx, prepCol, steps, prepImputeMethod]);
+  useEffect(() => () => { if (stageTimer.current) clearInterval(stageTimer.current); }, []);
   useEffect(() => {
     if (!prepPlaying) return;
     if (prepT >= 1) { setPrepPlaying(false); return; }
@@ -583,6 +587,22 @@ ${evalBlock}`;
   // What each symbol in a formula means + the value it takes on this data.
   const varLegend = (items: { sym: string; desc: string; how?: string; val?: string }[]) => (
     <div className="var-legend"><div className="vl-title">what each symbol means · from your data</div>{items.map((it, i) => <div key={i} className="vl-row"><span className="vl-sym"><Katex tex={it.sym} /></span><span className="vl-desc">{it.desc}{it.how ? <span className="vl-how"> — {it.how}</span> : null}</span>{it.val != null && <span className="vl-val mono">{it.val}</span>}</div>)}</div>
+  );
+  // Discrete step controls (formula line → then one cell at a time) so it's easy to follow.
+  function stagePlay(maxStage: number) {
+    if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; setPrepStagePlaying(false); return; }
+    setPrepStagePlaying(true);
+    stageTimer.current = setInterval(() => { setPrepStage((s) => { if (s >= maxStage) { if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } setPrepStagePlaying(false); return s; } return s + 1; }); }, 950);
+  }
+  const stageStop = () => { if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } setPrepStagePlaying(false); };
+  const stageControls = (maxStage: number) => (
+    <div className="prep-ctl">
+      <button className="btn ghost sm" disabled={prepStage <= 0} onClick={() => { stageStop(); setPrepStage((s) => Math.max(0, s - 1)); }}>← back</button>
+      <button className="btn sm" disabled={prepStage >= maxStage} onClick={() => { stageStop(); setPrepStage((s) => Math.min(maxStage, s + 1)); }}>step →</button>
+      <button className="btn ghost sm" onClick={() => stagePlay(maxStage)}>{prepStagePlaying ? "⏸ pause" : "▶ auto"}</button>
+      <button className="btn ghost sm" onClick={() => { stageStop(); setPrepStage(0); }}>↺ reset</button>
+      <span className="note mono" style={{ marginLeft: "auto" }}>stage {Math.min(prepStage, maxStage) + 1} / {maxStage + 1}</span>
+    </div>
   );
 
   // Animated gradient descent: play the boundary/line improving as the loss drops.
@@ -717,25 +737,31 @@ ${evalBlock}`;
     }
     const missIdx = before.map((v, i) => (v == null ? i : -1)).filter((i) => i >= 0);
     const showIdx = Array.from(new Set([0, 1, 2, 3, ...missIdx.slice(0, 4)])).filter((i) => i < before.length).sort((a, b) => a - b).slice(0, 8);
+    const nFormula = stages.length;
+    const missVisible = showIdx.filter((i) => before[i] == null);
+    const maxStage = nFormula - 1 + missVisible.length;
     return <>
       <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <label className="fld" style={{ margin: 0 }}>Method</label>
-        <select value={method} onChange={(e) => { setPrepImputeMethod(e.target.value); setPrepT(0); setPrepPlaying(false); }} style={{ maxWidth: 170 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
-        <span className="note">{missIdx.length} missing → fill with <b>{fill}</b></span>
+        <select value={method} onChange={(e) => setPrepImputeMethod(e.target.value)} style={{ maxWidth: 170 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
+        <span className="note">{missIdx.length} missing in “{colName}” → fill each with the {method.toLowerCase()} = <b>{fill}</b></span>
       </div>
-      {stagedFormula(stages)}
       {varLegend(impItems)}
-      {missIdx.length ? <>
-        <label className="fld" style={{ marginTop: 6 }}>Every ∅ fills with the {method.toLowerCase()} value (▶ Play)</label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5, maxWidth: 300 }}>
-          {showIdx.map((i) => { const miss = before[i] == null; const order = miss ? missIdx.indexOf(i) : 0; const th = 0.5 + order * 0.13; const p = miss ? Math.max(0, Math.min(1, (prepT - th) / 0.12)) : 0;
-            return <div key={i} className="icell"><span className="irow-lab">row {i}</span><span className={`ibox ${miss ? "miss" : ""}`}>{miss ? <span style={{ position: "relative" }}><span style={{ opacity: 1 - p, color: "var(--crit)" }}>∅</span><span style={{ position: "absolute", left: 0, opacity: p, color: "var(--good)", fontWeight: 600 }}>{fill}</span></span> : String(before[i])}</span></div>; })}
+      <div className="prep-2col">
+        <div className="prep-col">
+          <div className="prep-col-h">the formula, step by step</div>
+          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
+          {prepStage >= nFormula - 1 && <div className="note" style={{ marginTop: 8 }}>→ fill value = <b style={{ color: "var(--good)" }}>{fill}</b></div>}
         </div>
-        <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
-          <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Compute & fill"}</button>
-          <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
+        <div className="prep-col">
+          <div className="prep-col-h">{missIdx.length ? `then fill each ∅ (${missVisible.length} shown)` : "no missing values"}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {showIdx.map((i) => { const miss = before[i] == null; const filled = miss && prepStage >= nFormula + missVisible.indexOf(i);
+              return <div key={i} className="icell"><span className="irow-lab">row {i}</span><span className={`ibox ${miss ? "miss" : ""} ${filled ? "filled" : ""}`}>{miss ? (filled ? <b style={{ color: "var(--good)" }}>{fill}</b> : <span style={{ color: "var(--crit)" }}>∅</span>) : String(before[i])}</span></div>; })}
+          </div>
         </div>
-      </> : <div className="note" style={{ marginTop: 8 }}>No missing values in “{colName}” — nothing to fill.</div>}
+      </div>
+      {stageControls(maxStage)}
     </>;
   }
   // One-hot: the indicator matrix builds row by row as the animation advances.
@@ -744,19 +770,18 @@ ${evalBlock}`;
     const col = ds.columns.find((c) => c.name === colName)!;
     const cats = Array.from(new Set(col.values.filter((v) => v != null).map(String))).slice(0, 4);
     const rowIdx = col.values.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0).slice(0, 5);
+    const maxStage = Math.max(0, rowIdx.length - 1);
     const cells: React.ReactNode[] = [<div key="corner" />, ...cats.map((c) => <div key={`h${c}`} className="oh-h">{c}</div>)];
     rowIdx.forEach((ri, r) => {
-      const val = String(col.values[ri]); const th = r / rowIdx.length; const on = prepT > th;
-      cells.push(<div key={`l${ri}`} className="oh-lab">“{val}”</div>);
-      cats.forEach((c) => { const hit = c === val; cells.push(<div key={`${ri}-${c}`} className={`oh-c ${hit && on ? "on" : ""}`}>{hit ? (on ? "1" : "0") : "0"}</div>); });
+      const val = String(col.values[ri]); const on = prepStage >= r;
+      cells.push(<div key={`l${ri}`} className="oh-lab" style={{ opacity: on ? 1 : 0.4 }}>“{val}”</div>);
+      cats.forEach((c) => { const hit = c === val; cells.push(<div key={`${ri}-${c}`} className={`oh-c ${hit && on ? "on" : ""}`} style={{ opacity: on ? 1 : 0.4 }}>{hit ? (on ? "1" : "0") : "0"}</div>); });
     });
     return <>
-      <label className="fld">Each category → a 1 in its own column. The indicator matrix builds row by row (▶ Play):</label>
+      <div className="note" style={{ marginBottom: 10 }}>One-hot makes a column per category; each row puts a <b>1</b> in its own category’s column and <b>0</b> everywhere else — text becomes numbers with no fake ordering.</div>
+      <div className="prep-col-h">the indicator matrix, one row at a time</div>
       <div className="oh-grid" style={{ gridTemplateColumns: `auto repeat(${cats.length}, minmax(60px, 1fr))` }}>{cells}</div>
-      <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 10 }}>
-        <button className="btn sm" onClick={() => { if (prepT >= 1) setPrepT(0); setPrepPlaying((p) => !p); }}>{prepPlaying ? "⏸ Pause" : "▶ Encode rows"}</button>
-        <input type="range" min={0} max={1} step={0.02} value={prepT} onChange={(e) => { setPrepPlaying(false); setPrepT(+e.target.value); }} style={{ flex: 1 }} />
-      </div>
+      {stageControls(maxStage)}
     </>;
   }
 
