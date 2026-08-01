@@ -541,38 +541,48 @@ export default function RagLab() {
         <div className="card">
           <div className="card-h"><span className="t">Chunking</span><span className="mono r">{chunking ? <><span className="busy-dot" />splitting…</> : `${chunks.length} chunks`}</span></div>
           <div className="card-b">
-            <div className="stat-row">
-              <div className="stat">documents<b>{docs.length}</b></div>
-              <div className="stat">words<b>{totalWords}</b></div>
-              <div className="stat">chunks<b>{chunks.length}</b></div>
-              <div className="stat">overlap<b>{overlap}w</b></div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
+              {([[String(docs.length), "documents"], [totalWords.toLocaleString(), "words"], [String(chunks.length), "chunks"], [`${overlap}w`, "overlap"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
             </div>
-            <div className="row" style={{ flexWrap: "wrap", gap: 16, marginBottom: 12 }}>
-              <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={120} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
-              <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={40} step={2} value={overlap} onChange={(e) => setOverlap(+e.target.value)} /></div>
-              <button className="btn" onClick={runChunking} disabled={chunking}>▶ Run chunking</button>
+
+            <div style={{ ...pnl, marginBottom: 16 }}>
+              {kgHead("var(--accent)", "Chunking controls")}
+              <div style={{ padding: 15 }}>
+                <div className="row" style={{ flexWrap: "wrap", gap: 20, alignItems: "flex-end" }}>
+                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={120} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
+                  <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={40} step={2} value={overlap} onChange={(e) => setOverlap(+e.target.value)} /></div>
+                  <button className="btn" onClick={runChunking} disabled={chunking}>▶ Run chunking</button>
+                </div>
+                <div style={{ marginTop: 12, fontFamily: "var(--mono)", fontSize: 11, color: "var(--faint)", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 11px" }}>sliding window: <b style={{ color: "var(--accent)" }}>{size}</b>-word window · advances <b style={{ color: "var(--accent)" }}>{stepWords}</b> words each step · <b style={{ color: "var(--accent)" }}>{overlap}</b>w shared{chunks.length ? <> → {totalWords.toLocaleString()} words split into <b style={{ color: "var(--accent)" }}>{chunks.length}</b> chunks</> : null}</div>
+              </div>
             </div>
 
             {chunks.length > 0 && (
               <>
-                <label className="fld">How the extracted text is split into chunks — a sliding window of {size} words moving {stepWords} words each step ({overlap}w overlap)</label>
-                <div className="flow" key={`cf-${chunkPlayKey}`} style={{ ["--sweepdur"]: `${(chunks.length * 0.35 + 0.6).toFixed(1)}s` } as React.CSSProperties}>
-                  <div className="flow-label">extracted text · {totalWords} words</div>
-                  <div className="doc-track">
-                    <div className="readhead" />
-                    {chunks.map((c, i) => (
-                      <div key={i} className="cwin" style={{ left: `${Math.min(98, (i * stepWords / Math.max(1, totalWords)) * 100)}%`, width: `${Math.min(60, (size / Math.max(1, totalWords)) * 100)}%`, background: i % 2 ? "var(--sky)" : "var(--accent)", animationDelay: `${(i * 0.35).toFixed(2)}s` }}>c{i + 1}</div>
-                    ))}
-                  </div>
-                  <div className="flow-arrow">↓ splits into {chunks.length} chunks</div>
-                  <div className="flow-chunks">
-                    {chunks.map((c, i) => <div key={i} className="fchunk" style={{ animationDelay: `${(i * 0.35 + 0.2).toFixed(2)}s` }}>chunk {i + 1}</div>)}
+                <div style={{ ...pnl, marginBottom: 16 }}>
+                  {kgHead("var(--sky)", "How the text splits", <span className="note" style={{ fontSize: 10 }}>{totalWords.toLocaleString()} words → {chunks.length} chunks</span>)}
+                  <div style={{ padding: 15 }}>
+                    <div className="flow" key={`cf-${chunkPlayKey}`} style={{ ["--sweepdur"]: `${(chunks.length * 0.35 + 0.6).toFixed(1)}s`, border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 } as React.CSSProperties}>
+                      <div className="flow-label">extracted text · {totalWords} words</div>
+                      <div className="doc-track">
+                        <div className="readhead" />
+                        {chunks.map((c, i) => (
+                          <div key={i} className="cwin" style={{ left: `${Math.min(98, (i * stepWords / Math.max(1, totalWords)) * 100)}%`, width: `${Math.min(60, (size / Math.max(1, totalWords)) * 100)}%`, background: i % 2 ? "var(--sky)" : "var(--accent)", animationDelay: `${(i * 0.35).toFixed(2)}s` }}>c{i + 1}</div>
+                        ))}
+                      </div>
+                      <div className="flow-arrow">↓ splits into {chunks.length} chunks</div>
+                      <div className="flow-chunks">
+                        {chunks.map((c, i) => <div key={i} className="fchunk" style={{ animationDelay: `${(i * 0.35 + 0.2).toFixed(2)}s` }}>chunk {i + 1}</div>)}
+                      </div>
+                    </div>
+                    <div className="row" style={{ marginTop: 12 }}><button className="btn ghost sm" onClick={() => setChunkPlayKey((k) => k + 1)}>↻ Replay animation</button></div>
                   </div>
                 </div>
-                <div className="row" style={{ marginBottom: 12 }}><button className="btn ghost sm" onClick={() => setChunkPlayKey((k) => k + 1)}>↻ Replay animation</button></div>
 
                 {/* per-chunk inspector — how the text turns into ONE chunk (with overlap) */}
-                <label className="fld">Watch one chunk form — step through to see the exact words &amp; the shared overlap</label>
+                <div style={{ ...pnl, marginBottom: 16 }}>
+                  {kgHead("var(--good)", "Inspect one chunk — words & shared overlap")}
+                  <div style={{ padding: 15 }}>
                 {(() => {
                   const ci = Math.min(inspIdx, chunks.length - 1);
                   const c = chunks[ci];
@@ -580,7 +590,7 @@ export default function RagLab() {
                   const ov = Math.min(overlap, Math.floor(words.length / 2));
                   const start = ci * stepWords;
                   return (
-                    <div className="chunk-inspect">
+                    <div className="chunk-inspect" style={{ border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 }}>
                       <div className="pp-player" style={{ margin: "0 0 8px" }}>
                         <button className="pp-ctrl" title="First" onClick={() => { setInspPlaying(false); setInspIdx(0); }}>⏮</button>
                         <button className="pp-ctrl" title="Previous" onClick={() => { setInspPlaying(false); setInspIdx((i) => Math.max(0, i - 1)); }}>‹</button>
@@ -603,20 +613,25 @@ export default function RagLab() {
                     </div>
                   );
                 })()}
+                  </div>
+                </div>
               </>
             )}
 
-            <label className="fld">All chunks (with source) — scroll to see more</label>
-            <div className="chunk-scroll">
-              {chunks.map((c, i) => (
-                <div key={i} className={`chunk-card ${i === Math.min(inspIdx, chunks.length - 1) ? "on" : ""}`}>
-                  <div className="ch"><span>chunk {i + 1}<span className="src-tag">{c.docKind}</span> {c.docName}</span><span>words {i * stepWords + 1}–{i * stepWords + size} · {c.text.split(/\s+/).length}w</span></div>
-                  <div>{c.text.length > 220 ? c.text.slice(0, 220) + "…" : c.text}</div>
-                </div>
-              ))}
+            <div style={{ ...pnl }}>
+              {kgHead("var(--purple)", "All chunks", <span className="note" style={{ fontSize: 10 }}>{chunks.length} · with source</span>)}
+              <div style={{ padding: 12 }}>
+                {chunks.length > 0 ? <div className="chunk-scroll" style={{ border: "none", background: "transparent", borderRadius: 0, padding: 0, margin: 0, maxHeight: 320 }}>
+                  {chunks.map((c, i) => (
+                    <div key={i} className={`chunk-card ${i === Math.min(inspIdx, chunks.length - 1) ? "on" : ""}`}>
+                      <div className="ch"><span>chunk {i + 1}<span className="src-tag">{c.docKind}</span> {c.docName}</span><span>words {i * stepWords + 1}–{i * stepWords + size} · {c.text.split(/\s+/).length}w</span></div>
+                      <div>{c.text.length > 220 ? c.text.slice(0, 220) + "…" : c.text}</div>
+                    </div>
+                  ))}
+                </div> : <div className="note">{chunking ? "splitting…" : "Click Run chunking to split the documents."}</div>}
+              </div>
             </div>
-            {chunks.length === 0 && !chunking && <div className="note">Click Run chunking to split the documents.</div>}
-            <div className="stepnav"><button className="btn ghost" onClick={() => goStep("source")}>← Back</button><button className="btn" disabled={chunks.length === 0} onClick={() => goStep("embed")}>Next: Embed →</button></div>
+            <div className="stepnav"><button className="btn ghost" onClick={() => goStep("source")}>← Back</button><button className="btn" disabled={chunks.length === 0} onClick={() => goStep("embed")}>Next: Index →</button></div>
           </div>
         </div>
       )}
