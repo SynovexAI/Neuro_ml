@@ -260,6 +260,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .qc-dot.ok{background:var(--good)}
 .qc-dot.bad{background:var(--crit)}
 .qc-dot.warn{background:var(--warn)}
+/* ML column overview */
+.col-ov{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0 0 16px}
+.col-ov-card{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--panel)}
+.col-ov-card.tgt{border-color:var(--accent);background:var(--accent-weak)}
 /* embeddable widget */
 .embed-wrap{display:flex;flex-direction:column;height:100vh;background:var(--bg);font-size:13px}
 .embed-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);font-size:14px}

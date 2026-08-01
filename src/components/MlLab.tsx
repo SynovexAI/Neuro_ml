@@ -586,11 +586,23 @@ ${evalBlock}`;
   }
   function lcFig() {
     if (!lcData.length) return null; const t = plotlyTheme();
-    const data = [
-      { x: lcData.map((d) => d.n), y: lcData.map((d) => d.train), name: "train", mode: "lines+markers", line: { color: "#5b7cff", width: 2 } },
-      { x: lcData.map((d) => d.n), y: lcData.map((d) => d.test), name: "validation", mode: "lines+markers", line: { color: "#f59e0b", width: 2 } },
+    const xs = lcData.map((d) => d.n), tr = lcData.map((d) => d.train), te = lcData.map((d) => d.test);
+    const d = lcDiagnosis();
+    const clr = d?.cls === "bad" ? "#ef4444" : d?.cls === "warn" ? "#f59e0b" : "#3ecf7f";
+    const gapFill = d?.cls === "bad" ? "rgba(239,68,68,0.16)" : d?.cls === "warn" ? "rgba(245,158,11,0.14)" : "rgba(62,207,127,0.12)";
+    const data: Record<string, unknown>[] = [
+      { x: xs, y: tr, name: "train", mode: "lines+markers", line: { color: "#5b7cff", width: 2 } },
+      { x: xs, y: te, name: "validation", mode: "lines+markers", line: { color: "#f59e0b", width: 2 }, fill: "tonexty", fillcolor: gapFill }, // shades the train↔validation gap
     ];
-    const layout = { ...chartLayout(t, "Learning curve", "training examples", task === "classification" ? "accuracy" : "R²"), showlegend: true, legend: { font: { color: t.text, size: 10 }, orientation: "h" } };
+    const layout = {
+      ...chartLayout(t, "Learning curve", "training examples", task === "classification" ? "accuracy" : "R²"),
+      showlegend: true, legend: { font: { color: t.text, size: 10 }, orientation: "h" },
+      annotations: d ? [{
+        x: xs[xs.length - 1], y: (tr[tr.length - 1] + te[te.length - 1]) / 2, xref: "x", yref: "y",
+        xanchor: "right", yanchor: "middle", text: `◀ ${d.label}<br>gap ${(task === "classification" ? `${Math.round((tr[tr.length - 1] - te[te.length - 1]) * 100)}%` : (tr[tr.length - 1] - te[te.length - 1]).toFixed(2))}`,
+        align: "right", showarrow: false, font: { size: 11, color: clr }, bgcolor: t.paper, bordercolor: clr, borderwidth: 1, borderpad: 4,
+      }] : [],
+    };
     return { data, layout };
   }
 
@@ -664,6 +676,32 @@ ${evalBlock}`;
                 <span className="badge">{task}</span>
                 <span className="note">{features.length} feature{features.length === 1 ? "" : "s"} · task auto-detected from the column</span>
               </div>
+              {task === "classification" && (() => {
+                const col = ds.columns.find((c) => c.name === target); if (!col) return null;
+                const vals = col.values.filter((v) => v != null).map(String);
+                const counts = new Map<string, number>(); vals.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
+                const entries = [...counts.entries()].sort((a, b) => b[1] - a[1]); const total = vals.length || 1;
+                const maxPct = entries[0] ? entries[0][1] / total : 0;
+                const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
+                return (
+                  <div style={{ marginBottom: 14 }}>
+                    <label className="fld">Class balance · {target} ({entries.length} classes)</label>
+                    <div style={{ display: "flex", height: 16, borderRadius: 5, overflow: "hidden", border: "1px solid var(--border)" }}>{entries.slice(0, 8).map(([k, c], i) => <div key={k} title={`${k}: ${c}`} style={{ width: `${(c / total) * 100}%`, background: PAL[i % PAL.length] }} />)}</div>
+                    <div className="chips" style={{ marginTop: 6 }}>{entries.slice(0, 8).map(([k, c], i) => <span key={k} className="chip" style={{ cursor: "default" }}><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: PAL[i % PAL.length], marginRight: 6, verticalAlign: "middle" }} />{k} · {((c / total) * 100).toFixed(0)}%</span>)}</div>
+                    {maxPct > 0.65 && <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">⚠️</span><span><b>Imbalanced</b> — {(maxPct * 100).toFixed(0)}% is one class. A model can score high accuracy just by predicting the majority, so judge it on <b>precision / recall / F1</b> and the confusion matrix instead.</span></div>}
+                  </div>
+                );
+              })()}
+              <label className="fld">Column overview</label>
+              <div className="col-ov">{ds.columns.map((c) => { const s = colStats(c); return (
+                <div key={c.name} className={`col-ov-card ${c.name === target ? "tgt" : ""}`}>
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 6 }}><b style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={c.name}>{c.name}</b><span className="badge">{c.type}</span></div>
+                  {s.type === "num"
+                    ? <div className="note" style={{ marginTop: 4 }}>{s.min.toFixed(1)} – {s.max.toFixed(1)} · μ {s.mean.toFixed(2)}</div>
+                    : <div className="note" style={{ marginTop: 4 }}>{s.unique} unique · top “{s.top[0]?.[0] ?? "—"}”</div>}
+                  <div className="note" style={{ marginTop: 2, color: s.missing ? "var(--crit)" : "var(--faint)" }}>{s.missing} missing{c.name === target ? " · 🎯 target" : ""}</div>
+                </div>
+              ); })}</div>
               <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>#</th>{ds.columns.map((c) => <th key={c.name}>{c.name} <span style={{ color: c.name === target ? "var(--accent)" : "var(--faint)" }}>{c.type}{c.name === target ? "·target" : ""}</span></th>)}</tr>{viewRows.map((r) => <tr key={r}><td style={{ color: "var(--faint)" }}>{r}</td>{ds.columns.map((c) => <td key={c.name}>{c.values[r] ?? "—"}</td>)}</tr>)}</tbody></table></div>
               <label className="fld" style={{ marginTop: 16 }}>Summary statistics (numeric columns · like pandas .describe())</label>
               <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>column</th><th>count</th><th>missing</th><th>mean</th><th>std</th><th>min</th><th>25%</th><th>50%</th><th>75%</th><th>max</th></tr>{desc.map((d) => <tr key={d.name}><td>{d.name}</td><td>{d.count}</td><td>{d.missing}</td><td>{d.mean.toFixed(2)}</td><td>{d.std.toFixed(2)}</td><td>{d.min.toFixed(1)}</td><td>{d.q25.toFixed(1)}</td><td>{d.q50.toFixed(1)}</td><td>{d.q75.toFixed(1)}</td><td>{d.max.toFixed(1)}</td></tr>)}</tbody></table></div>
@@ -1112,6 +1150,9 @@ ${evalBlock}`;
                     <div><label className="fld">Feature Y</label><select value={dbF2 || numFeats()[1] || ""} onChange={(e) => setDbF2(e.target.value)}>{numFeats().map((f) => <option key={f}>{f}</option>)}</select></div>
                   </div>
                   {(() => { const f = boundaryFig(); return f ? <Plot data={f.data} layout={f.layout} style={{ height: 380 }} /> : <div className="note">Pick two features and draw the boundary.</div>; })()}
+                  {dbSurf && (() => { const full = task === "classification" && result ? (result.metrics as ClsMetrics).accuracy : null; return (
+                    <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">📉</span><span>This <b>2-feature</b> model scores <b>{(dbSurf.acc * 100).toFixed(0)}%</b> on these points{full != null ? <> vs the <b>full {features.length}-feature</b> model&apos;s <b>{(full * 100).toFixed(0)}%</b></> : ""}. Two features rarely capture everything — more informative features usually lift accuracy.</span></div>
+                  ); })()}
                 </div>
               </div>
             )}

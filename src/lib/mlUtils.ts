@@ -447,7 +447,7 @@ export function crossVal(cfg: TrainConfig, X: number[][], y: number[], nClasses:
 // Decision boundary over TWO numeric features (trains a 2-feature model of the
 // same type, predicts a grid, returns it + the data points). Classification only.
 export function decisionSurface(ds: Dataset, targetName: string, f1: string, f2: string, cfg: TrainConfig, res = 46):
-  { xs: number[]; ys: number[]; z: number[][]; points: { x: number; y: number; c: number }[]; classes: string[] } | null {
+  { xs: number[]; ys: number[]; z: number[][]; points: { x: number; y: number; c: number }[]; classes: string[]; acc: number } | null {
   const c1 = ds.columns.find((c) => c.name === f1), c2 = ds.columns.find((c) => c.name === f2), ty = ds.columns.find((c) => c.name === targetName);
   if (!c1 || !c2 || !ty || c1.type !== "num" || c2.type !== "num" || f1 === f2) return null;
   const raw: [number, number, string][] = [];
@@ -471,7 +471,9 @@ export function decisionSurface(ds: Dataset, targetName: string, f1: string, f2:
   const z: number[][] = [];
   for (let j = 0; j < res; j++) z.push(preds.slice(j * res, j * res + res).map((p) => Math.round(p)));
   const points = raw.map((r, i) => ({ x: r[0], y: r[1], c: y[i] }));
-  return { xs, ys, z, points, classes };
+  const yp = predict(model, X);
+  const acc = y.reduce((a, t, i) => a + (Math.round(yp[i]) === t ? 1 : 0), 0) / y.length;
+  return { xs, ys, z, points, classes, acc };
 }
 
 // Learning curve: train on growing fractions of the training set; return train vs
