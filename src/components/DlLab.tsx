@@ -342,26 +342,51 @@ export default function DlLab() {
         </div>;
       })()}
 
-      {step === "arch" && data && (
-        <div className="card"><div className="card-h"><span className="t">Design the network</span></div>
+      {step === "arch" && data && (() => {
+        const inDim = data.X[0].length; const sizes = [inDim, ...hidden, outDim];
+        const params = sizes.slice(0, -1).reduce((a, s, l) => a + s * sizes[l + 1] + sizes[l + 1], 0);
+        const neurons = sizes.reduce((a, b) => a + b, 0);
+        const outAct = data.task === "binary" ? "sigmoid" : data.task === "multiclass" ? "softmax" : "linear";
+        const outLoss = data.task === "binary" ? "binary cross-entropy" : data.task === "multiclass" ? "cross-entropy" : "MSE";
+        const blk = (extra: React.CSSProperties): React.CSSProperties => ({ border: "1px solid var(--border)", borderRadius: 10, padding: "11px 14px", display: "flex", alignItems: "center", gap: 10, background: "var(--panel)", ...extra });
+        const conn = (label: string, key: string) => <div key={key} style={{ height: 22, position: "relative", margin: "0 auto", width: 2, background: "var(--border-strong)" }}><span style={{ position: "absolute", left: 8, top: 2, fontSize: 9, fontFamily: "var(--mono)", color: "var(--muted)", whiteSpace: "nowrap" }}>{label}</span></div>;
+        const dot = (c: string) => <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flex: "0 0 auto" }} />;
+        const lab = (t: string) => <div className="note" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em" }}>{t}</div>;
+        const stack: React.ReactNode[] = [<div key="in" style={blk({})}>{dot("#5b7cff")}<div>{lab("input")}<div style={{ fontWeight: 500, fontSize: 13 }}>{inDim} feature{inDim === 1 ? "" : "s"} → {inDim} neuron{inDim === 1 ? "" : "s"}</div></div></div>];
+        hidden.forEach((h, i) => {
+          stack.push(conn(act, `c${i}`));
+          stack.push(<div key={`d${i}`} style={blk({ background: "var(--surface)", borderColor: "var(--border-strong)" })}>{dot("#a855f7")}<div>{lab(`dense ${i + 1}`)}<div style={{ fontWeight: 500, fontSize: 13 }}>hidden</div></div>
+            <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}><button className="btn ghost sm" onClick={() => setHidden((hs) => hs.map((x, j) => (j === i ? Math.max(1, x - 1) : x)))}>−</button><b className="mono" style={{ minWidth: 64, textAlign: "center", fontSize: 12 }}>{h} neuron{h === 1 ? "" : "s"}</b><button className="btn ghost sm" onClick={() => setHidden((hs) => hs.map((x, j) => (j === i ? Math.min(16, x + 1) : x)))}>+</button></div>
+            <button className="btn ghost sm" onClick={() => setHidden((hs) => hs.filter((_, j) => j !== i))} disabled={hidden.length <= 1} style={{ marginLeft: 4 }}>×</button></div>);
+        });
+        stack.push(conn(outAct, "cout"));
+        stack.push(<div key="out" style={blk({})}>{dot("#f59e0b")}<div>{lab("output")}<div style={{ fontWeight: 500, fontSize: 13 }}>{outDim} neuron{outDim === 1 ? "" : "s"} · {outAct} · {outLoss}</div></div></div>);
+        const scard = (v: string, k: string, color?: string) => <div style={{ background: "var(--panel)", borderRadius: 9, padding: "10px 12px" }}><div style={{ fontSize: 19, fontWeight: 600, color: color || "var(--text)" }}>{v}</div><div className="note" style={{ marginTop: 3, textTransform: "uppercase" }}>{k}</div></div>;
+        return <div className="card"><div className="card-h"><span className="t">Design the network</span></div>
           <div className="card-b">
-            <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🧱</span><span><b>Layer types:</b> <b>Dense</b> (fully-connected) — every input connects to every neuron; the right choice for <b>tabular</b> data, so it&apos;s what this lab uses. <b>Conv</b> (convolution) &amp; <b>Pooling</b> layers scan/​downsample <b>images</b> and need a GPU to train — out of scope here. So below, each hidden layer is a <b>Dense</b> layer and you choose how many <b>neurons</b> it has.</span></div>
-            <div className="split col-2e" style={{ gap: 16 }}>
+            <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+              <div style={{ flex: 1, minWidth: 160, ...blk({ display: "block" }), borderColor: "var(--accent)" }}><div style={{ fontWeight: 500 }}>Dense <span className="note" style={{ background: "var(--good)", color: "#052", borderRadius: 20, padding: "1px 7px", marginLeft: 4 }}>used</span></div><div className="note" style={{ marginTop: 4 }}>Fully-connected — every input reaches every neuron. Right for tabular data.</div></div>
+              <div style={{ flex: 1, minWidth: 160, ...blk({ display: "block" }), opacity: 0.6 }}><div style={{ fontWeight: 500 }}>Conv <span className="note">images · GPU</span></div><div className="note" style={{ marginTop: 4 }}>Slides filters over an image to detect local patterns. Out of scope here.</div></div>
+              <div style={{ flex: 1, minWidth: 160, ...blk({ display: "block" }), opacity: 0.6 }}><div style={{ fontWeight: 500 }}>Pooling <span className="note">images · GPU</span></div><div className="note" style={{ marginTop: 4 }}>Downsamples feature maps to shrink them. Pairs with Conv for images.</div></div>
+            </div>
+            <div className="split col-2e" style={{ gap: 18, alignItems: "start" }}>
               <div>
-                <label className="fld">Hidden Dense layers ({hidden.length}) — neurons per layer</label>
-                {hidden.map((h, i) => <div key={i} className="row" style={{ gap: 8, alignItems: "center", marginBottom: 6 }}><span className="note" style={{ width: 96 }}>Dense {i + 1}</span><input type="range" min={1} max={16} value={h} onChange={(e) => setHidden((hs) => hs.map((x, j) => (j === i ? +e.target.value : x)))} style={{ flex: 1 }} /><b className="mono" style={{ width: 62 }}>{h} neuron{h === 1 ? "" : "s"}</b><button className="btn ghost sm" onClick={() => setHidden((hs) => hs.filter((_, j) => j !== i))} disabled={hidden.length <= 1}>×</button></div>)}
-                <button className="btn ghost sm" onClick={() => setHidden((hs) => [...hs, 6])} disabled={hidden.length >= 4}>+ add layer</button>
-                <label className="fld" style={{ marginTop: 12 }}>Activation (non-linearity between layers)</label>
+                <label className="fld">Layer stack — read top to bottom</label>
+                <div style={{ display: "flex", flexDirection: "column" }}>{stack}</div>
+                <button className="btn ghost sm" onClick={() => setHidden((hs) => [...hs, 6])} disabled={hidden.length >= 4} style={{ marginTop: 10, width: "100%", borderStyle: "dashed" }}>+ add hidden Dense layer</button>
+                <label className="fld" style={{ marginTop: 14 }}>Activation (non-linearity between layers)</label>
                 <div className="chips">{["tanh", "relu", "sigmoid"].map((a) => <button key={a} className={`chip ${act === a ? "on" : ""}`} onClick={() => setAct(a)}>{a}</button>)}</div>
-                <label className="fld" style={{ marginTop: 12 }}>Input &amp; output (set by your data)</label>
-                <div className="note">Input: <b>{data.X[0].length} neurons</b> (one per feature). Output: {data.task === "binary" ? "1 neuron · sigmoid · binary cross-entropy" : data.task === "multiclass" ? `${outDim} neurons · softmax · cross-entropy (one per class)` : "1 neuron · linear · mean squared error"}.</div>
               </div>
-              <div><label className="fld">Network — each column is a layer, each dot a neuron</label>{netDiagram()}<div className="note" style={{ marginTop: 6 }}>Labels: <b>2 in</b> = input neurons (features) · <b>h1·8</b> = hidden layer 1 with 8 neurons · <b>1 out</b> = output. {netRef.current ? "Edge colour = learned weight (green +, red −), thickness = magnitude." : "Edges are connections; train to see the learned weights."}</div></div>
+              <div>
+                <label className="fld">Network diagram — each column a layer, each dot a neuron</label>
+                <div style={panelSt}>{netDiagram()}<div className="note" style={{ marginTop: 6 }}>{netRef.current ? "Edge colour = learned weight (green +, red −), thickness = magnitude." : "Edges are connections; train to see the learned weights."}</div></div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginTop: 12 }}>{scard(String(hidden.length + 1), "layers", "var(--accent)")}{scard(String(neurons), "neurons")}{scard(params.toLocaleString(), "parameters")}</div>
+              </div>
             </div>
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("prep")}>← Back</button><button className="btn" onClick={() => setStep("train")}>Next: Train →</button></div>
           </div>
-        </div>
-      )}
+        </div>;
+      })()}
 
       {step === "train" && data && (() => {
         const metricName = data.task === "regression" ? "R²" : "accuracy";
@@ -393,6 +418,15 @@ export default function DlLab() {
               {stat(best ? best.acc.toFixed(3) : "—", `train ${metricName}`, "var(--good)")}
               {stat(best ? best.vacc.toFixed(3) : "—", `validation ${metricName}`, "#a855f7")}
               {stat(best ? best.loss.toFixed(3) : "—", "loss")}
+            </div>
+            {/* live network — connections form as it learns */}
+            <div style={{ ...panelSt, marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                <h4 className="fld" style={{ margin: 0 }}>Network — weights forming live</h4>
+                <span className="note">green = positive weight · red = negative · thickness = magnitude</span>
+              </div>
+              {netDiagram()}
+              <div className="note" style={{ marginTop: 6 }}>{epoch ? `epoch ${epoch}: each connection carries a weight the network keeps adjusting — watch strong edges (thick, saturated) emerge as it separates the classes.` : "press ▶ Train — the grey connections light up as the network learns."}</div>
             </div>
             {/* balanced 2×2 graph grid: boundary + loss / weights + accuracy */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, alignItems: "start" }}>
