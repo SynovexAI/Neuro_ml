@@ -559,16 +559,6 @@ ${evalBlock}`;
     } catch { return null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result, steps, testSize]);
-  // Ensemble decision regions for the Random Forest model-step graph (heavy → memoised).
-  const modelSurface = useMemo(() => {
-    if (mlMode !== "maths" || step !== "model" || !ds || task !== "classification" || algo !== "RandomForest") return null;
-    const nums = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
-    if (nums.length < 2) return null;
-    const f1 = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
-    const f2 = dbF2 && nums.includes(dbF2) && dbF2 !== f1 ? dbF2 : (nums.find((x) => x !== f1) || "");
-    try { return f2 ? decisionSurface(ds, target, f1, f2, cfgNow()) : null; } catch { return null; }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, steps]);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -1139,9 +1129,39 @@ ${evalBlock}`;
     } else { // tree & forest
       const rowsAll = pick(n, 260).filter((i) => Number.isFinite(Y[i]) && Number.isFinite(X[i][idxF]) && Number.isFinite(X[i][idxG]));
       const sp = bestSplit(rowsAll, [idxF, idxG]);
-      const leftIds = rowsAll.filter((i) => X[i][sp.feat] <= sp.thr);
-      const sp2 = leftIds.length > 3 ? bestSplit(leftIds, [idxF, idxG]) : null;
       const metricName = isReg ? "variance" : "Gini";
+      // ── build a real small tree + draw it as an actual tree diagram (SVG) ──
+      type TNode = { leaf: boolean; feat?: number; thr?: number; nn: number; cls: number; mean: number; left?: TNode; right?: TNode };
+      const majorityOf = (ids: number[]) => { const c: Record<number, number> = {}; ids.forEach((i) => { c[Y[i]] = (c[Y[i]] || 0) + 1; }); let best = ids.length ? Y[ids[0]] : 0, bc = -1; for (const k in c) if (c[k] > bc) { bc = c[k]; best = +k; } return best; };
+      const meanOf = (ids: number[]) => (ids.length ? ids.reduce((a, i) => a + Y[i], 0) / ids.length : 0);
+      const buildTree = (ids: number[], depth: number, maxD: number): TNode => {
+        const leaf: TNode = { leaf: true, nn: ids.length, cls: majorityOf(ids), mean: meanOf(ids) };
+        if (depth >= maxD || ids.length < 8 || new Set(ids.map((i) => Y[i])).size <= 1) return leaf;
+        const s = bestSplit(ids, [idxF, idxG]); if (s.gain <= 1e-6 || s.feat < 0) return leaf;
+        const L = ids.filter((i) => X[i][s.feat] <= s.thr), R = ids.filter((i) => X[i][s.feat] > s.thr);
+        if (!L.length || !R.length) return leaf;
+        return { leaf: false, feat: s.feat, thr: s.thr, nn: ids.length, cls: leaf.cls, mean: leaf.mean, left: buildTree(L, depth + 1, maxD), right: buildTree(R, depth + 1, maxD) };
+      };
+      const routeLeaf = (root: TNode, r: number): TNode => { let cur = root; while (!cur.leaf) cur = X[r][cur.feat!] <= cur.thr! ? cur.left! : cur.right!; return cur; };
+      const leafLabel = (nd: TNode) => (isReg ? fv(nd.mean, 1) : String(classes?.[nd.cls] ?? nd.cls).replace(/[^a-zA-Z0-9 ]/g, " ").slice(0, 4));
+      const renderTree = (root: TNode, W: number, H: number, routeRow: number | null, small = false): React.ReactNode => {
+        const depthOf = (nd: TNode): number => (nd.leaf ? 1 : 1 + Math.max(depthOf(nd.left!), depthOf(nd.right!)));
+        const D = depthOf(root); const top = 20, bot = H - (small ? 20 : 36);
+        const yAt = (d: number) => top + d * ((bot - top) / Math.max(1, D - 1));
+        const path = new Set<TNode>(); if (routeRow != null) { let cur: TNode | undefined = root; while (cur) { path.add(cur); if (cur.leaf) break; cur = X[routeRow][cur.feat!] <= cur.thr! ? cur.left : cur.right; } }
+        const nodes: { node: TNode; x: number; y: number; px?: number; py?: number; side?: string; on: boolean }[] = [];
+        const place = (nd: TNode, x0: number, x1: number, d: number, px?: number, py?: number, side?: string) => { const x = (x0 + x1) / 2, y = yAt(d); nodes.push({ node: nd, x, y, px, py, side, on: path.has(nd) }); if (!nd.leaf) { place(nd.left!, x0, x, d + 1, x, y, "≤"); place(nd.right!, x, x1, d + 1, x, y, ">"); } };
+        place(root, 6, W - 6, 0);
+        const els: React.ReactNode[] = [];
+        nodes.forEach((nd, i) => { if (nd.px != null) els.push(<line key={"e" + i} x1={nd.px} y1={nd.py} x2={nd.x} y2={nd.y} stroke={nd.on ? "#f59e0b" : "var(--border-strong)"} strokeWidth={nd.on ? 2.5 : 1} />); });
+        nodes.forEach((nd, i) => {
+          if (nd.node.leaf) { const col = isReg ? "#5b7cff" : PAL_ML[nd.node.cls % PAL_ML.length]; const r = small ? 9 : (nd.on ? 14 : 12); els.push(<circle key={"n" + i} cx={nd.x} cy={nd.y} r={r} fill={col} opacity={0.92} stroke={nd.on ? "var(--text)" : th.paper} strokeWidth={nd.on ? 2 : 1} />); if (!small) els.push(<text key={"t" + i} x={nd.x} y={nd.y + 4} textAnchor="middle" fill="#fff" fontSize={10} fontFamily="monospace">{leafLabel(nd.node)}</text>); }
+          else { const fc = (names[nd.node.feat!] ?? "x").replace(/[^a-zA-Z0-9 ]/g, " ").slice(0, small ? 5 : 8); const w = small ? 54 : 92; els.push(<rect key={"r" + i} x={nd.x - w / 2} y={nd.y - 13} width={w} height={26} rx={6} fill="var(--surface)" stroke={nd.on ? "#f59e0b" : "var(--border-strong)"} strokeWidth={nd.on ? 2 : 1} />, <text key={"t" + i} x={nd.x} y={nd.y + 4} textAnchor="middle" fill="var(--text)" fontSize={small ? 8.5 : 10} fontFamily="monospace">{fc}≤{fv(nd.node.thr, 1)}</text>); }
+          if (nd.side && !small) els.push(<text key={"s" + i} x={(nd.px! + nd.x) / 2 + (nd.side === "≤" ? -7 : 7)} y={(nd.py! + nd.y) / 2 - 1} fill="var(--faint)" fontSize={10} fontFamily="monospace">{nd.side}</text>);
+        });
+        if (!small) { const lg = isReg ? [["#5b7cff", "leaf = mean ŷ"]] : (classes ?? []).slice(0, 4).map((c, i) => [PAL_ML[i % PAL_ML.length], String(c)] as [string, string]); lg.push(["#f59e0b", "this row's path"]); lg.forEach((L, i) => { els.push(<circle key={"lgc" + i} cx={12 + i * 96} cy={H - 12} r={5} fill={L[0]} />, <text key={"lgt" + i} x={20 + i * 96} y={H - 8} fill="var(--faint)" fontSize={10} fontFamily="monospace">{L[1]}</text>); }); }
+        return <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>{els}</svg>;
+      };
       if (kind === "tree") {
         intro = "Greedily test every feature threshold, keep the split that removes the most impurity, then recurse into if/else rules on each side.";
         legend = [
@@ -1160,59 +1180,49 @@ ${evalBlock}`;
           { sym: `\\text{route the row: } \\text{${featC}} \\le \\text{thr}?`, sub: `${fv(xr)} \\le ${fv(sp.thr)}`, res: `\\Rightarrow \\text{${left ? "left" : "right"}}` },
         ]; };
         total = plotPts.length; applyNote = "each row falls to its side of the split";
-        const cutShape = (feat: number, thr: number, color: string, dash?: string) => (feat === idxF
-          ? { type: "line", x0: thr, x1: thr, yref: "paper", y0: 0, y1: 1, line: { color, width: 2, dash } }
-          : { type: "line", xref: "paper", x0: 0, x1: 1, y0: thr, y1: thr, line: { color, width: 2, dash } });
-        viz = (applied, curRow) => {
-          const shown = (applied === 0 ? [curRow] : plotPts.slice(0, applied));
-          const leftPts = shown.filter((i) => X[i][sp.feat] <= sp.thr), rightPts = shown.filter((i) => X[i][sp.feat] > sp.thr);
-          const shapes: Record<string, unknown>[] = [cutShape(sp.feat, sp.thr, "#5b7cff")];
-          if (applied >= total && sp2) shapes.push(cutShape(sp2.feat, sp2.thr, "#3ecf7f", "dash"));
-          const data: Record<string, unknown>[] = [
-            { type: "scatter", mode: "markers", name: `${featC} ≤ ${fv(sp.thr)} (left)`, x: leftPts.map(xa), y: leftPts.map(xb), marker: { size: 7, color: PAL_ML[0], line: { width: 1, color: th.paper } } },
-            { type: "scatter", mode: "markers", name: `${featC} > ${fv(sp.thr)} (right)`, x: rightPts.map(xa), y: rightPts.map(xb), marker: { size: 7, color: PAL_ML[1], opacity: 0.7, line: { width: 1, color: th.paper } } },
-          ];
-          if (applied === 0) data.push({ type: "scatter", mode: "markers", name: "this row", x: [xa(curRow)], y: [xb(curRow)], marker: { size: 14, color: th.text, line: { width: 2, color: th.paper } } });
-          return mPlot(data, `best cut: ${featC} ≤ ${fv(sp.thr)} · gain ${fv(sp.gain)}`, names[idxF], names[idxG], { shapes });
-        };
-      } else { // forest
+        const theTree = buildTree(rowsAll, 0, 3);
+        viz = (applied, curRow) => <div>
+          {renderTree(theTree, 420, 320, curRow)}
+          <div className="note" style={{ marginTop: 6, fontFamily: "var(--mono)" }}>row → <b style={{ color: "#f59e0b" }}>{isReg ? `predicts ${leafLabel(routeLeaf(theTree, curRow))}` : `lands in the “${leafLabel(routeLeaf(theTree, curRow))}” leaf`}</b> · the highlighted path is its if/else route</div>
+        </div>;
+      } else { // forest — several real small trees side by side, each voting on one row
         const m = Math.max(1, Math.round(Number(params.nTrees) || 3));
         const shown = Math.min(3, m);
-        const votes = [...Array(shown).keys()].map((i) => (i % 3 === 2 ? 0 : 1));
-        const winner = votes.filter((v) => v === 1).length * 2 >= votes.length ? (classes?.[1] ?? "B") : (classes?.[0] ?? "A");
-        intro = "Train many trees, each on a bootstrap resample with a random feature subset, then average their votes to cut variance.";
+        const rowToRoute = idx[0] ?? 0;
+        const boot = (k: number) => rowsAll.filter((_, i) => (i * 7 + k * 11) % (shown + 1) !== 0);
+        const forestTrees = [...Array(shown).keys()].map((k) => { const s = boot(k); return buildTree(s.length > 12 ? s : rowsAll, 0, 3); });
+        const votes = forestTrees.map((t) => routeLeaf(t, rowToRoute).cls);
+        const tally: Record<number, number> = {}; votes.forEach((v) => { tally[v] = (tally[v] || 0) + 1; });
+        let wv = votes[0] ?? 0, wc = -1; for (const k in tally) if (tally[k] > wc) { wc = tally[k]; wv = +k; }
+        const winner = isReg ? "mean" : String(classes?.[wv] ?? wv);
+        const voteLbl = (t: number) => leafLabel(routeLeaf(forestTrees[t], rowToRoute));
+        intro = "Fit many small trees, each on its own bootstrap resample (and random features), then let them vote. Averaging de-correlated trees cuts variance.";
         legend = [
           { sym: "m", desc: "number of trees", how: `n_estimators setting = ${m}`, val: String(m) },
           { sym: "\\text{bootstrap}", desc: "resample rows", how: "draw n rows with replacement per tree", val: `${n} → ${n}` },
           { sym: "T_i", desc: "the i-th tree", how: "fit on its own bootstrap sample", val: `${shown} shown` },
-          { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: isReg ? "ŷ = (1/m) Σᵢ Tᵢ(x)" : "ŷ = mode{T₁…Tₘ}", val: isReg ? "avg" : String(winner) },
+          { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: isReg ? "ŷ = (1/m) Σᵢ Tᵢ(x)" : "ŷ = mode{T₁…Tₘ}", val: isReg ? "avg" : winner },
         ];
-        const winnerC = (isReg ? "mean" : winner).toString().replace(/[^a-zA-Z0-9 ]/g, " ");
-        const voteLbl = (t: number) => (classes?.[votes[t]] ?? (votes[t] ? "B" : "A")).toString().replace(/[^a-zA-Z0-9 ]/g, " ");
         exampleRow = 0; orderList = [...Array(shown).keys()]; total = shown;
         chainFor = (t) => [
-          { sym: "\\text{each } T_i: \\text{bootstrap} + \\text{random features}", sub: `T_{${t + 1}}: \\text{sample } ${n} \\text{ rows}`, res: `\\text{tree } ${t + 1}` },
-          { sym: "\\text{every tree predicts}", sub: `T_{${t + 1}} \\to \\text{${voteLbl(t)}}`, res: `${shown} \\text{ votes}` },
+          { sym: "\\text{each } T_i: \\text{bootstrap} + \\text{random features}", sub: `T_{${t + 1}}: \\text{a different sample of the } ${n} \\text{ rows}`, res: `\\text{tree } ${t + 1}` },
+          { sym: "\\text{tree } T_i \\text{ routes the row to a leaf}", sub: `T_{${t + 1}} \\to \\text{${voteLbl(t)}}`, res: `\\text{vote } ${t + 1}` },
           isReg
             ? { sym: "\\hat y = \\tfrac1m\\textstyle\\sum_i T_i(\\mathbf x)", sub: "\\text{average the tree outputs}", res: "\\hat y = \\text{mean}" }
-            : { sym: "\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", sub: `\\text{majority of } ${shown}`, res: `\\Rightarrow \\text{${winnerC}}` },
+            : { sym: "\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", sub: `\\text{votes} \\to \\text{${winner}}`, res: `\\Rightarrow \\text{${winner}}` },
         ];
         applyNote = "each tree casts its vote, then they aggregate";
         viz = (applied, curRow, stage) => {
-          const revealed = [...Array(shown).keys()].filter((i) => applied > i || (applied === 0 && i === curRow && stage >= 2));
-          const voteAnn: Record<string, unknown>[] = revealed.map((i, k) => ({ xref: "paper", yref: "paper", x: 0.02, y: 0.97 - k * 0.08, text: `T${i + 1} → ${voteLbl(i)}`, showarrow: false, xanchor: "left", bgcolor: "rgba(0,0,0,0.35)", font: { color: PAL_ML[votes[i]], size: 12, family: "monospace" } }));
-          if (applied >= total) voteAnn.push({ xref: "paper", yref: "paper", x: 0.02, y: 0.97 - revealed.length * 0.08, text: `majority → ${isReg ? "mean" : winner}`, showarrow: false, xanchor: "left", bgcolor: "rgba(0,0,0,0.35)", font: { color: "#f59e0b", size: 13, family: "monospace" } });
-          if (modelSurface && !isReg) {
-            const s = modelSurface; const kk = s.classes.length; const cs: [number, string][] = []; for (let c = 0; c < kk; c++) { const col = PAL_ML[c % PAL_ML.length]; cs.push([kk <= 1 ? 0 : c / kk, col]); cs.push([kk <= 1 ? 1 : (c + 1) / kk, col]); }
-            const data: Record<string, unknown>[] = [
-              { type: "heatmap", x: s.xs, y: s.ys, z: s.z, showscale: false, colorscale: cs, zmin: -0.5, zmax: kk - 0.5, opacity: 0.32, hoverinfo: "skip", name: "forest regions" },
-              ...s.classes.map((cl, ci) => ({ type: "scatter", mode: "markers", name: String(cl), x: s.points.filter((p) => p.c === ci).map((p) => p.x), y: s.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 7, color: PAL_ML[ci % PAL_ML.length], line: { width: 1, color: th.paper } } })),
-            ];
-            return mPlot(data, `random forest — the ensemble's decision regions · ${shown} trees vote`, s ? names[idxF] : "", names[idxG], { annotations: voteAnn });
-          }
-          // fallback: a vote panel (e.g. <2 numeric features)
-          const bar: Record<string, unknown>[] = [{ type: "bar", orientation: "h", name: "each tree's vote", x: revealed.map(() => 1), y: revealed.map((i) => `T${i + 1}`), marker: { color: revealed.map((i) => PAL_ML[votes[i]]) }, text: revealed.map((i) => `→ ${voteLbl(i)}`), textposition: "inside", insidetextanchor: "middle", hoverinfo: "skip" }];
-          return mPlot(bar, applied >= total ? `${shown} trees → majority = ${isReg ? "mean" : winner}` : "each tree casts its vote", "one vote per tree", "tree", { xaxis: { range: [0, 1.15], showticklabels: false, zeroline: false } });
+          const revealed = new Set([...Array(shown).keys()].filter((i) => applied > i || (applied === 0 && i === curRow && stage >= 2)));
+          return <div>
+            <div style={{ display: "grid", gridTemplateColumns: `repeat(${shown}, 1fr)`, gap: 8 }}>
+              {[...Array(shown).keys()].map((i) => <div key={i} style={{ opacity: revealed.has(i) ? 1 : 0.28, transition: "opacity .3s" }}>
+                <div className="note" style={{ textAlign: "center", marginBottom: 2 }}>T{i + 1} → <b style={{ color: PAL_ML[votes[i] % PAL_ML.length] }}>{revealed.has(i) ? voteLbl(i) : "…"}</b></div>
+                {renderTree(forestTrees[i], 150, 200, rowToRoute, true)}
+              </div>)}
+            </div>
+            <div className="note" style={{ marginTop: 8, fontFamily: "var(--mono)" }}>{applied >= total ? <>the {shown} trees vote → <b style={{ color: "#f59e0b" }}>majority = {winner}</b> (each highlighted path is the row&apos;s route through that tree)</> : "each tree fits its own bootstrap sample, then votes on this row"}</div>
+          </div>;
         };
       }
     }
