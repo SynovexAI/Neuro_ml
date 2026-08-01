@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
 import Toaster from "./Toaster";
+import ThemeToggle from "./ThemeToggle";
 
 type Role = "admin" | "student";
 export type ShellUser = { name?: string | null; email: string; role: Role };
@@ -114,6 +115,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
           <h1>{title}</h1>
           <div className="spacer" />
           <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
+          <ThemeToggle />
         </header>
         <div className="work">{children}</div>
       </div>
