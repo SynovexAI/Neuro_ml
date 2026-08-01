@@ -636,9 +636,34 @@ ${evalBlock}`;
 
   function mathData() {
     if (!ds) return null;
-    return mCard("data as numbers", <>
-      <div className="mathrow"><Katex block tex={`X \\in \\mathbb{R}^{\\,${ds.nrows}\\times ${features.length}}, \\qquad y \\in \\mathbb{R}^{\\,${ds.nrows}}`} /></div>
-      <div className="note" style={{ lineHeight: 1.6 }}>Each of the <b>{ds.nrows}</b> rows becomes a vector of <b>{features.length}</b> numbers; stacked, they form the matrix <Katex tex="X" />. The target <Katex tex="y" /> is what we predict. Text columns become numbers in Preprocessing (one-hot / ordinal).</div>
+    const feats = features.filter((f) => f !== target);
+    const col = (name: string) => ds.columns.find((c) => c.name === name)!;
+    const catFeats = feats.filter((f) => col(f).type === "cat");
+    const catMaps: Record<string, Map<string, number>> = {};
+    catFeats.forEach((f) => { const cats = Array.from(new Set(col(f).values.filter((v) => v != null).map(String))); catMaps[f] = new Map(cats.map((c, i) => [c, i])); });
+    const tcol = col(target); const cls = task === "classification";
+    const yMap = cls ? new Map(Array.from(new Set(tcol.values.filter((v) => v != null).map(String))).map((c, i) => [c, i])) : null;
+    const encRow = (i: number) => feats.map((f) => { const c = col(f); const v = c.values[i]; if (v == null) return 0; return c.type === "num" ? Number(v) : (catMaps[f].get(String(v)) ?? 0); });
+    const yEnc = (i: number) => { const v = tcol.values[i]; if (v == null) return 0; return cls ? (yMap!.get(String(v)) ?? 0) : Number(v); };
+    const N = Math.min(5, ds.nrows);
+    return mCard("turn the table into numbers", <>
+      <div className="note" style={{ marginBottom: 8, lineHeight: 1.6 }}>A model only does arithmetic, so every value must become a number. <b>Rule:</b> numeric columns pass through; each text category maps to an index; the target becomes {cls ? "a class index" : "the number to predict"}. Here it is <b>applied to your data</b>:</div>
+      {catFeats.length > 0 && (<>
+        <label className="fld">Encoding maps learned from the data</label>
+        {catFeats.slice(0, 4).map((f) => <div key={f} className="mathrow"><Katex tex={`\\text{${f.replace(/[^\w ]/g, " ")}} : \\{\\, ${[...catMaps[f].entries()].slice(0, 6).map(([k, i]) => `\\text{${k.replace(/[^\w ]/g, " ")}}\\!\\to\\!${i}`).join(",\\ ")}\\, \\}`} /></div>)}
+        {cls && <div className="mathrow"><Katex tex={`\\text{${target.replace(/[^\w ]/g, " ")}} : \\{\\, ${[...yMap!.entries()].slice(0, 6).map(([k, i]) => `\\text{${k.replace(/[^\w ]/g, " ")}}\\!\\to\\!${i}`).join(",\\ ")}\\, \\}`} /></div>}
+      </>)}
+      <label className="fld" style={{ marginTop: 10 }}>Preview — raw rows → the numeric matrix X and target y</label>
+      <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
+        <tr><th>raw row (first {feats.length} features)</th><th>→ X<sub>i</sub> (numbers)</th><th>y<sub>i</sub></th></tr>
+        {Array.from({ length: N }, (_, i) => <tr key={i}>
+          <td style={{ fontSize: 11, color: "var(--muted)", maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{feats.map((f) => String(col(f).values[i] ?? "∅")).join(", ")}</td>
+          <td className="mono" style={{ fontSize: 11 }}>[{encRow(i).map((x) => (Number.isInteger(x) ? x : x.toFixed(2))).join(", ")}]</td>
+          <td className="mono">{yEnc(i)}{cls ? ` (${tcol.values[i] ?? "∅"})` : ""}</td>
+        </tr>)}
+      </tbody></table></div>
+      <div className="mathrow" style={{ marginTop: 8 }}><Katex tex={`X \\in \\mathbb{R}^{\\,${ds.nrows}\\times ${feats.length}}, \\quad y \\in \\mathbb{R}^{\\,${ds.nrows}}`} /></div>
+      <div className="note" style={{ marginTop: 6 }}>Now every row is a vector of {feats.length} numbers. (Text uses a simple index here; Preprocessing refines it with one-hot + scaling.)</div>
     </>);
   }
   function mathEda() {
