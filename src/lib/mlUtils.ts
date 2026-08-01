@@ -9,19 +9,30 @@ export type Task = "classification" | "regression";
 export interface PrepStep { op: string; cols: string[]; method: string; }
 
 // ── parsing ──
-export function parseCSV(text: string): Dataset {
+export function parseCSV(text: string, opts: { header?: boolean } = {}): Dataset {
+  const hasHeader = opts.header !== false; // default: first row is a header
   const clean = text.replace(/\r\n?/g, "\n").trim();
-  const delim = (clean.split("\n")[0].match(/;/g)?.length || 0) > (clean.split("\n")[0].match(/,/g)?.length || 0) ? ";" : (clean.includes("\t") && !clean.split("\n")[0].includes(",") ? "\t" : ",");
-  const rows = clean.split("\n").map((line) => splitLine(line, delim));
-  const header = rows[0];
-  const body = rows.slice(1).filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
-  const cols: Column[] = header.map((name, ci) => {
+  const line0 = clean.split("\n")[0] || "";
+  const nSemi = (line0.match(/;/g)?.length || 0), nComma = (line0.match(/,/g)?.length || 0), nTab = (line0.match(/\t/g)?.length || 0);
+  // delimiter: prefer explicit separators, fall back to whitespace (many UCI .data files)
+  let delim: string;
+  if (nSemi > nComma && nSemi > 0) delim = ";";
+  else if (nComma > 0) delim = ",";
+  else if (nTab > 0) delim = "\t";
+  else if (line0.trim().split(/\s+/).length > 1) delim = " "; // whitespace sentinel
+  else delim = ",";
+  const rows = clean.split("\n").map((line) => (delim === " " ? line.trim().split(/\s+/) : splitLine(line, delim)));
+  const ncol = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const header = hasHeader ? rows[0] : Array.from({ length: ncol }, (_, i) => `col${i + 1}`);
+  const body = (hasHeader ? rows.slice(1) : rows).filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
+  const cols: Column[] = Array.from({ length: ncol }, (_, ci) => {
+    const name = (header[ci] ?? "").trim() || `col${ci + 1}`;
     const raw = body.map((r) => (r[ci] ?? "").trim());
     const nonEmpty = raw.filter((v) => v !== "");
     const numeric = nonEmpty.length > 0 && nonEmpty.every((v) => v !== "" && !isNaN(Number(v)));
     const type: ColType = numeric ? "num" : "cat";
     const values = raw.map((v) => (v === "" ? null : (type === "num" ? Number(v) : v)));
-    return { name: name.trim() || `col${ci}`, type, values };
+    return { name, type, values };
   });
   return { columns: cols, nrows: body.length };
 }

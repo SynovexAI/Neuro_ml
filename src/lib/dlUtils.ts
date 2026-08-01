@@ -49,6 +49,30 @@ export function windowSeries(v: number[], win: number): { X: number[][]; y: numb
   return { X, y, featNames: Array.from({ length: win }, (_, j) => `Δlag_${win - j}`) };
 }
 
+// ── TF-IDF text vectorizer (text → fixed numeric vector so the MLP can classify) ──
+const tokenizeText = (s: string): string[] => s.toLowerCase().match(/[a-z0-9]+/g) || [];
+// Fit a vocabulary of the most informative terms (drop ultra-rare and near-ubiquitous ones).
+export function fitTfidf(docs: string[], maxTerms = 200): { terms: string[]; idf: number[] } {
+  const N = docs.length || 1; const df = new Map<string, number>();
+  docs.forEach((d) => new Set(tokenizeText(d)).forEach((t) => df.set(t, (df.get(t) || 0) + 1)));
+  const minDf = N > 400 ? 2 : 1; // small corpora: keep singletons (they're the signal); large: drop hapax noise
+  const cand = [...df.entries()].filter(([t, c]) => t.length > 1 && c >= minDf && c <= N * 0.85);
+  cand.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const terms = cand.slice(0, maxTerms).map(([t]) => t);
+  return { terms, idf: terms.map((t) => Math.log(N / (df.get(t) || 1)) + 1) };
+}
+// Transform docs → L2-normalized TF-IDF rows over the fitted vocabulary.
+export function transformTfidf(docs: string[], terms: string[], idf: number[]): number[][] {
+  const idx = new Map(terms.map((t, i) => [t, i] as const));
+  return docs.map((d) => {
+    const toks = tokenizeText(d); const tf = new Map<number, number>();
+    toks.forEach((t) => { const i = idx.get(t); if (i !== undefined) tf.set(i, (tf.get(i) || 0) + 1); });
+    const vec = new Array(terms.length).fill(0); let norm = 0;
+    tf.forEach((c, i) => { const v = (c / (toks.length || 1)) * idf[i]; vec[i] = v; norm += v * v; });
+    norm = Math.sqrt(norm) || 1; return vec.map((v) => v / norm);
+  });
+}
+
 // ── feature scaling (neural nets need scaled inputs) — returns {center, scale} as {mean, std} ──
 export type ScaleMethod = "standard" | "minmax" | "robust" | "none";
 export function fitScaler(X: number[][], method: ScaleMethod = "standard"): { mean: number[]; std: number[] } {

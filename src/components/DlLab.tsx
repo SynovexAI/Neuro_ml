@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  genDataset, genSeries, windowSeries, initNet, newOpt, trainEpoch, fullEval, predictVec, predictClass,
+  genDataset, genSeries, windowSeries, fitTfidf, transformTfidf, initNet, newOpt, trainEpoch, fullEval, predictVec, predictClass,
   fitScaler, applyScaler, scaleRow, dlSurface, classWeights,
   type Net, type OptState, type DlTask, type Optimizer, type DlEval, type ScaleMethod,
 } from "@/lib/dlUtils";
 import { parseCSV, buildMatrix, type Dataset, type PrepStep } from "@/lib/mlUtils";
+import { textDatasets } from "@/lib/textDatasets";
 import { pca2 } from "@/lib/ragUtils";
 import { plotlyTheme } from "@/lib/edaCharts";
 import Plot from "@/components/Plot";
@@ -31,7 +32,7 @@ const TS = [
   { k: "traffic", l: "Web traffic", d: "Trend + weekly cycle", n: 200, unit: "daily" },
 ];
 
-type Resolved = { X: number[][]; y: number[]; task: DlTask; classes: string[]; featNames: string[]; source: string; series?: { t: number[]; v: number[] }; chronological?: boolean; win?: number };
+type Resolved = { X: number[][]; y: number[]; task: DlTask; classes: string[]; featNames: string[]; source: string; series?: { t: number[]; v: number[] }; chronological?: boolean; win?: number; text?: { terms: string[]; idf: number[] } };
 
 // deterministic split — chronological (no shuffle) for time series, else seeded random
 function splitData(X: number[][], y: number[], testFrac: number, chronological = false) {
@@ -47,13 +48,23 @@ function splitData(X: number[][], y: number[], testFrac: number, chronological =
 
 export default function DlLab() {
   const [step, setStep] = useState<Step>("data");
-  const [source, setSource] = useState<"sample" | "csv" | "ts">("sample");
+  const [source, setSource] = useState<"sample" | "csv" | "ts" | "text">("sample");
   const [tsKind, setTsKind] = useState("air");
   const [winSize, setWinSize] = useState(12);
+  const [textKind, setTextKind] = useState("sentiment");
+  const [vocabSize, setVocabSize] = useState(200);
+  const [textMode, setTextMode] = useState<"demo" | "csv">("demo");
+  const [textCol, setTextCol] = useState("");
+  const [labelCol, setLabelCol] = useState("");
+  const [predText, setPredText] = useState("");
   const [toy, setToy] = useState("spiral");
   const [noise, setNoise] = useState(0.12);
   const [ds, setDs] = useState<Dataset | null>(null);
   const [dsName, setDsName] = useState("");
+  const [csvText, setCsvText] = useState("");
+  const [csvHeader, setCsvHeader] = useState(true);
+  const [csvMode, setCsvMode] = useState<"tabular" | "series">("tabular");
+  const [tsCol, setTsCol] = useState("");
   const [feats, setFeats] = useState<string[]>([]);
   const [target, setTarget] = useState("");
   const [msg, setMsg] = useState("");
@@ -102,15 +113,63 @@ export default function DlLab() {
     setData({ X: d.X, y: d.y, task: d.task, classes: d.classes, featNames: d.featNames, source: SAMPLES.find((s) => s.k === toy)?.l || toy });
     resetTraining(); setStep("explore");
   }
+  function applyParse(text: string, header: boolean) {
+    const parsed = parseCSV(text, { header }); setDs(parsed); const cols = parsed.columns.map((c) => c.name);
+    setFeats(cols.slice(0, -1)); setTarget(cols[cols.length - 1]); setTsCol(parsed.columns.find((c) => c.type === "num")?.name || cols[0]);
+  }
   function loadCSV(text: string, name: string) {
-    try { const parsed = parseCSV(text); setDs(parsed); setDsName(name); const cols = parsed.columns.map((c) => c.name); setFeats(cols.slice(0, -1)); setTarget(cols[cols.length - 1]); setMsg(""); }
+    try { setCsvText(text); setDsName(name); setCsvHeader(true); setCsvMode("tabular"); applyParse(text, true); setMsg(""); }
     catch (e) { setMsg("Parse error: " + (e as Error).message); }
   }
-  function onFile(f: File | null) { if (!f) return; const r = new FileReader(); r.onload = () => loadCSV(String(r.result), f.name); r.readAsText(f); }
+  async function onFile(f: File | null) {
+    if (!f) return;
+    const ext = f.name.toLowerCase().split(".").pop();
+    if (ext === "xlsx" || ext === "xls") {
+      try { const buf = await f.arrayBuffer(); const XLSX = await import("xlsx"); const wb = XLSX.read(buf, { type: "array" }); const csv = XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]); loadCSV(csv, f.name); }
+      catch (e) { setMsg("Excel read error: " + (e as Error).message); }
+      return;
+    }
+    const r = new FileReader(); r.onload = () => loadCSV(String(r.result), f.name); r.readAsText(f);
+  }
+  function toggleHeader(v: boolean) { setCsvHeader(v); try { applyParse(csvText, v); setMsg(""); } catch (e) { setMsg("Parse error: " + (e as Error).message); } }
   function resolveSeries() {
     const s = genSeries(tsKind); const w = Math.min(winSize, s.v.length - 2); const win = windowSeries(s.v, w);
     setData({ X: win.X, y: win.y, task: "regression", classes: [], featNames: win.featNames, source: TS.find((t) => t.k === tsKind)?.l || tsKind, series: s, chronological: true, win: w });
     resetTraining(); setStep("explore");
+  }
+  function buildSeriesFromCsv() {
+    if (!ds) return;
+    const col = ds.columns.find((c) => c.name === tsCol); if (!col) { setMsg("Pick a numeric column to forecast."); return; }
+    // take the column in row order, mean-impute gaps → a univariate series
+    const nums = col.values.map((v) => (v == null ? null : Number(v)));
+    const present = nums.filter((v): v is number => v != null); if (present.length < 20) { setMsg("Need at least ~20 numeric points to window a series."); return; }
+    const mean = present.reduce((a, b) => a + b, 0) / present.length; const v = nums.map((x) => (x == null ? mean : x));
+    const w = Math.min(winSize, v.length - 2); const win = windowSeries(v, w);
+    setData({ X: win.X, y: win.y, task: "regression", classes: [], featNames: win.featNames, source: `${dsName} · ${tsCol}`, series: { t: v.map((_, i) => i), v }, chronological: true, win: w });
+    resetTraining(); setStep("explore"); setMsg("");
+  }
+  // ── NLP: TF-IDF vectorize text → the MLP classifies the vectors ──
+  function vectorizeText(texts: string[], labels: string[], srcLabel: string) {
+    const { terms, idf } = fitTfidf(texts, vocabSize); if (!terms.length) { setMsg("Not enough shared words to build a vocabulary."); return; }
+    const X = transformTfidf(texts, terms, idf);
+    const classes = [...new Set(labels)]; const cmap = new Map(classes.map((c, i) => [c, i])); const y = labels.map((l) => cmap.get(l)!);
+    const task: DlTask = classes.length <= 2 ? "binary" : "multiclass";
+    setData({ X, y, task, classes, featNames: terms, source: srcLabel, text: { terms, idf } });
+    setScaleMethod("none"); // TF-IDF is already L2-normalized; standardizing sparse vectors hurts
+    resetTraining(); setStep("explore"); setMsg("");
+  }
+  function resolveText() {
+    const d = textDatasets().find((t) => t.key === textKind); if (!d) return;
+    vectorizeText(d.texts, d.labels, d.label);
+  }
+  function buildTextFromCsv() {
+    if (!ds || !textCol || !labelCol) { setMsg("Pick a text column and a label column."); return; }
+    const tc = ds.columns.find((c) => c.name === textCol), lc = ds.columns.find((c) => c.name === labelCol);
+    if (!tc || !lc) return;
+    const texts: string[] = [], labels: string[] = [];
+    for (let i = 0; i < ds.nrows; i++) { const t = tc.values[i], l = lc.values[i]; if (t == null || l == null || String(t).trim() === "") continue; texts.push(String(t)); labels.push(String(l)); }
+    if (texts.length < 10) { setMsg("Need at least ~10 labeled text rows."); return; }
+    vectorizeText(texts, labels, `${dsName} · ${textCol}`);
   }
   function detectTask(d: Dataset, tgt: string): DlTask {
     const col = d.columns.find((c) => c.name === tgt); if (!col) return "binary";
@@ -311,12 +370,14 @@ export default function DlLab() {
   }, [data, hidden, act, outDim, optimizer, lr, epochsTarget]);
 
   // ── test-page helpers ──
-  function doPredict() {
+  function predictFromVec(x: number[]) {
     if (!netRef.current || !scRef.current || !data) return;
-    const x = data.featNames.map((_, j) => testInput[j] ?? 0); const o = predictVec(netRef.current, scaleRow(x, scRef.current));
+    const o = predictVec(netRef.current, scaleRow(x, scRef.current));
     if (data.task === "regression") setPredResult({ kind: "reg", value: o[0] });
     else { const c = o.indexOf(Math.max(...o)); const probs = o.map((p, i) => ({ name: String(data.classes[i] ?? i), p })).sort((a, b) => b.p - a.p).slice(0, 5); setPredResult({ kind: "cls", label: String(data.classes[c] ?? c), conf: Math.max(...o), probs }); }
   }
+  function doPredict() { if (!data) return; predictFromVec(data.featNames.map((_, j) => testInput[j] ?? 0)); }
+  function doPredictText() { if (!data?.text || !predText.trim()) return; predictFromVec(transformTfidf([predText], data.text.terms, data.text.idf)[0]); }
   function copyCode() { navigator.clipboard?.writeText(pyCode).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1400); }).catch(() => {}); }
   function downloadFile(name: string, content: string, mime: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([content], { type: mime })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
   function modelJson() { const n = netRef.current; if (!n || !data) return "{}"; return JSON.stringify({ task: data.task, classes: data.classes, featNames: data.featNames, sizes: n.sizes, activation: n.act, scaler: scRef.current, weights: n.W, biases: n.b }, null, 2); }
@@ -349,7 +410,8 @@ export default function DlLab() {
           const px = (v: number) => pad + ((v - xmn) / ((xmx - xmn) || 1)) * (w - 2 * pad); const py = (v: number) => h - pad - ((v - ymn) / ((ymx - ymn) || 1)) * (h - 2 * pad);
           return <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: "block", background: "var(--panel-2)", borderRadius: 8 }}>{d.X.map((p, i) => <circle key={i} cx={px(p[0])} cy={py(reg ? d.y[i] : p[1])} r={r} fill={reg ? "#3ecf7f" : PAL[d.y[i] % PAL.length]} opacity={0.8} />)}</svg>;
         };
-        const seg = (v: "sample" | "csv" | "ts", label: string) => <button onClick={() => setSource(v)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: source === v ? "var(--accent)" : "transparent", color: source === v ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{label}</button>;
+        const seg = (v: "sample" | "csv" | "ts" | "text", label: string) => <button onClick={() => setSource(v)} style={{ padding: "7px 13px", borderRadius: 8, border: "none", background: source === v ? "var(--accent)" : "transparent", color: source === v ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{label}</button>;
+        const txtDs = textDatasets(); const txtSel = txtDs.find((t) => t.key === textKind) || txtDs[0];
         const lineSvg = (vals: number[], w: number, h: number, color = "#3ecf7f") => { if (!vals.length) return null; const mn = Math.min(...vals), mx = Math.max(...vals), pad = 5; let dd = ""; vals.forEach((v, i) => { const x = pad + i / (vals.length - 1) * (w - 2 * pad); const y = h - pad - ((v - mn) / ((mx - mn) || 1)) * (h - 2 * pad); dd += (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " "; }); return <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: "block", background: "var(--panel-2)", borderRadius: 8 }}><path d={dd} fill="none" stroke={color} strokeWidth={1.6} /></svg>; };
         const sel = SAMPLES.find((s) => s.k === toy) || SAMPLES[0]; const prev = genDataset(toy, 260, noise, 3);
         const tsData = genSeries(tsKind);
@@ -359,9 +421,49 @@ export default function DlLab() {
           <div className="card-h"><span className="t">Choose data</span></div>
           <div className="card-b">
             <div className="note" style={{ marginTop: -4, marginBottom: 14 }}>Learn the flow on a built-in shape, forecast a time series, or upload your own CSV.</div>
-            <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, marginBottom: 18 }}>{seg("sample", "◆ Built-in shapes")}{seg("ts", "⏱ Time series")}{seg("csv", "⬆ Upload CSV")}</div>
+            <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, marginBottom: 18, flexWrap: "wrap" }}>{seg("sample", "◆ Shapes")}{seg("ts", "⏱ Time series")}{seg("text", "💬 Text")}{seg("csv", "⬆ Upload CSV")}</div>
 
-            {source === "ts" ? <>
+            {source === "text" ? <>
+              <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 9, padding: 3, marginBottom: 14 }}>
+                {(["demo", "csv"] as const).map((mdl) => <button key={mdl} onClick={() => setTextMode(mdl)} style={{ padding: "5px 12px", borderRadius: 7, border: "none", background: textMode === mdl ? "var(--accent)" : "transparent", color: textMode === mdl ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>{mdl === "demo" ? "Demo sets" : "Upload CSV"}</button>)}
+              </div>
+              <div className="teach-note" style={{ marginBottom: 14 }}><span className="ic">💬</span><span>Text can&apos;t enter an MLP directly. Each document is turned into a fixed <b>TF-IDF</b> vector (one weight per vocabulary term) — then the same network classifies those vectors. Not a transformer; genuine bag-of-words text classification.</span></div>
+              {textMode === "demo" ? <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
+                  {txtDs.map((s) => <div key={s.key} onClick={() => setTextKind(s.key)} style={{ background: "var(--panel)", border: `1px solid ${textKind === s.key ? "var(--accent)" : "var(--border)"}`, boxShadow: textKind === s.key ? "0 0 0 1px var(--accent)" : "none", borderRadius: 12, padding: 13, cursor: "pointer" }}>
+                    <div style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "space-between" }}>{s.label}{taskBadge(s.classes.length <= 2 ? "binary" : "multiclass")}</div>
+                    <div className="note" style={{ marginTop: 3 }}>{s.desc} · {s.texts.length} docs</div>
+                    <div style={{ marginTop: 8, fontSize: 11, color: "var(--faint)", fontStyle: "italic", lineHeight: 1.5 }}>“{s.texts[0].slice(0, 54)}…”<br />“{s.texts[s.texts.length - 1].slice(0, 54)}…”</div>
+                  </div>)}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 18, alignItems: "center", marginTop: 14, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: 14 }}>
+                  <div>
+                    <div className="note" style={{ marginBottom: 6 }}>Class balance</div>
+                    {txtSel.classes.map((c, i) => { const n = txtSel.labels.filter((l) => l === c).length; const mx = Math.max(...txtSel.classes.map((cc) => txtSel.labels.filter((l) => l === cc).length)); return <div key={c} className="row" style={{ gap: 10, alignItems: "center", fontSize: 11.5, marginBottom: 5 }}><span style={{ flex: "0 0 88px", color: "var(--muted)" }}>{c}</span><div style={{ flex: 1, height: 14, background: "var(--panel-2)", borderRadius: 4, overflow: "hidden" }}><div style={{ width: `${(n / mx) * 100}%`, height: "100%", background: PAL[i % PAL.length], borderRadius: 4 }} /></div><span className="mono" style={{ color: "var(--faint)" }}>{n}</span></div>; })}
+                  </div>
+                  <div>
+                    <div className="knob"><div className="kr"><span>Vocabulary size</span><b>{vocabSize}</b></div><input type="range" min={50} max={400} step={25} value={vocabSize} onChange={(e) => setVocabSize(+e.target.value)} /></div>
+                    <div className="note" style={{ marginTop: 8, fontSize: 11 }}>Top {vocabSize} terms become the input features. More terms = richer but sparser vectors.</div>
+                    <button className="btn" style={{ marginTop: 12, width: "100%" }} onClick={resolveText}>Vectorize & continue →</button>
+                  </div>
+                </div>
+              </> : <>
+                <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden onChange={(e) => onFile(e.target.files?.[0] || null)} />
+                <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0] || null); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 20, textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                  <div style={{ fontSize: 20, marginBottom: 4 }}>⬆</div><b>{ds ? dsName : "Drop a CSV with a text column + a label column"}</b>{ds && <span className="note"> · {ds.nrows} rows — click to replace</span>}
+                  <div className="note" style={{ marginTop: 5 }}>e.g. IMDB or AG News exported as CSV (review,sentiment)</div>
+                </div>
+                {msg && <div className="note" style={{ marginTop: 8, color: "var(--crit)" }}>{msg}</div>}
+                {ds && <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 260px", gap: 14, marginTop: 14, alignItems: "end" }}>
+                    <div><label className="fld">Text column</label><select value={textCol} onChange={(e) => setTextCol(e.target.value)} style={{ width: "100%" }}><option value="">— pick —</option>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select></div>
+                    <div><label className="fld">Label column</label><select value={labelCol} onChange={(e) => setLabelCol(e.target.value)} style={{ width: "100%" }}><option value="">— pick —</option>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select></div>
+                    <div><div className="knob"><div className="kr"><span>Vocab</span><b>{vocabSize}</b></div><input type="range" min={50} max={400} step={25} value={vocabSize} onChange={(e) => setVocabSize(+e.target.value)} /></div></div>
+                  </div>
+                  <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={buildTextFromCsv} disabled={!textCol || !labelCol}>Vectorize & continue →</button></div>
+                </>}
+              </>}
+            </> : source === "ts" ? <>
               <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--faint)", marginBottom: 10 }}>Forecasting datasets — predict the next value from recent history</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
                 {TS.map((s) => <div key={s.k} onClick={() => setTsKind(s.k)} style={{ background: "var(--panel)", border: `1px solid ${tsKind === s.k ? "var(--accent)" : "var(--border)"}`, boxShadow: tsKind === s.k ? "0 0 0 1px var(--accent)" : "none", borderRadius: 12, padding: 12, cursor: "pointer" }}>
@@ -406,32 +508,59 @@ export default function DlLab() {
                 <button className="btn" onClick={resolveSample}>Use this dataset →</button>
               </div>
             </> : <>
-              <input ref={fileRef} type="file" accept=".csv,.tsv,.txt" hidden onChange={(e) => onFile(e.target.files?.[0] || null)} />
+              <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.data,.tab,.xlsx,.xls" hidden onChange={(e) => onFile(e.target.files?.[0] || null)} />
               <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files?.[0] || null); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 22, textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
-                <div style={{ fontSize: 22, marginBottom: 4 }}>⬆</div><b>{ds ? dsName : "Drop a CSV here"}</b> {ds ? <span className="note">· {ds.nrows} rows · {ds.columns.length} columns — click to replace</span> : <span>or click to browse</span>}
-                <div className="note" style={{ marginTop: 5 }}>First row = column names · classification or regression auto-detected</div>
+                <div style={{ fontSize: 22, marginBottom: 4 }}>⬆</div><b>{ds ? dsName : "Drop a data file here"}</b> {ds ? <span className="note">· {ds.nrows} rows · {ds.columns.length} columns — click to replace</span> : <span>or click to browse</span>}
+                <div className="note" style={{ marginTop: 5 }}>CSV · TSV · TXT · .data (space/tab) · Excel .xlsx — delimiter auto-detected</div>
               </div>
               {msg && <div className="note" style={{ marginTop: 8, color: "var(--crit)" }}>{msg}</div>}
               {ds && <>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
-                  <div style={pnl}>{secHead("var(--accent)", `Feature columns · ${feats.filter((f) => f !== target).length} selected`)}
-                    <div style={{ maxHeight: 210, overflowY: "auto", padding: 8 }}>{ds.columns.filter((c) => c.name !== target).map((c) => <label key={c.name} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 7px", borderRadius: 7, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={feats.includes(c.name)} onChange={() => setFeats((f) => f.includes(c.name) ? f.filter((x) => x !== c.name) : [...f, c.name])} />{c.name}{typePill(c.type)}</label>)}</div>
+                <div className="row" style={{ gap: 14, alignItems: "center", flexWrap: "wrap", marginTop: 14 }}>
+                  <label className="row" style={{ gap: 7, alignItems: "center", fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={csvHeader} onChange={(e) => toggleHeader(e.target.checked)} />First row is a header <span className="note">(off for headerless .data files)</span></label>
+                  <div style={{ marginLeft: "auto", display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 9, padding: 3 }}>
+                    {(["tabular", "series"] as const).map((mdl) => <button key={mdl} onClick={() => setCsvMode(mdl)} style={{ padding: "5px 12px", borderRadius: 7, border: "none", background: csvMode === mdl ? "var(--accent)" : "transparent", color: csvMode === mdl ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>{mdl === "tabular" ? "Tabular" : "Time series"}</button>)}
                   </div>
-                  <div style={pnl}>{secHead("#a855f7", "Target column")}
-                    <div style={pnlBody}>
-                      <select value={target} onChange={(e) => { setTarget(e.target.value); setFeats((f) => f.filter((x) => x !== e.target.value)); }} style={{ width: "100%" }}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
-                      <div style={{ marginTop: 12, padding: "9px 11px", borderRadius: 9, background: "var(--panel-2)", border: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)" }}>Detected task: <b style={{ color: "var(--text)" }}>{ds && target ? detectTask(ds, target) : "—"}</b> — auto from the target. <span style={{ color: "var(--faint)" }}>2 → binary, 3+ → multiclass, many numeric → regression.</span></div>
-                      <div className="row" style={{ gap: 10, marginTop: 12 }}>
-                        {statCard(ds.nrows.toLocaleString(), "rows")}
-                        {statCard(ds.columns.length, "columns")}
-                        {statCard(missTotal, "missing", missTotal ? "var(--orange)" : "var(--good)")}
+                </div>
+
+                {csvMode === "tabular" ? <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 14, alignItems: "start" }}>
+                    <div style={pnl}>{secHead("var(--accent)", `Feature columns · ${feats.filter((f) => f !== target).length} selected`)}
+                      <div style={{ maxHeight: 210, overflowY: "auto", padding: 8 }}>{ds.columns.filter((c) => c.name !== target).map((c) => <label key={c.name} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 7px", borderRadius: 7, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={feats.includes(c.name)} onChange={() => setFeats((f) => f.includes(c.name) ? f.filter((x) => x !== c.name) : [...f, c.name])} />{c.name}{typePill(c.type)}</label>)}</div>
+                    </div>
+                    <div style={pnl}>{secHead("#a855f7", "Target column")}
+                      <div style={pnlBody}>
+                        <select value={target} onChange={(e) => { setTarget(e.target.value); setFeats((f) => f.filter((x) => x !== e.target.value)); }} style={{ width: "100%" }}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
+                        <div style={{ marginTop: 12, padding: "9px 11px", borderRadius: 9, background: "var(--panel-2)", border: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)" }}>Detected task: <b style={{ color: "var(--text)" }}>{ds && target ? detectTask(ds, target) : "—"}</b> — auto from the target. <span style={{ color: "var(--faint)" }}>2 → binary, 3+ → multiclass, many numeric → regression.</span></div>
+                        <div className="row" style={{ gap: 10, marginTop: 12 }}>
+                          {statCard(ds.nrows.toLocaleString(), "rows")}
+                          {statCard(ds.columns.length, "columns")}
+                          {statCard(missTotal, "missing", missTotal ? "var(--orange)" : "var(--good)")}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-                <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", margin: "16px 0 6px" }}>Preview · first 8 rows</div>
-                {previewTable()}
-                <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={buildFromCsv} disabled={!feats.filter((f) => f !== target).length}>Build & continue →</button></div>
+                  <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", margin: "16px 0 6px" }}>Preview · first 8 rows</div>
+                  {previewTable()}
+                  <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={buildFromCsv} disabled={!feats.filter((f) => f !== target).length}>Build & continue →</button></div>
+                </> : (() => {
+                  const numCols = ds.columns.filter((c) => c.type === "num"); const svals = (ds.columns.find((c) => c.name === tsCol)?.values.filter((v) => v != null).map(Number)) || [];
+                  return <div style={{ marginTop: 14 }}>
+                    {numCols.length === 0 ? <div className="note" style={{ color: "var(--crit)" }}>No numeric column to forecast. Time series needs at least one numeric column of values in time order.</div> : <>
+                      <div style={{ ...pnl }}>{secHead("#3ecf7f", "Forecast a column as a series", <span className="note" style={{ fontSize: 10 }}>rows are read in order</span>)}
+                        <div style={{ ...pnlBody, display: "grid", gridTemplateColumns: "1fr 240px", gap: 16, alignItems: "center" }}>
+                          <div>{lineSvg(svals, 340, 110)}</div>
+                          <div>
+                            <label className="fld">Value column</label>
+                            <select value={tsCol} onChange={(e) => setTsCol(e.target.value)} style={{ width: "100%", marginBottom: 12 }}>{numCols.map((c) => <option key={c.name}>{c.name}</option>)}</select>
+                            <div className="knob"><div className="kr"><span>Window size (lags)</span><b>{Math.min(winSize, Math.max(3, svals.length - 2))}</b></div><input type="range" min={3} max={24} step={1} value={winSize} onChange={(e) => setWinSize(+e.target.value)} /></div>
+                            <div className="note" style={{ marginTop: 8, fontSize: 11 }}>{svals.length} points → {Math.max(0, svals.length - 1 - Math.min(winSize, svals.length - 2))} windows. Trained on first differences, chronological split.</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="row" style={{ marginTop: 14, justifyContent: "flex-end" }}><button className="btn" onClick={buildSeriesFromCsv} disabled={svals.length < 20}>Build series →</button></div>
+                    </>}
+                  </div>;
+                })()}
               </>}
             </>}
           </div>
@@ -845,12 +974,15 @@ export default function DlLab() {
                     </div>; })()}
                 {/* predict panel */}
                 <div style={{ ...panelSt, marginBottom: 20 }}>
-                  <h4 className="fld" style={{ margin: "0 0 10px" }}>Predict a new sample <span className="note">(raw feature values)</span></h4>
-                  <div className="row" style={{ gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+                  <h4 className="fld" style={{ margin: "0 0 10px" }}>{data.text ? "Classify your own text" : "Predict a new sample"} <span className="note">{data.text ? "(TF-IDF vectorized, then scored)" : "(raw feature values)"}</span></h4>
+                  {data.text ? <div className="row" style={{ gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+                    <textarea value={predText} onChange={(e) => setPredText(e.target.value)} placeholder="Type a sentence to classify…" style={{ flex: 1, minWidth: 260, minHeight: 60, resize: "vertical", padding: 10, borderRadius: 8, background: "var(--panel-2)", border: "1px solid var(--border)", color: "var(--text)", fontSize: 13 }} />
+                    <button className="btn" onClick={doPredictText} disabled={!predText.trim()}>Classify ↗</button>
+                  </div> : <div className="row" style={{ gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
                     {data.featNames.slice(0, 8).map((f, j) => <div key={f} style={{ display: "flex", flexDirection: "column", gap: 4 }}><label className="note">{f}</label><input type="number" step="any" value={testInput[j] ?? ""} onChange={(e) => setTestInput((t) => { const n = [...t]; n[j] = +e.target.value; return n; })} style={{ width: 96 }} /></div>)}
                     {data.featNames.length > 8 && <span className="note">+{data.featNames.length - 8} more (default 0)</span>}
                     <button className="btn" onClick={doPredict}>Predict ↗</button>
-                  </div>
+                  </div>}
                   {predResult && (predResult.kind === "reg"
                     ? <div style={{ marginTop: 14, border: "1px solid var(--accent)", borderRadius: 12, padding: "14px 16px", background: "var(--surface)" }}><div className="note" style={{ textTransform: "uppercase", letterSpacing: ".04em" }}>predicted value</div><div style={{ fontSize: 26, fontWeight: 600, color: "var(--accent)" }}>{predResult.value.toFixed(3)}</div></div>
                     : <div style={{ marginTop: 14, border: "1px solid var(--good)", borderRadius: 12, padding: "14px 16px", background: "var(--surface)" }}><div className="note" style={{ textTransform: "uppercase", letterSpacing: ".04em" }}>predicted class</div><div style={{ fontSize: 24, fontWeight: 600, color: "var(--good)" }}>{predResult.label} <span style={{ fontSize: 14, color: "var(--muted)", fontWeight: 400 }}>· {(predResult.conf * 100).toFixed(0)}% confident</span></div>
