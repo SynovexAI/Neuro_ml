@@ -169,6 +169,7 @@ export default function MlLab() {
   const [params, setParams] = useState<Record<string, string>>({});
   const [testSize, setTestSize] = useState(0.2);
   const [cvFolds, setCvFolds] = useState(5);
+  const cfgNow = (): TrainConfig => ({ task, algo, params, testSize, cvFolds });
 
   // validation
   const [valSize, setValSize] = useState(0.2);
@@ -1663,7 +1664,6 @@ ${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("acc
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
   function downloadBlob2(data: BlobPart, filename: string, mime: string) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: mime })); a.download = filename; a.click(); URL.revokeObjectURL(a.href); }
 
-  const cfgNow = (): TrainConfig => ({ task, algo, params, testSize, cvFolds });
   const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
   const numFeats = () => (ds ? features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num" && f !== target) : []);
 
