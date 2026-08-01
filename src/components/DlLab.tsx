@@ -49,6 +49,7 @@ export default function DlLab() {
   const [data, setData] = useState<Resolved | null>(null);
   const [testFrac, setTestFrac] = useState(0.25);
   const [scaleMethod, setScaleMethod] = useState<ScaleMethod>("standard");
+  const [imputeMethod, setImputeMethod] = useState<"Mean" | "Median" | "Most frequent" | "Constant">("Mean");
   const [encMethod, setEncMethod] = useState<"One-Hot" | "Ordinal" | "Frequency" | "Binary">("One-Hot");
   const [balanceClasses, setBalanceClasses] = useState(false);
   const [exFx, setExFx] = useState(0);
@@ -99,15 +100,20 @@ export default function DlLab() {
     if (col.type === "num" && uniq > 12) return "regression";
     return uniq <= 2 ? "binary" : "multiclass";
   }
-  // Encoding steps for the categorical feature columns, using the chosen method.
-  function encSteps(d: Dataset, fcols: string[]): PrepStep[] {
-    return d.columns.filter((c) => c.type === "cat" && fcols.includes(c.name) && c.name !== target).map((c) => ({ op: "Encode categorical", cols: [c.name], method: encMethod }));
+  // Impute (chosen method) + encode (chosen method) steps for the selected feature columns.
+  function prepSteps(d: Dataset, fcols: string[]): PrepStep[] {
+    const steps: PrepStep[] = [];
+    d.columns.filter((c) => fcols.includes(c.name) && c.name !== target).forEach((c) => {
+      steps.push({ op: "Impute missing", cols: [c.name], method: imputeMethod });
+      if (c.type === "cat") steps.push({ op: "Encode categorical", cols: [c.name], method: encMethod });
+    });
+    return steps;
   }
   function deriveCsv(): Resolved | null {
     if (!ds || !feats.length || !target) return null;
     const fcols = feats.filter((f) => f !== target);
     const dlTask = detectTask(ds, target);
-    const b = buildMatrix(ds, fcols, target, dlTask === "regression" ? "regression" : "classification", encSteps(ds, fcols));
+    const b = buildMatrix(ds, fcols, target, dlTask === "regression" ? "regression" : "classification", prepSteps(ds, fcols));
     if (!b.X.length) return null;
     const classes = b.classes ?? [];
     const task: DlTask = dlTask === "regression" ? "regression" : (classes.length <= 2 ? "binary" : "multiclass");
@@ -121,12 +127,12 @@ export default function DlLab() {
       setData(d); resetTraining(); setStep("explore"); setMsg("");
     } catch (e) { setMsg("Build error: " + (e as Error).message); }
   }
-  // Changing the encoding re-runs buildMatrix → new input columns → reset training.
+  // Changing imputation or encoding re-runs buildMatrix → new fill values / input columns → reset training.
   useEffect(() => {
     if (!data || source !== "csv" || !ds) return;
     try { const d = deriveCsv(); if (d) { setData(d); resetTraining(); } } catch { /* keep prior matrix */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [encMethod]);
+  }, [encMethod, imputeMethod]);
   // Scaling method, split ratio, and class-balancing all change the matrix/loss → any trained net is stale.
   useEffect(() => {
     if (data && netRef.current) resetTraining();
@@ -368,14 +374,13 @@ export default function DlLab() {
         const nTest = Math.max(1, Math.round(data.X.length * testFrac)); const nTrain = data.X.length - nTest;
         // real facts about what the auto-pipeline did to the loaded data
         let imputed = 0; const catInfo: { name: string; n: number }[] = [];
-        if (isCsv && ds) { const fcols = feats.filter((f) => f !== target); ds.columns.filter((c) => fcols.includes(c.name)).forEach((c) => { if (c.type === "num") imputed += c.values.filter((v) => v == null).length; else catInfo.push({ name: c.name, n: data.featNames.filter((fn) => fn === c.name || fn.startsWith(c.name + "=") || fn.startsWith(c.name + "_b")).length }); }); }
+        if (isCsv && ds) { const fcols = feats.filter((f) => f !== target); ds.columns.filter((c) => fcols.includes(c.name)).forEach((c) => { imputed += c.values.filter((v) => v == null).length; if (c.type === "cat") catInfo.push({ name: c.name, n: data.featNames.filter((fn) => fn === c.name || fn.startsWith(c.name + "=") || fn.startsWith(c.name + "_b")).length }); }); }
         const rawCols = isCsv ? feats.filter((f) => f !== target).length : nf;
         const hasCat = catInfo.length > 0;
         const cnt = data.task !== "regression" ? (() => { const c = new Array(K).fill(0); data.y.forEach((v) => c[v]++); return c; })() : null;
-        const cw = cnt && balanceClasses ? classWeights(data.y, K) : null;
         const flowSteps: { l: string; s: string; on: boolean }[] = [
           { l: "Raw", s: `${rawCols} col${rawCols === 1 ? "" : "s"}`, on: true },
-          { l: "Impute", s: imputed ? `${imputed} filled` : "none", on: imputed > 0 },
+          { l: "Impute", s: imputed ? `${imputeMethod} · ${imputed}` : "none", on: imputed > 0 },
           { l: "Encode", s: hasCat ? encMethod : "none", on: hasCat },
           { l: "Scale", s: scaleMethod === "none" ? "off" : scaleName, on: scaleMethod !== "none" },
           { l: "Split", s: `${nTrain}/${nTest}`, on: true },
@@ -384,7 +389,7 @@ export default function DlLab() {
         const summary: { ic: string; txt: React.ReactNode }[] = [];
         summary.push({ ic: "🧮", txt: <><b>{nf}</b> model input{nf === 1 ? "" : "s"} from <b>{rawCols}</b> {isCsv ? "selected" : "raw"} column{rawCols === 1 ? "" : "s"}{data.task !== "regression" ? <> · target <b>{data.classes.length}</b> classes</> : <> · numeric target</>}</> });
         if (isCsv) {
-          summary.push({ ic: "🩹", txt: imputed ? <>Imputed <b>{imputed}</b> missing numeric value{imputed === 1 ? "" : "s"} with the column mean</> : <>No missing values found — nothing imputed</> });
+          summary.push({ ic: "🩹", txt: imputed ? <>Imputed <b>{imputed}</b> missing value{imputed === 1 ? "" : "s"} with <b>{imputeMethod}</b></> : <>No missing values found — nothing imputed</> });
           if (hasCat) catInfo.forEach((ci) => summary.push({ ic: "🔤", txt: <><b>{encMethod}</b> encoded <b>{ci.name}</b> → <b>{ci.n}</b> column{ci.n === 1 ? "" : "s"}</> }));
           else summary.push({ ic: "🔤", txt: <>No categorical columns — no encoding needed</> });
         } else summary.push({ ic: "🔢", txt: <>Built-in <b>{data.source}</b> — all numeric, no missing values or categoricals</> });
@@ -392,67 +397,124 @@ export default function DlLab() {
         if (cnt) summary.push({ ic: "⚖️", txt: balanceClasses ? <>Class weights <b>on</b> — rarer classes are upweighted in the loss</> : <>Class weights off — classes train in their natural proportion</> });
         const boxRaw = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => r[j]), marker: { color: "#5b7cff" }, boxpoints: false }));
         const boxScaled = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => (r[j] - scViz.mean[j]) / scViz.std[j]), marker: { color: "#3ecf7f" }, boxpoints: false }));
-        const fj = Math.min(exFx, nf - 1); const raw = data.X.map((r) => r[fj]); const scv = raw.map((v) => (v - scViz.mean[fj]) / scViz.std[fj]);
+        // ── per-column inspect (missing → impute, categorical → encode, numeric → scale) ──
+        const inspectCols: { name: string; type: "num" | "cat"; values: (number | string | null)[] }[] = isCsv && ds
+          ? ds.columns.filter((c) => feats.includes(c.name) && c.name !== target).map((c) => ({ name: c.name, type: c.type as "num" | "cat", values: c.values }))
+          : data.featNames.map((n, j) => ({ name: n, type: "num" as const, values: data.X.map((r) => r[j]) as (number | string | null)[] }));
+        const iIdx = Math.min(exFx, Math.max(0, inspectCols.length - 1)); const iSel = inspectCols[iIdx];
+        const iMissing = iSel ? iSel.values.filter((v) => v == null).length : 0;
+        const numPresent = iSel && iSel.type === "num" ? iSel.values.filter((v): v is number => v != null).map(Number) : [];
+        const fillVal = (() => { if (!numPresent.length) return 0; if (imputeMethod === "Median") { const s = [...numPresent].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; } if (imputeMethod === "Constant") return 0; if (imputeMethod === "Most frequent") { const m = new Map<number, number>(); numPresent.forEach((v) => m.set(v, (m.get(v) || 0) + 1)); return [...m.entries()].sort((a, b) => b[1] - a[1])[0][0]; } return numPresent.reduce((a, b) => a + b, 0) / numPresent.length; })();
+        const numJ = iSel && iSel.type === "num" ? data.featNames.indexOf(iSel.name) : -1;
+        const numScaled = numJ >= 0 ? data.X.map((r) => (r[numJ] - scViz.mean[numJ]) / scViz.std[numJ]) : [];
+        // categorical: replay impute+encode for the mapping table
+        const catData = iSel && iSel.type === "cat" ? (() => {
+          const raw0 = iSel.values.map((v) => (v == null ? null : String(v)));
+          const present = raw0.filter((v): v is string => v != null);
+          const modeC = (() => { const m = new Map<string, number>(); present.forEach((v) => m.set(v, (m.get(v) || 0) + 1)); return [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? ""; })();
+          const filled = raw0.map((v) => (v == null ? (imputeMethod === "Constant" ? "missing" : modeC) : v)) as string[];
+          const cm = new Map<string, number>(); filled.forEach((v) => cm.set(v, (cm.get(v) || 0) + 1));
+          const cats = [...cm.keys()]; const bits = Math.max(1, Math.ceil(Math.log2(cats.length || 1)));
+          const map = cats.map((cat, i) => { let enc: string; if (encMethod === "Ordinal") enc = String(i); else if (encMethod === "Frequency") enc = (cm.get(cat)! / filled.length).toFixed(3); else if (encMethod === "Binary") { let s = ""; for (let b = bits - 1; b >= 0; b--) s += (i >> b) & 1; enc = s; } else enc = `${iSel.name}=${cat}`; return { cat, count: cm.get(cat)!, enc }; });
+          return { cats, counts: cats.map((c) => cm.get(c)!), map };
+        })() : null;
         const SCALES: [ScaleMethod, string, string][] = [["standard", "Standard", "z=(x−μ)/σ"], ["minmax", "Min-Max", "→[0,1]"], ["robust", "Robust", "median/IQR"], ["none", "None", "raw"]];
-        const optPanel: React.CSSProperties = { ...panelSt, padding: 14 };
+        const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
+        const pnlBody: React.CSSProperties = { padding: 16 };
+        const secHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "11px 16px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+        const cwShown = cnt ? (balanceClasses ? classWeights(data.y, K) : cnt.map(() => 1)) : null;
+        const wBadge = (w: number) => { const up = w > 1.02; return <span className="mono" style={{ fontSize: 10.5, fontWeight: 600, padding: "1px 7px", borderRadius: 20, color: up ? "#3ecf7f" : "var(--faint)", background: up ? "rgba(62,207,127,.14)" : "var(--panel-2)", border: `1px solid ${up ? "rgba(62,207,127,.32)" : "var(--border)"}` }}>×{w.toFixed(2)}</span>; };
+        const minC = cnt ? Math.min(...cnt) : 0, maxC = cnt ? Math.max(...cnt) : 0; const ratio = minC ? maxC / minC : 1;
+        const insight = cnt ? (ratio < 1.25
+          ? <>Classes are fairly even ({ratio.toFixed(1)}× spread) — balancing has little effect here.</>
+          : <>Rarest <b>{data.classes[cnt.indexOf(minC)]}</b> is <b>{ratio.toFixed(1)}×</b> under the largest class. {balanceClasses ? <>Weights rebalance the loss so it isn&apos;t ignored.</> : <>Enable <b>Balance classes</b> to stop the model favouring the majority.</>}</>) : null;
         return <div className="card"><div className="card-h"><span className="t">Preprocess — turn raw data into a training matrix</span></div>
           <div className="card-b">
             <div className="teach-note"><span className="ic">🛠️</span><span>Every choice here <b>actually rebuilds the matrix the network trains on</b>: encoding sets the input width, scaling rescales each feature (fit on the train split only, so no leakage), the split holds out a test set, and class weights reshape the loss. Change any of them and the model must retrain.</span></div>
             <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap", margin: "14px 0 4px" }}>{flowSteps.map((f, i) => <span key={f.l} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ padding: "5px 11px", borderRadius: 8, border: `1px solid ${f.on ? "var(--border-strong)" : "var(--border)"}`, background: f.on ? "var(--surface)" : "var(--panel)", opacity: f.on ? 1 : 0.5, minWidth: 62, textAlign: "center" }}><span style={{ fontWeight: 600, fontSize: 12 }}>{f.l}</span><br /><span className="note" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{f.s}</span></span>{i < flowSteps.length - 1 && <span style={{ color: "var(--faint)" }}>→</span>}</span>)}</div>
 
-            <div className="split col-2e" style={{ gap: 16, alignItems: "start", marginTop: 14 }}>
+            <div className="split col-2e" style={{ gap: 16, alignItems: "stretch", marginTop: 14 }}>
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div style={optPanel}>
-                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>What happened to your data</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{summary.map((s, i) => <div key={i} className="row" style={{ gap: 8, alignItems: "start", fontSize: 12.5 }}><span style={{ flex: "0 0 auto" }}>{s.ic}</span><span style={{ color: "var(--muted)" }}>{s.txt}</span></div>)}</div>
+                <div style={pnl}>
+                  {secHead("var(--accent)", "What happened to your data", <span className="mono note" style={{ fontSize: 10.5 }}>{nf} inputs</span>)}
+                  <div style={{ ...pnlBody, display: "flex", flexDirection: "column", gap: 9 }}>{summary.map((s, i) => <div key={i} className="row" style={{ gap: 9, alignItems: "start", fontSize: 12.5 }}><span style={{ flex: "0 0 auto", fontSize: 13, lineHeight: "18px" }}>{s.ic}</span><span style={{ color: "var(--muted)", lineHeight: "18px" }}>{s.txt}</span></div>)}</div>
                 </div>
-                <div style={optPanel}>
-                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Options</div>
-                  <label className="fld">Feature scaling</label>
-                  <div className="chips" style={{ marginBottom: 12 }}>{SCALES.map(([m, l, sub]) => <button key={m} className={`chip ${scaleMethod === m ? "on" : ""}`} onClick={() => setScaleMethod(m)} title={sub}>{l}</button>)}</div>
-                  <label className="fld">Categorical encoding {!hasCat && <span className="note">— no categorical columns</span>}</label>
-                  <select value={encMethod} onChange={(e) => setEncMethod(e.target.value as typeof encMethod)} disabled={!hasCat} style={{ width: "100%", marginBottom: 12, opacity: hasCat ? 1 : 0.5 }}>
-                    {["One-Hot", "Ordinal", "Frequency", "Binary"].map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                  <label className="fld">Test split — {Math.round(testFrac * 100)}% held out ({nTest} rows)</label>
-                  <input type="range" min={0.1} max={0.4} step={0.05} value={testFrac} onChange={(e) => setTestFrac(+e.target.value)} style={{ width: "100%", marginBottom: 12 }} />
-                  <label className="row" style={{ gap: 8, alignItems: "center", cursor: data.task === "regression" ? "not-allowed" : "pointer", opacity: data.task === "regression" ? 0.5 : 1 }}>
-                    <input type="checkbox" checked={balanceClasses} disabled={data.task === "regression"} onChange={(e) => setBalanceClasses(e.target.checked)} />
-                    <span style={{ fontSize: 12.5 }}>Balance classes <span className="note">— upweight rare classes in the loss{data.task === "regression" ? " (classification only)" : ""}</span></span>
-                  </label>
+                <div style={{ ...pnl, flex: 1 }}>
+                  {secHead("#a855f7", "Options — rebuild the matrix", <span className="note" style={{ fontSize: 10 }}>retrains on change</span>)}
+                  <div style={pnlBody}>
+                    <label className="fld">Missing values — imputation {isCsv ? (imputed ? <span className="note">— {imputed} to fill</span> : <span className="note">— none in this data</span>) : <span className="note">— none in built-in data</span>}</label>
+                    <select value={imputeMethod} onChange={(e) => setImputeMethod(e.target.value as typeof imputeMethod)} disabled={!isCsv || imputed === 0} style={{ width: "100%", marginBottom: 14, opacity: isCsv && imputed ? 1 : 0.5 }}>
+                      {["Mean", "Median", "Most frequent", "Constant"].map((m) => <option key={m} value={m}>{m}{m === "Constant" ? " (0 / \"missing\")" : m === "Mean" || m === "Median" ? " (numeric)" : ""}</option>)}
+                    </select>
+                    <label className="fld">Categorical encoding {!hasCat && <span className="note">— none in this data</span>}</label>
+                    <select value={encMethod} onChange={(e) => setEncMethod(e.target.value as typeof encMethod)} disabled={!hasCat} style={{ width: "100%", marginBottom: 14, opacity: hasCat ? 1 : 0.5 }}>
+                      {["One-Hot", "Ordinal", "Frequency", "Binary"].map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <label className="fld">Feature scaling</label>
+                    <div className="chips" style={{ marginBottom: 14 }}>{SCALES.map(([m, l, sub]) => <button key={m} className={`chip ${scaleMethod === m ? "on" : ""}`} onClick={() => setScaleMethod(m)} title={sub}>{l}</button>)}</div>
+                    <label className="fld">Test split — <b style={{ color: "var(--text)" }}>{Math.round(testFrac * 100)}%</b> held out ({nTest} rows)</label>
+                    <input type="range" min={0.1} max={0.4} step={0.05} value={testFrac} onChange={(e) => setTestFrac(+e.target.value)} style={{ width: "100%", marginBottom: 14 }} />
+                    <label className="row" style={{ gap: 9, alignItems: "center", cursor: data.task === "regression" ? "not-allowed" : "pointer", opacity: data.task === "regression" ? 0.5 : 1, padding: "9px 11px", border: "1px solid var(--border)", borderRadius: 9, background: balanceClasses ? "rgba(62,207,127,.08)" : "var(--panel-2)" }}>
+                      <input type="checkbox" checked={balanceClasses} disabled={data.task === "regression"} onChange={(e) => setBalanceClasses(e.target.checked)} />
+                      <span style={{ fontSize: 12.5 }}>Balance classes <span className="note">— upweight rare classes in the loss{data.task === "regression" ? " (classification only)" : ""}</span></span>
+                    </label>
+                  </div>
                 </div>
               </div>
 
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div>
-                  <label className="fld">Feature scales — raw (blue) vs {scaleName} (green){scaleMethod === "none" && " — identical: scaling is off"}</label>
-                  <div className="split col-2e" style={{ gap: 10 }}>
-                    <Plot data={boxRaw as never} layout={lay("raw ranges", "", "value", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
-                    <Plot data={boxScaled as never} layout={lay(scaleName, "", "scaled", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={pnl}>
+                  {secHead("#5b7cff", "Feature scales", <span className="note" style={{ fontSize: 10 }}>raw → {scaleName}{scaleMethod === "none" && " (off)"}</span>)}
+                  <div style={{ ...pnlBody, paddingTop: 6 }}>
+                    <div className="split col-2e" style={{ gap: 10 }}>
+                      <Plot data={boxRaw as never} layout={lay("raw ranges", "", "value", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+                      <Plot data={boxScaled as never} layout={lay(scaleName, "", "scaled", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+                    </div>
                   </div>
                 </div>
-                <div>
-                  <label className="fld">Train / test split</label>
-                  <div style={{ display: "flex", height: 30, borderRadius: 7, overflow: "hidden", border: "1px solid var(--border)" }}>
-                    <div style={{ width: `${(1 - testFrac) * 100}%`, background: "var(--accent)", color: "#fff", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>train · {nTrain}</div>
-                    <div style={{ width: `${testFrac * 100}%`, background: "var(--panel-2)", color: "var(--muted)", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>test · {nTest}</div>
+                <div style={{ ...pnl, flex: 1 }}>
+                  {secHead("#3ecf7f", cnt ? "Split & class balance" : "Train / test split", <span className="mono note" style={{ fontSize: 10.5 }}>{Math.round((1 - testFrac) * 100)} / {Math.round(testFrac * 100)}</span>)}
+                  <div style={pnlBody}>
+                    <div style={{ display: "flex", height: 30, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border)" }}>
+                      <div style={{ width: `${(1 - testFrac) * 100}%`, background: "var(--accent)", color: "#fff", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 0 }}>train · {nTrain}</div>
+                      <div style={{ width: `${testFrac * 100}%`, background: "var(--panel-2)", color: "var(--muted)", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 0 }}>test · {nTest}</div>
+                    </div>
+                    {cnt && (() => { const mx = Math.max(...cnt, 1); return <div style={{ marginTop: 16 }}>
+                      <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: 9 }}><span className="fld" style={{ margin: 0 }}>Class balance</span>{cwShown && <span className="note" style={{ fontSize: 10 }}>{balanceClasses ? "training weight" : "count"}</span>}</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{cnt.map((c, i) => <div key={i} className="row" style={{ gap: 10, alignItems: "center", fontSize: 11.5 }}>
+                        <span style={{ flex: "0 0 72px", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.classes[i] ?? `class ${i}`}</span>
+                        <div style={{ flex: 1, height: 16, background: "var(--panel-2)", borderRadius: 5, overflow: "hidden" }}><div style={{ width: `${(c / mx) * 100}%`, height: "100%", background: PAL[i % PAL.length], borderRadius: 5 }} /></div>
+                        <span className="mono" style={{ flex: "0 0 40px", textAlign: "right", color: "var(--faint)" }}>{c}</span>
+                        {cwShown && <span style={{ flex: "0 0 54px", textAlign: "right" }}>{wBadge(cwShown[i])}</span>}
+                      </div>)}</div>
+                      <div className="note" style={{ marginTop: 14, padding: "9px 11px", borderRadius: 9, background: "var(--panel-2)", border: "1px solid var(--border)", display: "flex", gap: 8, alignItems: "start", lineHeight: "17px" }}><span style={{ flex: "0 0 auto" }}>💡</span><span>{insight}</span></div>
+                    </div>; })()}
                   </div>
                 </div>
-                {cnt && (() => { const mx = Math.max(...cnt, 1); return <div>
-                  <label className="fld">Class balance{balanceClasses && " — with training weights"}</label>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>{cnt.map((c, i) => <div key={i} className="row" style={{ gap: 8, alignItems: "center", fontSize: 11.5 }}>
-                    <span style={{ flex: "0 0 84px", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.classes[i] ?? `class ${i}`}</span>
-                    <div style={{ flex: 1, height: 14, background: "var(--panel-2)", borderRadius: 4, overflow: "hidden" }}><div style={{ width: `${(c / mx) * 100}%`, height: "100%", background: PAL[i % PAL.length] }} /></div>
-                    <span className="mono" style={{ flex: "0 0 auto", color: "var(--faint)" }}>{c}{cw && <> · ×{cw[i].toFixed(2)}</>}</span>
-                  </div>)}</div>
-                </div>; })()}
               </div>
             </div>
 
-            <div className="row" style={{ gap: 8, alignItems: "center", margin: "16px 0 4px" }}><label className="note">Inspect one feature before/after scaling:</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></div>
-            <div className="split col-2e" style={{ gap: 12 }}>
-              <Plot data={[{ type: "histogram", x: raw, marker: { color: "#5b7cff" }, opacity: 0.85 }] as never} layout={lay(`${data.featNames[fj]} — raw`, data.featNames[fj], "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
-              <Plot data={[{ type: "histogram", x: scv, marker: { color: "#3ecf7f" }, opacity: 0.85 }] as never} layout={lay(`${data.featNames[fj]} — ${scaleName}`, "scaled", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+            <div className="row" style={{ gap: 10, alignItems: "center", margin: "18px 0 10px", flexWrap: "wrap" }}>
+              <label className="note" style={{ margin: 0 }}>Inspect a column through the pipeline:</label>
+              <select value={iIdx} onChange={(e) => setExFx(+e.target.value)}>{inspectCols.map((c, i) => <option key={i} value={i}>{c.name}{c.type === "cat" ? "  (categorical)" : ""}</option>)}</select>
+              {iSel && <span className="mono" style={{ fontSize: 10.5, color: "var(--faint)" }}>{iSel.type === "cat" ? `impute(${imputeMethod})  →  ${encMethod}  →  ${catData?.map.length ?? 0} col${(catData?.map.length ?? 0) === 1 ? "" : "s"}` : `impute(${imputeMethod}${iMissing ? ` = ${fillVal.toFixed(2)}` : ""})  →  ${scaleName}`}</span>}
+            </div>
+            <div className="split col-2e" style={{ gap: 12, alignItems: "start" }}>
+              <div>
+                <div className="fld">Before — raw{iMissing ? <span className="note"> · {iMissing} missing</span> : null}</div>
+                {iSel && iSel.type === "cat"
+                  ? <Plot data={[{ type: "bar", x: catData!.cats, y: catData!.counts, marker: { color: "#5b7cff" } }] as never} layout={lay(`${iSel.name} — categories`, "", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />
+                  : <Plot data={[{ type: "histogram", x: numPresent, marker: { color: "#5b7cff" }, opacity: 0.85 }] as never} layout={lay(`${iSel?.name ?? ""} — raw values`, iSel?.name ?? "", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />}
+              </div>
+              <div>
+                <div className="fld">After — {iSel && iSel.type === "cat" ? `${encMethod} encoded columns` : "model input (imputed + scaled)"}</div>
+                {iSel && iSel.type === "cat"
+                  ? <div style={{ height: H, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10 }}><table className="dtable" style={{ width: "100%" }}><tbody>
+                      <tr><th style={{ textAlign: "left" }}>category</th><th>rows</th><th style={{ textAlign: "left" }}>encoded</th></tr>
+                      {catData!.map.map((m, i) => <tr key={i}><td>{m.cat}</td><td style={{ textAlign: "center", color: "var(--faint)" }}>{m.count}</td><td className="mono" style={{ color: "#3ecf7f" }}>{m.enc}</td></tr>)}
+                    </tbody></table></div>
+                  : <Plot data={[{ type: "histogram", x: numScaled, marker: { color: "#3ecf7f" }, opacity: 0.85 }] as never} layout={lay(`${iSel?.name ?? ""} — ${scaleName}`, "scaled value", "count", { height: H, showlegend: false }) as never} style={{ height: H, width: "100%" }} />}
+              </div>
             </div>
             <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("explore")}>← Back</button><button className="btn" onClick={() => setStep("arch")}>Next: Architecture →</button></div>
           </div>
