@@ -218,6 +218,7 @@ export default function MlLab() {
   const [dbF2, setDbF2] = useState("");
   const [dbSurf, setDbSurf] = useState<ReturnType<typeof decisionSurface>>(null);
   const [lcData, setLcData] = useState<{ n: number; train: number; test: number }[]>([]);
+  const [lcFeats, setLcFeats] = useState<string[]>([]);
   const [codeDraft, setCodeDraft] = useState("");
   const [codeDirty, setCodeDirty] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
@@ -272,6 +273,17 @@ export default function MlLab() {
     setRFrom(0); setRTo(Math.min(10, parsed.nrows));
   }
   function setParamsFor(tk: Task, a: string) { const p: Record<string, string> = {}; MODELS[tk][a].forEach((s) => { p[s.name] = String(s.def); }); setParams(p); }
+  // Change the target column: re-infer the task, reset features + downstream results.
+  function pickTarget(name: string) {
+    if (!ds) return;
+    const col = ds.columns.find((c) => c.name === name); if (!col) return;
+    const uniq = new Set(col.values.filter((v) => v != null).map(String)).size;
+    const tk: Task = (col.type === "cat" || uniq <= 12) ? "classification" : "regression";
+    setTarget(name); setTask(tk);
+    const a = Object.keys(MODELS[tk])[0]; setAlgo(a); setParamsFor(tk, a);
+    setFeatures(ds.columns.filter((c) => c.name !== name).map((c) => c.name));
+    setResult(null); setDbSurf(null); setLcData([]); setLcFeats([]);
+  }
   useEffect(() => { loadCSV(sampleDatasets().find((d) => d.key === "churn")!.csv, "churn sample", "churn", "classification"); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Load a saved build when opened from My Projects (?project=<id>). Only the
   // config is stored (not raw data), so we re-seed a sample by name and re-apply.
@@ -556,8 +568,21 @@ ${evalBlock}`;
   }
   function runLC() {
     if (!ds) return;
-    try { const b = buildMatrix(ds, features, target, task, steps); setLcData(learningCurve(b.X, b.y, cfgNow(), b.classes?.length || 0)); }
+    const use = lcFeats.length ? lcFeats : features;
+    if (!use.length) { setMsg("Pick at least one feature for the learning curve."); return; }
+    try { const b = buildMatrix(ds, use, target, task, steps); setLcData(learningCurve(b.X, b.y, cfgNow(), b.classes?.length || 0)); }
     catch (e) { setMsg("Learning curve error: " + (e as Error).message); }
+  }
+  // Auto-diagnose the learning curve → good fit / overfit / underfit.
+  function lcDiagnosis() {
+    if (!lcData.length) return null;
+    const last = lcData[lcData.length - 1];
+    const gap = last.train - last.test;
+    const fmt = task === "classification" ? (v: number) => `${(v * 100).toFixed(0)}%` : (v: number) => v.toFixed(2);
+    const goodThresh = task === "classification" ? 0.7 : 0.5;
+    if (gap > 0.15) return { label: "Overfitting", cls: "bad", why: `train ${fmt(last.train)} ≫ validation ${fmt(last.test)} — the model memorises the training data. Try more data, fewer features, or stronger regularisation.` };
+    if (last.test < goodThresh && last.train < goodThresh + 0.1) return { label: "Underfitting", cls: "warn", why: `both scores are low and flat (~${fmt(last.test)}) — the model is too simple. Try a more powerful model or more features.` };
+    return { label: "Good fit", cls: "ok", why: `train and validation converge (${fmt(last.test)}) with a small gap — healthy generalisation.` };
   }
   function lcFig() {
     if (!lcData.length) return null; const t = plotlyTheme();
@@ -633,7 +658,13 @@ ${evalBlock}`;
                 {viewMode !== "range" ? <span className="row" style={{ gap: 6 }}><span className="note">rows</span><input type="number" value={nRows} min={1} max={ds.nrows} onChange={(e) => setNRows(Math.max(1, +e.target.value))} style={{ width: 70 }} /></span>
                   : <span className="row" style={{ gap: 6 }}><span className="note">from</span><input type="number" value={rFrom} min={0} max={ds.nrows} onChange={(e) => setRFrom(+e.target.value)} style={{ width: 70 }} /><span className="note">to</span><input type="number" value={rTo} min={1} max={ds.nrows} onChange={(e) => setRTo(+e.target.value)} style={{ width: 70 }} /></span>}
               </div>
-              <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>#</th>{ds.columns.map((c) => <th key={c.name}>{c.name} <span style={{ color: "var(--faint)" }}>{c.type}{c.name === target ? "·target" : ""}</span></th>)}</tr>{viewRows.map((r) => <tr key={r}><td style={{ color: "var(--faint)" }}>{r}</td>{ds.columns.map((c) => <td key={c.name}>{c.values[r] ?? "—"}</td>)}</tr>)}</tbody></table></div>
+              <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 12, flexWrap: "wrap", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 12px" }}>
+                <label className="fld" style={{ margin: 0 }}>🎯 Target column <span className="note">— what the model predicts</span></label>
+                <select value={target} onChange={(e) => pickTarget(e.target.value)} style={{ maxWidth: 220 }}>{ds.columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select>
+                <span className="badge">{task}</span>
+                <span className="note">{features.length} feature{features.length === 1 ? "" : "s"} · task auto-detected from the column</span>
+              </div>
+              <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>#</th>{ds.columns.map((c) => <th key={c.name}>{c.name} <span style={{ color: c.name === target ? "var(--accent)" : "var(--faint)" }}>{c.type}{c.name === target ? "·target" : ""}</span></th>)}</tr>{viewRows.map((r) => <tr key={r}><td style={{ color: "var(--faint)" }}>{r}</td>{ds.columns.map((c) => <td key={c.name}>{c.values[r] ?? "—"}</td>)}</tr>)}</tbody></table></div>
               <label className="fld" style={{ marginTop: 16 }}>Summary statistics (numeric columns · like pandas .describe())</label>
               <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>column</th><th>count</th><th>missing</th><th>mean</th><th>std</th><th>min</th><th>25%</th><th>50%</th><th>75%</th><th>max</th></tr>{desc.map((d) => <tr key={d.name}><td>{d.name}</td><td>{d.count}</td><td>{d.missing}</td><td>{d.mean.toFixed(2)}</td><td>{d.std.toFixed(2)}</td><td>{d.min.toFixed(1)}</td><td>{d.q25.toFixed(1)}</td><td>{d.q50.toFixed(1)}</td><td>{d.q75.toFixed(1)}</td><td>{d.max.toFixed(1)}</td></tr>)}</tbody></table></div>
               <div className="stepnav"><button className="btn" onClick={() => setStep("eda")}>Next: EDA →</button></div>
@@ -851,7 +882,7 @@ ${evalBlock}`;
           <div className="split col-2e" style={{ marginTop: 16 }}>
             <div className="card"><div className="card-h"><span className="t">Target &amp; features</span></div>
               <div className="card-b">
-                <label className="fld">Target column</label><select value={target} onChange={(e) => setTarget(e.target.value)}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
+                <label className="fld">Target column</label><select value={target} onChange={(e) => pickTarget(e.target.value)}>{ds.columns.map((c) => <option key={c.name}>{c.name}</option>)}</select>
                 <div className="split col-2e" style={{ marginTop: 12 }}><div><label className="fld">Test size</label><input type="text" value={testSize} onChange={(e) => setTestSize(Number(e.target.value) || 0.2)} /></div><div><label className="fld">CV folds</label><input type="text" value={cvFolds} onChange={(e) => setCvFolds(Number(e.target.value) || 5)} /></div></div>
                 <label className="fld" style={{ marginTop: 12 }}>Feature columns ({features.length})</label><div className="checklist">{ds.columns.filter((c) => c.name !== target).map((c) => <span key={c.name} className={`chk ${features.includes(c.name) ? "on" : ""}`} onClick={() => setFeatures((f) => f.includes(c.name) ? f.filter((x) => x !== c.name) : [...f, c.name])}>{c.name}</span>)}</div>
               </div>
@@ -1085,10 +1116,13 @@ ${evalBlock}`;
               </div>
             )}
             <div className="card" style={{ marginTop: 16 }}>
-              <div className="card-h"><span className="t">Learning curve</span><div className="r"><button className="btn sm" onClick={runLC}>{lcData.length ? "↻ Recompute" : "▶ Compute"}</button></div></div>
+              <div className="card-h"><span className="t">Learning curve</span>{(() => { const d = lcDiagnosis(); return d ? <span className="badge" style={{ color: d.cls === "ok" ? "var(--good)" : d.cls === "bad" ? "var(--crit)" : "var(--warn)", borderColor: "currentColor" }}>{d.cls === "ok" ? "✓ " : d.cls === "bad" ? "✕ " : "! "}{d.label}</span> : null; })()}<div className="r"><button className="btn sm" onClick={runLC}>{lcData.length ? "↻ Recompute" : "▶ Compute"}</button></div></div>
               <div className="card-b">
                 <div className="note" style={{ marginBottom: 10 }}>Retrains on growing slices of the data. A wide <b>train-vs-validation gap</b> = overfitting; both low &amp; flat = underfitting; converging high = healthy.</div>
+                <label className="fld">Features used ({(lcFeats.length ? lcFeats : features).length}/{features.length}) — pick columns to base the curve on, then recompute</label>
+                <div className="checklist" style={{ marginBottom: 12 }}>{features.map((f) => { const on = lcFeats.length ? lcFeats.includes(f) : true; return <span key={f} className={`chk ${on ? "on" : ""}`} onClick={() => setLcFeats((prev) => { const cur = prev.length ? prev : [...features]; const next = cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f]; return next.length === features.length ? [] : next; })}>{f}</span>; })}</div>
                 {(() => { const f = lcFig(); return f ? <Plot data={f.data} layout={f.layout} style={{ height: 300 }} /> : <div className="note">Compute to see train vs validation score as the data grows.</div>; })()}
+                {(() => { const d = lcDiagnosis(); return d ? <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">{d.cls === "ok" ? "✅" : d.cls === "bad" ? "⚠️" : "🔎"}</span><span><b>{d.label}.</b> {d.why}</span></div> : null; })()}
               </div>
             </div>
             <div className="card" style={{ marginTop: 16 }}>
