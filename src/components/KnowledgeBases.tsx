@@ -40,6 +40,8 @@ export default function KnowledgeBases() {
   const [search, setSearch] = useState("");
   const [connect, setConnect] = useState(false);
   const [pick, setPick] = useState<string | null>(null);
+  const [chunkSize, setChunkSize] = useState(60);
+  const [chunkOverlap, setChunkOverlap] = useState(12);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function loadKbs() { try { const j = await fetch("/api/kb").then((r) => r.json()); setKbs(j.kbs || []); } catch { setKbs([]); } }
@@ -102,7 +104,7 @@ export default function KnowledgeBases() {
     if (!selId || !staged.length) { setMsg("Add files or URLs first."); return; }
     setBusy("sync"); setMsg("");
     try {
-      const r = await fetch(`/api/kb/${selId}/sync`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ docs: staged }) });
+      const r = await fetch(`/api/kb/${selId}/sync`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ docs: staged, chunkSize, chunkOverlap: Math.min(chunkOverlap, chunkSize - 1) }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { setMsg(j.error || "Sync failed."); toast(j.error || "Sync failed", "error"); }
       else { setStaged([]); await loadKbs(); await loadDetail(selId); setTab("docs"); toast(`Synced ✓ ${j.chunkCount} chunks · ${j.embModel === "tfidf" ? "TF-IDF" : "embeddings (" + j.embModel + ")"}`, "success"); }
@@ -191,6 +193,11 @@ export default function KnowledgeBases() {
                         <button className="btn ghost sm" onClick={() => setStaged((s) => s.filter((_, j) => j !== i))}>×</button>
                       </div>
                     ))}
+                    <div className="row" style={{ gap: 14, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+                      <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Chunk size (words)</span><b>{chunkSize}</b></div><input type="range" min={20} max={200} step={10} value={chunkSize} onChange={(e) => { const v = +e.target.value; setChunkSize(v); if (chunkOverlap > v - 1) setChunkOverlap(Math.max(0, v - 1)); }} /></div>
+                      <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Overlap (words)</span><b>{chunkOverlap}</b></div><input type="range" min={0} max={Math.max(0, chunkSize - 1)} step={2} value={chunkOverlap} onChange={(e) => setChunkOverlap(+e.target.value)} /></div>
+                      <span className="note">smaller chunks = more precise retrieval; larger = more context per chunk</span>
+                    </div>
                     <button className="btn block" style={{ marginTop: 12 }} onClick={sync} disabled={busy === "sync"}>{busy === "sync" ? "Syncing → embedding + storing vectors…" : `⟳ Sync ${staged.length} doc${staged.length === 1 ? "" : "s"} to vector store`}</button>
                   </div>
                 )}

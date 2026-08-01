@@ -35,9 +35,11 @@ function denseCos(a: number[], b: number[]): number {
   return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 
-export function chunkDocs(docs: { name: string; text: string }[]): { docName: string; text: string }[] {
+export function chunkDocs(docs: { name: string; text: string }[], size = 60, overlap = 12): { docName: string; text: string }[] {
+  const sz = Math.max(20, Math.min(400, Math.round(size)));
+  const ov = Math.max(0, Math.min(sz - 1, Math.round(overlap)));
   const out: { docName: string; text: string }[] = [];
-  for (const d of docs) for (const c of chunkText(d.text, 60, 12)) out.push({ docName: d.name, text: c });
+  for (const d of docs) for (const c of chunkText(d.text, sz, ov)) out.push({ docName: d.name, text: c });
   return out;
 }
 

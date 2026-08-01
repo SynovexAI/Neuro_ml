@@ -35,7 +35,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   await db.update(knowledgeBases).set({ status: "syncing" }).where(eq(knowledgeBases.id, id));
   try {
-    const chunks = chunkDocs(docs).slice(0, MAX_CHUNKS);
+    const chunks = chunkDocs(docs, Number(b.chunkSize) || 60, Number(b.chunkOverlap) ?? 12).slice(0, MAX_CHUNKS);
     const { embModel, embMeta, vectors } = await embedChunks(chunks.map((c) => c.text), prov);
 
     await db.delete(kbChunks).where(eq(kbChunks.kbId, id));
