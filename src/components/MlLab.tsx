@@ -227,6 +227,9 @@ export default function MlLab() {
   const [prepStage, setPrepStage] = useState(0);
   const [prepStagePlaying, setPrepStagePlaying] = useState(false);
   const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [modelStage, setModelStage] = useState(0);
+  const [modelPlaying, setModelPlaying] = useState(false);
+  const modelTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -531,6 +534,9 @@ ${evalBlock}`;
   // When you pick a different method, restart the animation (but keep the selection).
   useEffect(() => { resetStage(); }, [prepImputeMethod, prepScaleMethod, prepEncodeMethod]);
   useEffect(() => () => { if (stageTimer.current) clearInterval(stageTimer.current); }, []);
+  // Model-step walkthrough resets when the algorithm / task / features change.
+  useEffect(() => { setModelStage(0); setModelPlaying(false); if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } }, [algo, task, features, target]);
+  useEffect(() => () => { if (modelTimer.current) clearInterval(modelTimer.current); }, []);
   useEffect(() => {
     if (!animPlaying || !gdAnimData) return;
     if (animIdx >= gdAnimData.frames.length - 1) { setAnimPlaying(false); return; }
@@ -603,6 +609,22 @@ ${evalBlock}`;
     </div>
   );
 
+  // Step controls for the model walkthrough (own timer so it never fights the prep card).
+  function modelStagePlay(maxStage: number) {
+    if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; setModelPlaying(false); return; }
+    setModelPlaying(true);
+    modelTimer.current = setInterval(() => { setModelStage((s) => { if (s >= maxStage) { if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } setModelPlaying(false); return s; } return s + 1; }); }, 1100);
+  }
+  const modelStageStop = () => { if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } setModelPlaying(false); };
+  const modelStageControls = (maxStage: number) => (
+    <div className="prep-ctl">
+      <button className="btn ghost sm" disabled={modelStage <= 0} onClick={() => { modelStageStop(); setModelStage((s) => Math.max(0, s - 1)); }}>← back</button>
+      <button className="btn sm" disabled={modelStage >= maxStage} onClick={() => { modelStageStop(); setModelStage((s) => Math.min(maxStage, s + 1)); }}>step →</button>
+      <button className="btn ghost sm" onClick={() => modelStagePlay(maxStage)}>{modelPlaying ? "⏸ pause" : "▶ auto"}</button>
+      <button className="btn ghost sm" onClick={() => { modelStageStop(); setModelStage(0); }}>↺ reset</button>
+      <span className="note mono" style={{ marginLeft: "auto" }}>stage {Math.min(modelStage, maxStage) + 1} / {maxStage + 1}</span>
+    </div>
+  );
   // Animated gradient descent: play the boundary/line improving as the loss drops.
   function gdAnimView() {
     if (!gdAnimData) return null;
@@ -894,20 +916,214 @@ ${evalBlock}`;
       </div>
     </>);
   }
+  // Model step: for every classifier/regressor, show the variable legend (symbol · meaning ·
+  // how it's derived from your data · its value), the formula flow, and a stepped SVG animation
+  // of the mechanism running on the real rows.
   function mathModel() {
-    const A = algo;
-    const eqs: Record<string, [string, string][]> = {
-      LogisticRegression: [["z = \\mathbf{w}\\cdot\\mathbf{x} + b", "linear score"], ["\\hat{y} = \\sigma(z) = \\frac{1}{1+e^{-z}}", "squash to a probability 0–1"], ["\\mathcal{L} = -\\tfrac{1}{n}\\sum_i\\big[y_i\\log\\hat{y}_i + (1-y_i)\\log(1-\\hat{y}_i)\\big]", "cross-entropy loss"], ["\\nabla_{\\mathbf w}\\mathcal{L} = \\tfrac{1}{n}\\,\\mathbf{X}^\\top(\\hat{\\mathbf y}-\\mathbf y)", "gradient used to update w"]],
-      LinearRegression: [["\\hat{y} = \\mathbf{w}\\cdot\\mathbf{x} + b", "predict a number"], ["\\mathcal{L} = \\tfrac{1}{n}\\sum_i (\\hat{y}_i - y_i)^2", "mean squared error"], ["\\nabla_{\\mathbf w}\\mathcal{L} = \\tfrac{2}{n}\\,\\mathbf{X}^\\top(\\hat{\\mathbf y}-\\mathbf y)", "gradient"]],
-      Ridge: [["\\hat{y} = \\mathbf{w}\\cdot\\mathbf{x} + b", "predict a number"], ["\\mathcal{L} = \\tfrac{1}{n}\\sum_i (\\hat{y}_i - y_i)^2 + \\alpha\\lVert\\mathbf{w}\\rVert^2", "MSE + L2 penalty"]],
-      KNeighborsClassifier: [["d(\\mathbf{a},\\mathbf{b}) = \\sqrt{\\sum_j (a_j-b_j)^2}", "Euclidean distance"], ["\\hat{y} = \\text{majority vote of the } k \\text{ nearest}", "no training — just look up neighbours"]],
-      KNeighborsRegressor: [["d(\\mathbf{a},\\mathbf{b}) = \\sqrt{\\sum_j (a_j-b_j)^2}", "Euclidean distance"], ["\\hat{y} = \\tfrac{1}{k}\\sum_{i\\in \\text{kNN}} y_i", "average of the k nearest"]],
-      GaussianNB: [["P(y\\mid \\mathbf{x}) \\propto P(y)\\prod_j P(x_j\\mid y)", "Bayes' rule (naïve independence)"], ["P(x_j\\mid y) = \\frac{1}{\\sqrt{2\\pi\\sigma^2}}\\,e^{-\\frac{(x_j-\\mu)^2}{2\\sigma^2}}", "Gaussian likelihood per feature"]],
-      DecisionTree: [["G = 1 - \\sum_k p_k^2", "Gini impurity of a node"], ["\\text{gain} = G_{\\text{parent}} - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", "pick the split with the biggest gain"]],
-      RandomForest: [["\\hat{y} = \\text{mode}\\{ T_1(\\mathbf x),\\dots,T_m(\\mathbf x)\\}", "vote across m trees"], ["\\text{each tree: bootstrap sample + random feature subset}", "de-correlates the trees"]],
+    const label = MODEL_INFO[algo]?.label ?? algo;
+    const isReg = task === "regression";
+    let b: ReturnType<typeof buildMatrix> | null = null;
+    try { if (ds) b = buildMatrix(ds, features, target, task, steps); } catch { b = null; }
+    if (!ds || !b || !b.X.length || !b.featureNames.length) return mCard(`${label} — how it learns`, <div className="note">Pick your features &amp; target first — then this walks the model through your actual rows.</div>);
+    const X = b.X, Y = b.y, names = b.featureNames, classes = b.classes;
+    const n = X.length, nf = names.length, K = classes?.length ?? 0;
+    // plot geometry
+    const PX0 = 30, PX1 = 344, PYb = 212, PYt = 20;
+    const sx = (t: number) => PX0 + (PX1 - PX0) * Math.max(0, Math.min(1, t));
+    const sy = (t: number) => PYb + (PYt - PYb) * Math.max(0, Math.min(1, t));
+    const pick = (m: number, mx: number) => (m <= mx ? [...Array(m).keys()] : [...Array(mx).keys()].map((k) => Math.floor(k * (m / mx))));
+    const idx = pick(n, 46);
+    const colj = (j: number) => X.map((r) => r[j] ?? 0);
+    const nrm = (arr: number[]) => { const mn = Math.min(...arr), mx = Math.max(...arr), d = (mx - mn) || 1; return { mn, mx, z: arr.map((v) => (v - mn) / d) }; };
+    const idxF = names.indexOf(dbF1) >= 0 ? names.indexOf(dbF1) : 0;
+    const idxG = names.indexOf(dbF2) >= 0 && names.indexOf(dbF2) !== idxF ? names.indexOf(dbF2) : Math.min(nf - 1, idxF + 1);
+    const clsColor = (i: number) => PAL_ML[Y[i] % PAL_ML.length];
+    const st = modelStage;
+    const frame = <rect key="fr" x={PX0} y={PYt} width={PX1 - PX0} height={PYb - PYt} fill="none" stroke="var(--border)" />;
+    const svg = (kids: React.ReactNode) => <svg viewBox="0 0 360 240" style={{ width: "100%", borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>{frame}{kids}</svg>;
+    const metric = (ids: number[]): number => { if (!ids.length) return 0; if (isReg) { const ys = ids.map((i) => Y[i]); const mu = ys.reduce((a, c) => a + c, 0) / ys.length; return ys.reduce((a, c) => a + (c - mu) ** 2, 0) / ys.length; } const c: Record<number, number> = {}; ids.forEach((i) => { c[Y[i]] = (c[Y[i]] || 0) + 1; }); let s = 1; for (const k in c) { const p = c[k] / ids.length; s -= p * p; } return s; };
+    const bestSplit = (ids: number[], feats: number[]) => {
+      const parent = metric(ids); let best = { gain: -1, feat: feats[0], thr: 0, gl: 0, gr: 0, nl: 0, nr: 0 };
+      for (const f of feats) { const vals = [...new Set(ids.map((i) => X[i][f]))].sort((a, c) => a - c); for (let t = 0; t < vals.length - 1; t++) { const thr = (vals[t] + vals[t + 1]) / 2; const L = ids.filter((i) => X[i][f] <= thr), R = ids.filter((i) => X[i][f] > thr); if (!L.length || !R.length) continue; const gl = metric(L), gr = metric(R); const gain = parent - (L.length / ids.length) * gl - (R.length / ids.length) * gr; if (gain > best.gain) best = { gain, feat: f, thr, gl, gr, nl: L.length, nr: R.length }; } }
+      return { ...best, parent };
     };
-    const rows = eqs[A] || eqs.LogisticRegression;
-    return mCard(`${MODEL_INFO[A]?.label ?? A} — the model`, <>{rows.map(([t, cap], i) => <div key={i} className="mathrow" style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 10 }}><Katex block tex={t} /><span className="note">{cap}</span></div>)}{A === "LogisticRegression" && sigmoidView()}</>);
+
+    let intro = ""; let legend: { sym: string; desc: string; how?: string; val?: string }[] = [];
+    let formulas: [string, string][] = []; let caps: string[] = []; let viz: (s: number) => React.ReactNode = () => null;
+    const kind = modelKind; // "gd" | "tree" | "forest" | "gnb" | "knn"
+
+    if (kind === "gd" && !isReg) { // Logistic Regression
+      let gw: number[] | null = null;
+      try { const gt = gdTrace(cfgNow(), X, Y, K); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
+      const z = (r: number[]) => gw ? gw[0] + r.reduce((a, v, j) => a + (gw![j + 1] || 0) * v, 0) : 0;
+      const sig = (v: number) => 1 / (1 + Math.exp(-v));
+      const f0 = nrm(colj(idxF)); const pz = X.map((r) => sig(z(r)));
+      const z0 = z(X[0]), p0 = sig(z0);
+      const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
+      intro = "A weighted sum of your features becomes a score z; the sigmoid squashes it to a probability, and 0.5 is the cut between the two classes.";
+      legend = [
+        { sym: "x", desc: `a feature`, how: `e.g. ${names[idxF]}, row 0`, val: X[0][idxF]?.toFixed(2) },
+        { sym: "\\mathbf w, b", desc: "weights & bias", how: "learned by gradient descent", val: gw ? `b=${gw[0].toFixed(2)}, w₁=${(gw[1] ?? 0).toFixed(2)}` : "—" },
+        { sym: "z", desc: "linear score", how: "w·x + b for a row", val: z0.toFixed(2) },
+        { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "σ(z)", val: p0.toFixed(2) },
+      ];
+      formulas = [["z = \\mathbf{w}\\cdot\\mathbf{x} + b", "weighted sum → a score"], ["\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", "squash into 0…1"], [`\\hat y = \\sigma(${z0.toFixed(2)}) = ${p0.toFixed(2)}`, "apply to row 0"], ["\\hat y \\ge 0.5 \\Rightarrow " + `\\text{${(classes?.[1] ?? "class 1").replace(/[^a-zA-Z0-9 ]/g, " ")}}`, "threshold the probability"]];
+      caps = [`your rows along ${names[idxF]}, labelled by class`, "the fitted probability curve", "each row drops to its predicted ŷ", "ŷ ≥ 0.5 splits the class"];
+      viz = (s) => svg([
+        ...idx.map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={s >= 2 ? sy(pz[i]) : sy(Y[i] ? 0.86 : 0.14)} r={4} fill={clsColor(i)} opacity={0.85} style={{ transition: "cy .4s" }} />),
+        s >= 1 ? <polyline key="curve" points={order.map((i) => `${sx(f0.z[i])},${sy(pz[i])}`).join(" ")} fill="none" stroke="#3ecf7f" strokeWidth={2} /> : null,
+        s >= 3 ? <line key="thr" x1={PX0} y1={sy(0.5)} x2={PX1} y2={sy(0.5)} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="5 4" /> : null,
+        s >= 3 ? <text key="thrl" x={PX0 + 3} y={sy(0.5) - 4} fill="var(--faint)" fontSize={11} fontFamily="monospace">0.5</text> : null,
+      ]);
+    } else if (kind === "gd" && isReg) { // Linear / Ridge Regression
+      let gw: number[] | null = null;
+      try { const gt = gdTrace(cfgNow(), X, Y, 0); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
+      const pred = (r: number[]) => gw ? gw[0] + r.reduce((a, v, j) => a + (gw![j + 1] || 0) * v, 0) : 0;
+      const f0 = nrm(colj(idxF)); const yn = nrm(Y); const yh = X.map(pred); const yMin = Math.min(...Y), yRange = (Math.max(...Y) - yMin) || 1; const yhn = { z: yh.map((v) => (v - yMin) / yRange) };
+      const mse = idx.reduce((a, i) => a + (yh[i] - Y[i]) ** 2, 0) / idx.length;
+      const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
+      intro = "Fit a straight line so the average squared vertical gap (residual) between the line and your points is as small as possible.";
+      legend = [
+        { sym: "x", desc: "a feature", how: `${names[idxF]}, row 0`, val: X[0][idxF]?.toFixed(2) },
+        { sym: "\\mathbf w, b", desc: "slope & intercept", how: "learned by least squares", val: gw ? `b=${gw[0].toFixed(2)}, w₁=${(gw[1] ?? 0).toFixed(2)}` : "—" },
+        { sym: "\\hat y", desc: "prediction", how: "w·x + b", val: gw ? pred(X[0]).toFixed(2) : "—" },
+        { sym: "\\mathcal L", desc: "mean squared error", how: "avg of (ŷ−y)²", val: mse.toFixed(2) },
+      ];
+      formulas = [["\\hat y = \\mathbf{w}\\cdot\\mathbf{x} + b", "a line through the cloud"], ["r_i = \\hat y_i - y_i", "residual: the miss"], [`\\mathcal L = \\tfrac1n\\sum r_i^2 = ${mse.toFixed(2)}`, "mean squared error"]].concat(algo === "Ridge" ? [["\\mathcal L \\mathrel{+}= \\alpha\\lVert\\mathbf w\\rVert^2", "Ridge adds an L2 penalty"]] : []) as [string, string][];
+      caps = ["your points: feature vs target", "the fitted line", "residuals = vertical gaps", "MSE = mean of the squares"];
+      viz = (s) => svg([
+        ...idx.map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(yn.z[i])} r={4} fill="#5b7cff" opacity={0.7} />),
+        s >= 1 ? <polyline key="ln" points={order.map((i) => `${sx(f0.z[i])},${sy(yhn.z[i])}`).join(" ")} fill="none" stroke="#f59e0b" strokeWidth={2.5} /> : null,
+        ...(s >= 2 ? idx.map((i, k) => <line key={"r" + k} x1={sx(f0.z[i])} y1={sy(yn.z[i])} x2={sx(f0.z[i])} y2={sy(yhn.z[i])} stroke="#ef4444" strokeWidth={1} opacity={0.7} />) : []),
+        s >= 3 ? <text key="mse" x={150} y={34} fill="var(--faint)" fontSize={12} fontFamily="monospace">MSE = {mse.toFixed(2)}</text> : null,
+      ]);
+    } else if (kind === "knn") {
+      const kk = Math.max(1, Math.round(Number(params.n_neighbors) || 5));
+      const qi = idx[Math.floor(idx.length / 2)] ?? 0; const q = X[qi];
+      const dist = (r: number[]) => Math.hypot(...r.map((v, j) => v - q[j]));
+      const others = idx.filter((i) => i !== qi);
+      const near = [...others].sort((a, c) => dist(X[a]) - dist(X[c])).slice(0, kk);
+      const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
+      const dNear = dist(X[near[0]]);
+      const votes = near.filter((i) => Y[i] === 1).length;
+      const yhat = isReg ? (near.reduce((a, i) => a + Y[i], 0) / near.length).toFixed(2) : (classes?.[votes * 2 >= kk ? 1 : 0] ?? "—");
+      intro = isReg ? "No training. For a new point, measure the distance to every stored point, keep the k nearest, and average their target." : "No training. For a new point, measure the distance to every stored point, keep the k nearest, and let them vote.";
+      legend = [
+        { sym: "d", desc: "Euclidean distance", how: "√Σ(aⱼ−bⱼ)² across features", val: dNear.toFixed(2) + " (nearest)" },
+        { sym: "k", desc: "neighbours kept", how: "your n_neighbors setting", val: String(kk) },
+        { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? "mean target of neighbours" : "most common class", val: String(yhat) },
+      ];
+      formulas = [["d(\\mathbf a,\\mathbf b) = \\sqrt{\\textstyle\\sum_j (a_j-b_j)^2}", "distance to every point"], [`\\text{keep the } k=${kk} \\text{ smallest } d`, "the nearest neighbours"], isReg ? ["\\hat y = \\tfrac1k\\textstyle\\sum_{i\\in kNN} y_i", "average their target"] : ["\\hat y = \\text{mode of their labels}", "they vote"]];
+      caps = ["stored rows + a new ★ point", "distance to all of them", `circle the k=${kk} nearest`, isReg ? "average → ŷ" : `vote → ${yhat}`];
+      viz = (s) => svg([
+        ...(s >= 1 ? others.map((i, k) => <line key={"l" + k} x1={sx(f0.z[qi])} y1={sy(f1.z[qi])} x2={sx(f0.z[i])} y2={sy(f1.z[i])} stroke="var(--border-strong)" strokeWidth={0.6} opacity={0.5} />) : []),
+        ...others.map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={s >= 2 && near.includes(i) ? 6 : 4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={s >= 2 && !near.includes(i) ? 0.35 : 0.85} />),
+        s >= 2 ? <circle key="ring" cx={sx(f0.z[qi])} cy={sy(f1.z[qi])} r={Math.max(...near.map((i) => Math.hypot(sx(f0.z[i]) - sx(f0.z[qi]), sy(f1.z[i]) - sy(f1.z[qi]))))} fill="none" stroke="#a855f7" strokeWidth={1.5} /> : null,
+        <text key="star" x={sx(f0.z[qi]) - 6} y={sy(f1.z[qi]) + 5} fill="var(--text)" fontSize={16} fontFamily="monospace">★</text>,
+        s >= 3 ? <text key="vt" x={116} y={PYb + 2} fill="var(--faint)" fontSize={11} fontFamily="monospace">{isReg ? `mean of ${kk} → ${yhat}` : `votes → ${yhat}`}</text> : null,
+      ]);
+    } else if (kind === "gnb") {
+      const cA = idx.filter((i) => Y[i] === 0), cB = idx.filter((i) => Y[i] === 1);
+      const colF = colj(idxF); const nf0 = nrm(colF);
+      const mV = (ids: number[]) => { const v = ids.map((i) => colF[i]); const mu = v.reduce((a, c) => a + c, 0) / (v.length || 1); const va = v.reduce((a, c) => a + (c - mu) ** 2, 0) / (v.length || 1) || 1; return { mu, va }; };
+      const sA = mV(cA.length ? cA : idx), sB = mV(cB.length ? cB : idx);
+      const priorA = (cA.length || 1) / idx.length, priorB = (cB.length || 1) / idx.length;
+      const xq = X[0][idxF]; const xqn = nf0.z[0];
+      const bell = (x: number, mu: number, va: number) => Math.exp(-((x - mu) ** 2) / (2 * va));
+      const likeA = bell(xq, sA.mu, sA.va), likeB = bell(xq, sB.mu, sB.va);
+      const range = [Math.min(...colF), Math.max(...colF)];
+      const curve = (mu: number, va: number) => { const pts: string[] = []; for (let t = 0; t <= 60; t++) { const x = range[0] + (range[1] - range[0]) * (t / 60); pts.push(`${sx(t / 60)},${sy(bell(x, mu, va) * 0.9)}`); } return pts.join(" "); };
+      intro = "Learn one bell curve (mean & variance) per class. A point's class score is that class's prior times the bell heights at the point.";
+      legend = [
+        { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `avg of ${names[idxF]} in class ${classes?.[0] ?? 0}`, val: sA.mu.toFixed(2) },
+        { sym: "\\sigma^2", desc: "class variance", how: "spread within the class", val: sA.va.toFixed(2) },
+        { sym: "P(y)", desc: "class prior", how: "class count ÷ n", val: priorA.toFixed(2) },
+        { sym: "P(x\\mid y)", desc: "bell height at x", how: "Gaussian at the point", val: likeA.toFixed(2) },
+      ];
+      formulas = [["P(x\\mid y) = \\tfrac{1}{\\sqrt{2\\pi\\sigma^2}} e^{-\\frac{(x-\\mu)^2}{2\\sigma^2}}", "a bell per class"], ["P(y\\mid x) \\propto P(y)\\,\\textstyle\\prod_j P(x_j\\mid y)", "prior × likelihoods"], [`P(${(classes?.[0] ?? "A").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${(priorA * likeA).toFixed(2)},\\ P(${(classes?.[1] ?? "B").toString().replace(/[^a-zA-Z0-9 ]/g, " ")})\\!\\propto\\!${(priorB * likeB).toFixed(2)}`, "apply → argmax wins"]];
+      caps = ["a bell curve for each class", `drop your point x = ${xq.toFixed(2)}`, "read each bell's height", `×prior → ${((priorA * likeA) >= (priorB * likeB) ? (classes?.[0] ?? "A") : (classes?.[1] ?? "B"))} wins`];
+      viz = (s) => svg([
+        <polyline key="bA" points={curve(sA.mu, sA.va)} fill="none" stroke={PAL_ML[0]} strokeWidth={2} />,
+        <polyline key="bB" points={curve(sB.mu, sB.va)} fill="none" stroke={PAL_ML[1]} strokeWidth={2} />,
+        s >= 1 ? <line key="xq" x1={sx(xqn)} y1={PYt} x2={sx(xqn)} y2={PYb} stroke="var(--faint)" strokeDasharray="4 4" /> : null,
+        s >= 1 ? <text key="xql" x={sx(xqn) - 4} y={PYb + 2} fill="var(--text)" fontSize={11} fontFamily="monospace">x</text> : null,
+        s >= 2 ? <circle key="dA" cx={sx(xqn)} cy={sy(likeA * 0.9)} r={6} fill={PAL_ML[0]} /> : null,
+        s >= 2 ? <circle key="dB" cx={sx(xqn)} cy={sy(likeB * 0.9)} r={6} fill={PAL_ML[1]} /> : null,
+        s >= 3 ? <text key="win" x={96} y={34} fill="var(--faint)" fontSize={11} fontFamily="monospace">{(priorA * likeA) >= (priorB * likeB) ? `P(${classes?.[0] ?? "A"}) wins` : `P(${classes?.[1] ?? "B"}) wins`}</text> : null,
+      ]);
+    } else { // tree & forest
+      const rowsAll = pick(n, 260);
+      const sp = bestSplit(rowsAll, [idxF, idxG]);
+      const leftIds = rowsAll.filter((i) => X[i][sp.feat] <= sp.thr);
+      const sp2 = leftIds.length > 3 ? bestSplit(leftIds, [idxF, idxG]) : null;
+      const f0 = nrm(colj(idxF)), f1 = nrm(colj(idxG));
+      const thrPosOf = (feat: number, thr: number) => { const raw = colj(feat); const mn = Math.min(...raw), mx = Math.max(...raw); return (thr - mn) / ((mx - mn) || 1); };
+      const spAxis = sp.feat === idxF ? "x" : "y";
+      const thrPos = thrPosOf(sp.feat, sp.thr);
+      const metricName = isReg ? "variance" : "Gini";
+      if (kind === "tree") {
+        intro = "Greedily test every feature threshold, keep the split that removes the most impurity, then recurse into if/else rules on each side.";
+        legend = [
+          { sym: "G", desc: `${metricName} impurity`, how: isReg ? "target spread in a node" : "1 − Σ pₖ² at a node", val: sp.parent.toFixed(3) },
+          { sym: "n_L, n_R", desc: "rows each side", how: "counts after the split", val: `${sp.nl}, ${sp.nr}` },
+          { sym: "\\text{gain}", desc: "impurity removed", how: "parent − weighted children", val: sp.gain.toFixed(3) },
+          { sym: "\\text{thr}", desc: "chosen threshold", how: `best cut on ${names[sp.feat]}`, val: sp.thr.toFixed(2) },
+        ];
+        formulas = [[`G = ${isReg ? "\\text{var}(y)" : "1 - \\sum_k p_k^2"}`, "how mixed a node is"], ["\\text{gain} = G - \\tfrac{n_L}{n}G_L - \\tfrac{n_R}{n}G_R", "impurity a split removes"], [`\\text{gain} = ${sp.parent.toFixed(2)} - \\tfrac{${sp.nl}}{${sp.nl + sp.nr}}(${sp.gl.toFixed(2)}) - \\tfrac{${sp.nr}}{${sp.nl + sp.nr}}(${sp.gr.toFixed(2)}) = ${sp.gain.toFixed(2)}`, "apply at the root"]];
+        caps = [`mixed data (${metricName} = ${sp.parent.toFixed(2)})`, `best cut: ${names[sp.feat]} ≤ ${sp.thr.toFixed(2)}`, `two purer sides (gain ${sp.gain.toFixed(2)})`, sp2 ? "recurse → cut again" : "leaves are pure enough"];
+        viz = (s) => svg([
+          ...rowsAll.filter((i) => idx.includes(i)).map((i, k) => <circle key={"p" + k} cx={sx(f0.z[i])} cy={sy(f1.z[i])} r={4} fill={isReg ? "#5b7cff" : clsColor(i)} opacity={s >= 2 ? (X[i][sp.feat] <= sp.thr ? 0.9 : 0.5) : 0.8} />),
+          s >= 1 ? (spAxis === "x" ? <line key="cut" x1={sx(thrPos)} y1={PYt} x2={sx(thrPos)} y2={PYb} stroke="#5b7cff" strokeWidth={2} /> : <line key="cut" x1={PX0} y1={sy(thrPos)} x2={PX1} y2={sy(thrPos)} stroke="#5b7cff" strokeWidth={2} />) : null,
+          s >= 1 ? <text key="cutl" x={spAxis === "x" ? sx(thrPos) + 4 : PX0 + 4} y={PYt + 12} fill="var(--faint)" fontSize={11} fontFamily="monospace">{names[sp.feat].slice(0, 10)} ≤ {sp.thr.toFixed(1)}</text> : null,
+          s >= 3 && sp2 ? (sp2.feat === idxF
+            ? <line key="cut2" x1={sx(thrPosOf(sp2.feat, sp2.thr))} y1={PYt} x2={sx(thrPosOf(sp2.feat, sp2.thr))} y2={PYb} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />
+            : <line key="cut2" x1={PX0} y1={sy(thrPosOf(sp2.feat, sp2.thr))} x2={PX1} y2={sy(thrPosOf(sp2.feat, sp2.thr))} stroke="#3ecf7f" strokeWidth={1.5} strokeDasharray="5 3" />) : null,
+        ]);
+      } else { // forest
+        const m = Math.max(1, Math.round(Number(params.nTrees) || 3));
+        const shown = Math.min(3, m); const tx = [110, 200, 290].slice(0, shown);
+        const votes = tx.map((_, i) => (i % 3 === 2 ? 0 : 1));
+        const winner = votes.filter((v) => v === 1).length * 2 >= votes.length ? (classes?.[1] ?? "B") : (classes?.[0] ?? "A");
+        intro = "Train many trees, each on a bootstrap resample with a random feature subset, then average their votes to cut variance.";
+        legend = [
+          { sym: "m", desc: "number of trees", how: "your n_estimators", val: String(m) },
+          { sym: "\\text{bootstrap}", desc: "resample rows", how: "sample n rows with replacement", val: `${n} → ${n}` },
+          { sym: "T_i", desc: "the i-th tree", how: "fit on its own sample", val: `${shown} shown` },
+          { sym: "\\hat y", desc: isReg ? "mean of trees" : "majority vote", how: "aggregate the m outputs", val: isReg ? "avg" : String(winner) },
+        ];
+        formulas = [["\\text{each } T_i:\\ \\text{bootstrap} + \\text{random features}", "de-correlate the trees"], ["\\text{every tree predicts}", `${shown} independent votes`], isReg ? ["\\hat y = \\tfrac1m\\textstyle\\sum_i T_i(\\mathbf x)", "average the trees"] : ["\\hat y = \\text{mode}\\{T_1,\\dots,T_m\\}", "majority wins"]];
+        caps = [`${shown} of ${m} trees, each its own sample`, "each tree casts a vote", "tally the votes", isReg ? "average → ŷ" : `majority → ${winner}`];
+        viz = (s) => svg(tx.map((x, i) => [
+          <line key={"a" + i} x1={x} y1={70} x2={x - 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
+          <line key={"b" + i} x1={x} y1={70} x2={x + 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
+          <circle key={"n" + i} cx={x} cy={70} r={5} fill="#a855f7" />,
+          <text key={"t" + i} x={x - 8} y={58} fill="var(--faint)" fontSize={11} fontFamily="monospace">T{i + 1}</text>,
+          s >= 1 ? <circle key={"vl" + i} cx={x - 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
+          s >= 1 ? <circle key={"vr" + i} cx={x + 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
+          s >= 1 ? <text key={"vt" + i} x={x - 10} y={150} fill={PAL_ML[votes[i]]} fontSize={11} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
+          s >= 3 && i === 1 ? <text key="win" x={x - 44} y={196} fill="#f59e0b" fontSize={13} fontFamily="monospace">ŷ = {isReg ? "mean" : winner} (majority)</text> : null,
+        ]));
+      }
+    }
+
+    const maxStage = caps.length - 1;
+    return mCard(`${label} — how it learns`, <>
+      <div className="note" style={{ marginBottom: 10, lineHeight: 1.6 }}>{intro}</div>
+      {varLegend(legend)}
+      <div className="prep-2col">
+        <div className="prep-col">
+          <div className="prep-col-h">the formula, step by step</div>
+          {formulas.map(([tex, cap], i) => <div key={i} className={`fx-line ${st >= i ? "on" : ""}`}><Katex block tex={tex} /><div className="note" style={{ marginTop: 2 }}>{cap}</div></div>)}
+        </div>
+        <div className="prep-col">
+          <div className="prep-col-h">on your data</div>
+          {viz(st)}
+          <div className="note" style={{ marginTop: 8 }}>{caps[Math.min(st, maxStage)]}</div>
+        </div>
+      </div>
+      {modelStageControls(maxStage)}
+      {kind === "gd" && !isReg && sigmoidView()}
+    </>);
   }
   function mathValidation() {
     return mCard(`${valMethod === "kfold" ? `${cvFolds}-fold cross-validation` : "hold-out validation"}`, <>
