@@ -1,7 +1,7 @@
 # NVIDIA NeMo Agent Toolkit (Apache-2.0) + the LangChain agent framework and
-# MCP client support it uses.
+# MCP client support it uses. It already brings compatible fastapi/uvicorn/pyyaml,
+# so we list those unpinned to avoid version conflicts.
 nvidia-nat[langchain,mcp]==1.4.0
-# HTTP service.
-fastapi>=0.115,<0.116
-uvicorn[standard]>=0.32,<0.35
-pyyaml>=6,<7
+fastapi
+uvicorn[standard]
+pyyaml
