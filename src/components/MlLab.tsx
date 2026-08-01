@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parseCSV, colStats, buildMatrix, split, makeModel, predict,
   featureImportance, classificationMetrics, regressionMetrics, crossVal, crossValDetailed,
-  decisionSurface, learningCurve, gdTrace,
+  decisionSurface, learningCurve, gdTrace, gdAnim,
   splitCounts, mean, std, treeDepth, countNodes, describe, applyStepsSnapshots, prepColTrace, scaleNumCol,
   type Dataset, type Task, type PrepStep, type TrainConfig, type ClsMetrics, type RegMetrics, type Snapshot,
   type FoldResult, type TreeNode, type BuiltData, type Model,
@@ -537,6 +537,27 @@ ${evalBlock}`;
   // Train-step walkthrough resets when the model / task / features / retrain change.
   useEffect(() => { setTrainT(0); setCheckT(0); setTrainPhase("train"); setTrainRunning(false); if (trainTimer.current) { clearInterval(trainTimer.current); trainTimer.current = null; } }, [algo, task, features, target, result]);
   useEffect(() => () => { if (trainTimer.current) clearInterval(trainTimer.current); }, []);
+  // Heavy Plotly data for the train step (computed once per settings/retrain, not per tick):
+  // GD → evolving boundary/line frames; other classifiers → decision-region surface; other regressors → prediction curve.
+  const trainVizData = useMemo((): { kind: "gd"; anim: ReturnType<typeof gdAnim>; f1: string; f2: string } | { kind: "surface"; surf: ReturnType<typeof decisionSurface>; f1: string; f2: string } | { kind: "regcurve"; pts: { x: number; y: number; yh: number }[]; f1: string } | null => {
+    if (mlMode !== "maths" || step !== "train" || !ds || !result || !modelRef.current) return null;
+    const nums = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
+    if (!nums.length) return null;
+    const f1 = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
+    const f2 = dbF2 && nums.includes(dbF2) && dbF2 !== f1 ? dbF2 : (nums.find((x) => x !== f1) || "");
+    const cfg = cfgNow();
+    const k = ["LogisticRegression", "LinearRegression", "Ridge"].includes(algo) ? "gd" : algo === "GaussianNB" ? "gnb" : algo === "DecisionTree" ? "tree" : algo === "RandomForest" ? "forest" : "knn";
+    try {
+      if (k === "gd") return { kind: "gd", anim: f1 ? gdAnim(ds, target, f1, f2, cfg) : null, f1, f2 };
+      if (task === "classification") return { kind: "surface", surf: f1 && f2 ? decisionSurface(ds, target, f1, f2, cfg) : null, f1, f2 };
+      const b2 = buildMatrix(ds, features, target, task, steps);
+      const idxF = b2.featureNames.indexOf(f1) >= 0 ? b2.featureNames.indexOf(f1) : 0;
+      const pr = predict(modelRef.current, b2.X);
+      const pts = b2.X.map((r, i) => ({ x: r[idxF], y: b2.y[i], yh: pr[i] })).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.yh)).sort((a, c) => a.x - c.x);
+      return { kind: "regcurve", pts, f1 };
+    } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result, steps, testSize]);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -1244,10 +1265,11 @@ ${evalBlock}`;
     let trainCols: string[] = [], trainRows: (string | number)[][] = [];
     let trainMath: (t: number) => [string, string][] = () => [];
     let trainViz: (t: number) => React.ReactNode = () => svg(null);
+    let gdSnaps: { ep: number; loss: number; gnorm: number; w: number[] }[] = [];
 
     if (kind === "gd") {
       const gt = gdTrace(cfgNow(), b.X, b.y, K);
-      const snaps = gt?.snaps ?? [];
+      const snaps = gt?.snaps ?? []; gdSnaps = snaps;
       trainTotal = snaps.length; trainUnit = "epoch";
       trainIntro = "Training loops over epochs: each one computes the gradient of the loss and steps every weight downhill. Watch the loss and ‖∇‖ shrink until they flatten — that's convergence.";
       trainCols = ["epoch", "loss", "‖∇‖", "b", "w₁", "w₂"];
@@ -1339,11 +1361,9 @@ ${evalBlock}`;
     let verdict: [string, string, string] = ["", "", "#8a8a86"];
     let checkMath: (t: number) => [string, string][] = () => [];
     let checkTiles: (t: number) => [string, string][] = () => [];
-    let checkViz: (t: number) => React.ReactNode = () => svg(null);
     let checkNote = "", checkH = "";
 
     if (!isReg) {
-      const conf = (upto: number) => { const M = Array.from({ length: K }, () => new Array(K).fill(0)); for (let i = 0; i < upto; i++) { const a = yte[i], p = preds[i]; if (a < K && p < K) M[a][p]++; } return M; };
       const correct = (upto: number) => { let c = 0; for (let i = 0; i < upto; i++) if (preds[i] === yte[i]) c++; return c; };
       const cm = finalM.task === "classification" ? finalM : null;
       const accF = cm?.accuracy ?? 0;
@@ -1352,7 +1372,6 @@ ${evalBlock}`;
       checkMath = (t) => { const c = correct(t); return [["accuracy", "\\text{accuracy} = \\dfrac{\\text{correct}}{\\text{total}}"], ["substitute", `= \\dfrac{${c}}{${t}}`], ["result", `\\text{accuracy} = ${t ? fv(c / t, 3) : "—"}`]]; };
       checkTiles = (t) => cm ? [["accuracy", t ? fv(correct(t) / t) : "—"], ["precision", fv(cm.precision)], ["recall", fv(cm.recall)], ["F1", fv(cm.f1)]] : [];
       checkNote = "each test row is predicted and dropped into the matrix";
-      checkViz = (t) => { const M = conf(t); const kv = Math.min(K, 4); const cell = kv <= 2 ? 96 : 62; const gx = 100, gy = 40; const kids: React.ReactNode[] = [<text key="ph" x={gx + 30} y={28} fill="var(--faint)" fontSize={11} fontFamily="monospace">predicted →</text>]; for (let a = 0; a < kv; a++) for (let p = 0; p < kv; p++) { const cx = gx + p * cell, cy = gy + a * cell; const good = a === p; kids.push(<rect key={`r${a}${p}`} x={cx} y={cy} width={cell - 6} height={cell - 6} rx={6} fill={good ? "#3ecf7f" : "#ef4444"} opacity={0.14} />, <rect key={`b${a}${p}`} x={cx} y={cy} width={cell - 6} height={cell - 6} rx={6} fill="none" stroke="var(--border-strong)" />, <text key={`t${a}${p}`} x={cx + (cell - 6) / 2} y={cy + (cell - 6) / 2 + 6} textAnchor="middle" fill={good ? "#3ecf7f" : "#ef4444"} fontSize={cell <= 62 ? 15 : 20} fontFamily="monospace">{M[a][p]}</text>); } return svg(kids); };
     } else {
       const ym = yte.reduce((a, v) => a + v, 0) / (yte.length || 1);
       const ssr = (upto: number) => { let s = 0; for (let i = 0; i < upto; i++) s += (preds[i] - yte[i]) ** 2; return s; };
@@ -1364,8 +1383,63 @@ ${evalBlock}`;
       checkMath = (t) => { const ss = ssr(t), mse = t ? ss / t : NaN; return [["MSE", "\\text{MSE} = \\tfrac1n\\sum(\\hat y - y)^2"], ["substitute", `= \\tfrac1{${t}}\\,(${fv(ss)})`], ["result", `\\text{MSE} = ${fv(mse, 3)},\\ \\text{RMSE} = ${fv(Math.sqrt(mse), 3)}`]]; };
       checkTiles = (t) => { const ss = ssr(t), mse = t ? ss / t : NaN, st = sst(t); return rm ? [["MSE", fv(mse, 3)], ["RMSE", fv(Math.sqrt(mse), 3)], ["R²", t ? fv(1 - ss / (st || 1)) : "—"]] : []; };
       checkNote = "each test row's prediction is placed against the ŷ = y line";
-      const allV = [...preds, ...yte]; const lo = Math.min(...allV.filter(Number.isFinite)), hi = Math.max(...allV.filter(Number.isFinite)); const sp = (hi - lo) || 1;
-      checkViz = (t) => { const p = (v: number) => (v - lo) / sp; const kids: React.ReactNode[] = [<line key="diag" x1={sx(0)} y1={sy(0)} x2={sx(1)} y2={sy(1)} stroke="var(--faint)" strokeDasharray="5 4" />, <text key="dl" x={sx(0.62)} y={sy(0.72)} fill="var(--faint)" fontSize={11} fontFamily="monospace">ŷ = y</text>]; for (let i = 0; i < Math.min(t, nTe); i++) { kids.push(<line key={"r" + i} x1={sx(p(yte[i]))} y1={sy(p(yte[i]))} x2={sx(p(yte[i]))} y2={sy(p(preds[i]))} stroke="#ef4444" strokeWidth={1} opacity={0.45} />, <circle key={"c" + i} cx={sx(p(yte[i]))} cy={sy(p(preds[i]))} r={4} fill="#5b7cff" opacity={0.8} />); } return svg(kids); };
+    }
+
+    // ── Plotly graphs (rich, wide, with legends) ──
+    const th = plotlyTheme();
+    const discreteScale = (kk: number): [number, string][] => { const cs: [number, string][] = []; for (let i = 0; i < kk; i++) { const c = PAL[i % PAL.length]; cs.push([kk <= 1 ? 0 : i / kk, c]); cs.push([kk <= 1 ? 1 : (i + 1) / kk, c]); } return cs; };
+    const legendLayout = { showlegend: true, legend: { orientation: "h" as const, y: -0.18, font: { size: 11 } } };
+    function trainGraph(t: number): React.ReactNode {
+      const d = trainVizData; const H = 400;
+      if (kind === "gd" && d?.kind === "gd" && d.anim) {
+        const anim = d.anim; const shown = Math.max(1, Math.min(t, trainTotal));
+        const fi = Math.round((Math.min(Math.max(t - 1, 0), trainTotal - 1) / ((trainTotal - 1) || 1)) * (anim.frames.length - 1));
+        const fr = anim.frames[Math.max(0, Math.min(fi, anim.frames.length - 1))] || anim.frames[anim.frames.length - 1];
+        const cur = gdSnaps[Math.min(shown - 1, gdSnaps.length - 1)];
+        const loss = <Plot data={[
+          { type: "scatter", mode: "lines", name: "training loss", x: gdSnaps.slice(0, shown).map((s) => s.ep), y: gdSnaps.slice(0, shown).map((s) => s.loss), line: { color: "#3ecf7f", width: 2.5 } },
+          { type: "scatter", mode: "markers", name: "current epoch", x: cur ? [cur.ep] : [], y: cur ? [cur.loss] : [], marker: { size: 10, color: "#3ecf7f", line: { width: 1, color: th.paper } } },
+        ]} layout={{ ...chartLayout(th, "loss ↓ over epochs", "epoch", "loss"), ...legendLayout, height: 175 }} style={{ height: 175, width: "100%" }} />;
+        const bound = !anim.reg
+          ? <Plot data={[
+              { type: "heatmap", x: anim.xs, y: anim.ys, z: fr?.z, showscale: false, colorscale: discreteScale(anim.classes.length), zmin: -0.5, zmax: anim.classes.length - 0.5, opacity: 0.32, hoverinfo: "skip", name: "regions" },
+              ...anim.classes.map((cl, ci) => ({ type: "scatter" as const, mode: "markers" as const, name: `class ${cl}`, x: anim.points.filter((p) => p.c === ci).map((p) => p.x), y: anim.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 7, color: PAL[ci % PAL.length], line: { width: 1, color: th.paper } } })),
+            ]} layout={{ ...chartLayout(th, `epoch ${fr?.ep ?? 0} · loss ${fv(fr?.loss, 3)} — shaded regions = what the model predicts there`, d.f1, d.f2), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />
+          : <Plot data={[
+              { type: "scatter", mode: "markers", name: "data points", x: anim.points.map((p) => p.x), y: anim.points.map((p) => p.y), marker: { size: 7, color: "#5b7cff", opacity: 0.6 } },
+              { type: "scatter", mode: "lines", name: "fitted line", x: anim.xs, y: fr?.line, line: { color: "#f59e0b", width: 3 } },
+            ]} layout={{ ...chartLayout(th, `epoch ${fr?.ep ?? 0} · MSE ${fv(fr?.loss, 2)} — the line tilts to minimise squared error`, d.f1, target), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
+        return <div>{loss}{bound}</div>;
+      }
+      if (d?.kind === "surface" && d.surf) {
+        const s = d.surf; const kk = s.classes.length; const ratio = trainTotal ? Math.min(t, trainTotal) / trainTotal : 1; const shown = Math.max(1, Math.round(ratio * s.points.length));
+        return <Plot data={[
+          { type: "heatmap", x: s.xs, y: s.ys, z: s.z, showscale: false, colorscale: discreteScale(kk), zmin: -0.5, zmax: kk - 0.5, opacity: 0.32, hoverinfo: "skip", name: "regions" },
+          ...s.classes.map((cl, ci) => ({ type: "scatter" as const, mode: "markers" as const, name: `class ${cl}`, x: s.points.slice(0, shown).filter((p) => p.c === ci).map((p) => p.x), y: s.points.slice(0, shown).filter((p) => p.c === ci).map((p) => p.y), marker: { size: 7, color: PAL[ci % PAL.length], line: { width: 1, color: th.paper } } })),
+        ]} layout={{ ...chartLayout(th, `learned decision regions · train acc ${(s.acc * 100).toFixed(0)}% — colour = predicted class`, d.f1, d.f2), ...legendLayout, height: H + 20 }} style={{ height: H + 20, width: "100%" }} />;
+      }
+      if (d?.kind === "regcurve") {
+        const ratio = trainTotal ? Math.min(t, trainTotal) / trainTotal : 1; const shown = Math.max(1, Math.round(ratio * d.pts.length));
+        return <Plot data={[
+          { type: "scatter", mode: "markers", name: "actual y", x: d.pts.map((p) => p.x), y: d.pts.map((p) => p.y), marker: { size: 6, color: "#5b7cff", opacity: 0.5 } },
+          { type: "scatter", mode: "lines", name: "model prediction ŷ", x: d.pts.slice(0, shown).map((p) => p.x), y: d.pts.slice(0, shown).map((p) => p.yh), line: { color: "#f59e0b", width: 3 } },
+        ]} layout={{ ...chartLayout(th, `${label} prediction vs ${d.f1}`, d.f1, target), ...legendLayout, height: H + 20 }} style={{ height: H + 20, width: "100%" }} />;
+      }
+      return trainViz(t); // SVG fallback (e.g. <2 numeric features)
+    }
+    function checkGraph(t: number): React.ReactNode {
+      const H = 400;
+      if (!isReg) {
+        const cls = (classes ?? []).map(String); const M = Array.from({ length: K }, () => new Array(K).fill(0)); for (let i = 0; i < Math.min(t, nTe); i++) { const a = yte[i], p = preds[i]; if (a < K && p < K) M[a][p]++; }
+        const ann = [] as Record<string, unknown>[]; for (let a = 0; a < K; a++) for (let p = 0; p < K; p++) ann.push({ x: cls[p], y: cls[a], text: String(M[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 17 } });
+        return <Plot data={[{ type: "heatmap", x: cls, y: cls, z: M, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: true, colorbar: { title: { text: "count" } }, hoverinfo: "skip" }]} layout={{ ...chartLayout(th, "confusion matrix — the diagonal is correct, off-diagonal are mistakes", "predicted class →", "actual class ↓"), height: H, annotations: ann as never }} style={{ height: H, width: "100%" }} />;
+      }
+      const xs: number[] = [], ys: number[] = []; for (let i = 0; i < Math.min(t, nTe); i++) { xs.push(yte[i]); ys.push(preds[i]); }
+      const allV = [...preds, ...yte].filter(Number.isFinite); const lo = allV.length ? Math.min(...allV) : 0, hi = allV.length ? Math.max(...allV) : 1;
+      return <Plot data={[
+        { type: "scatter", mode: "lines", name: "ŷ = y (perfect)", x: [lo, hi], y: [lo, hi], line: { color: th.muted, dash: "dash", width: 1.5 } },
+        { type: "scatter", mode: "markers", name: "test rows", x: xs, y: ys, marker: { size: 8, color: "#5b7cff", opacity: 0.8, line: { width: 1, color: th.paper } } },
+      ]} layout={{ ...chartLayout(th, "predicted vs actual — the closer to the dashed line, the better", "actual y", "predicted ŷ"), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
     }
 
     // ── render ──
@@ -1379,19 +1453,13 @@ ${evalBlock}`;
     return mCard(`${label} — training & evaluation`, <>
       <div className="row" style={{ gap: 6, marginBottom: 10 }}>{pill(1, "1 · train (fit)", inTrain)}{pill(2, "2 · check", !inTrain)}{pill(3, "3 · verdict", checkDone)}</div>
       <div className="note" style={{ marginBottom: 10, lineHeight: 1.6 }}>{inTrain ? trainIntro : (isReg ? "Score the fitted model on the held-out test rows: sum the squared errors into MSE/RMSE, and R² vs just predicting the mean." : "Score the fitted model on the held-out test rows: each prediction is checked against the truth and tallied into accuracy and the confusion matrix.")}</div>
-      <div className="prep-2col">
-        <div className="prep-col">
-          <div className="prep-col-h">{inTrain ? "how the model is fitted" : "the metric, computed on the test set"}</div>
-          {mathLines.map(([lab, tex], i) => <div key={i} className="fx-line on" style={{ marginBottom: 8 }}><div className="note" style={{ marginBottom: 2 }}>{lab}</div><Katex block tex={tex} /></div>)}
-          {tiles.length ? <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 4 }}>{tiles.map(([kk, vv], i) => <div key={i} style={{ background: "var(--panel)", borderRadius: 8, padding: "6px 12px", minWidth: 70 }}><div className="note">{kk}</div><div style={{ fontSize: 20, fontWeight: 600 }}>{vv}</div></div>)}</div> : null}
-          {checkDone ? <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 12, padding: "11px 13px", borderRadius: 10, background: `${verdict[2]}22`, color: verdict[2] }}><span style={{ fontSize: 20 }}>🏆</span><span><b style={{ fontSize: 14 }}>{verdict[0]}</b><span className="note" style={{ display: "block", color: verdict[2] }}>{verdict[1]}</span></span></div> : null}
-        </div>
-        <div className="prep-col">
-          <div className="prep-col-h">{inTrain ? (kind === "gd" ? "loss curve + " + (isReg ? "fitted line" : "boundary") : kind === "tree" ? "the tree grows" : kind === "forest" ? "trees fit one by one" : kind === "gnb" ? "class bells form" : "rows stored") : checkH}</div>
-          {inTrain ? trainViz(trainT) : checkViz(checkT)}
-          <div className="note" style={{ marginTop: 8 }}>{inTrain ? (tShown >= trainTotal ? "training complete — " + trainNote : `${trainNote} — ${trainUnit} ${tShown} / ${trainTotal}`) : (checkT >= checkTotal ? `all ${checkTotal} test rows scored` : `${checkNote} — ${Math.min(checkT, checkTotal)} / ${checkTotal}`)}</div>
-        </div>
-      </div>
+      <div className="prep-col-h">{inTrain ? "how the model is fitted — with your numbers" : "the metric, computed on the test set"}</div>
+      <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 6 }}>{mathLines.map(([lab, tex], i) => <div key={i} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 11px", flex: "1 1 210px" }}><div className="note" style={{ marginBottom: 2 }}>{lab}</div><Katex block tex={tex} /></div>)}</div>
+      {tiles.length ? <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 4 }}>{tiles.map(([kk, vv], i) => <div key={i} style={{ background: "var(--panel)", borderRadius: 8, padding: "6px 14px", minWidth: 74 }}><div className="note">{kk}</div><div style={{ fontSize: 22, fontWeight: 600 }}>{vv}</div></div>)}</div> : null}
+      {checkDone ? <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 12, padding: "12px 14px", borderRadius: 10, background: `${verdict[2]}22`, color: verdict[2] }}><span style={{ fontSize: 22 }}>🏆</span><span><b style={{ fontSize: 15 }}>{verdict[0]}</b><span className="note" style={{ display: "block", color: verdict[2] }}>{verdict[1]}</span></span></div> : null}
+      <div className="prep-col-h" style={{ marginTop: 14 }}>{inTrain ? (kind === "gd" ? "loss curve + " + (isReg ? "fitted line" : "decision boundary") : kind === "gnb" || kind === "tree" || kind === "forest" || kind === "knn" ? (isReg ? "model fit on your data" : "decision regions on your data") : "on your data") : checkH}</div>
+      {inTrain ? trainGraph(trainT) : checkGraph(checkT)}
+      <div className="note" style={{ marginTop: 6 }}>{inTrain ? (tShown >= trainTotal ? "training complete — " + trainNote : `${trainNote} — ${trainUnit} ${tShown} / ${trainTotal}`) : (checkT >= checkTotal ? `all ${checkTotal} test rows scored` : `${checkNote} — ${Math.min(checkT, checkTotal)} / ${checkTotal}`)}</div>
       {trainTotal > 0 && <>
         <div className="prep-col-h" style={{ marginTop: 14 }}>{inTrain ? `the full training log — fills as it ${trainUnit === "epoch" ? "trains" : "builds"}` : "training log (complete)"}</div>
         <div style={{ overflowX: "auto", maxHeight: 190, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
