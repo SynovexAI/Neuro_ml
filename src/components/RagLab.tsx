@@ -78,6 +78,7 @@ export default function RagLab() {
   const [backend, setBackend] = useState<Backend>("vector");
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [kgExtract, setKgExtract] = useState<"heuristic" | "llm">("heuristic");
+  const [kgModel, setKgModel] = useState("");
   const [kgHops, setKgHops] = useState(1);
   const [maxNodes, setMaxNodes] = useState(22);
   const [buildingKg, setBuildingKg] = useState(false);
@@ -359,7 +360,8 @@ export default function RagLab() {
         { role: "system", content: "Extract a knowledge graph. Return ONLY a JSON array of triples, each {\"s\":\"subject\",\"r\":\"relation\",\"o\":\"object\"}. Use short noun-phrase entities and concise relations. Max 30 triples. No prose." },
         { role: "user", content: corpus },
       ];
-      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+      const useModel = kgModel || model;
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(useModel ? { model: useModel } : {}) }) });
       if (!res.ok || !res.body) throw new Error("extraction failed");
       const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
       for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
@@ -655,8 +657,9 @@ export default function RagLab() {
                       </div>
                     </div>
                     {kgExtract === "heuristic" && <div className="knob" style={{ margin: 0, minWidth: 160 }}><div className="kr"><span>Max entities</span><b>{maxNodes}</b></div><input type="range" min={10} max={36} step={2} value={maxNodes} onChange={(e) => setMaxNodes(+e.target.value)} /></div>}
+                    {kgExtract === "llm" && provider && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Extraction model</label><select value={kgModel || model} onChange={(e) => setKgModel(e.target.value)} disabled={modelsLoading || !models.length} style={{ width: 220 }}>{modelsLoading ? <option>loading…</option> : models.length ? models.map((m) => <option key={m} value={m}>{m}</option>) : <option value="">no models</option>}</select></div>}
                     <button className="btn" onClick={buildGraph} disabled={buildingKg || !chunks.length}>{buildingKg ? "extracting…" : graph ? "↻ Rebuild graph" : "▶ Build graph"}</button>
-                    {kgExtract === "llm" && provider && <span className="note">uses {provider} to extract clean triples</span>}
+                    {kgExtract === "llm" && provider && <span className="note">{provider} · {kgModel || model || "default"} extracts clean triples</span>}
                     {kgExtract === "llm" && provider === null && provKnown && <span className="note">no provider — heuristic used instead</span>}
                   </div>
                   {graph && graphPos && graph.nodes.length > 0 ? (
@@ -686,30 +689,29 @@ export default function RagLab() {
             )}
 
             {backend !== "kg" && (<>
-            <div className="stat-row">
-              <div className="stat">chunks<b>{chunks.length}</b></div>
-              <div className="stat">vectors stored<b>{index ? index.vectors.length : 0}</b></div>
-              <div className="stat">vocabulary (dims)<b>{vocab}</b></div>
-              <div className="stat">similarity<b>cosine</b></div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
+              {([[String(chunks.length), "chunks"], [String(index ? index.vectors.length : 0), "vectors stored"], [String(vocab), embedMode === "neural" && embedInfo ? "dimensions" : "vocabulary (dims)"], ["cosine", "similarity"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
             </div>
-            <div className="row" style={{ marginBottom: 12 }}><button className="btn" onClick={runEmbedding} disabled={embedding}>▶ Run embedding</button><span className="note">turns each chunk into a vector and stores it</span></div>
 
-            <div style={{ marginBottom: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-              <label className="fld">Vector backend — lexical (TF-IDF) or real semantic embeddings</label>
-              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <div className="chips">
-                  <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
-                  <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { if (denseVecs) setEmbedMode("neural"); else runNeuralEmbed(); }} disabled={provider === null && provKnown}>Neural · semantic</button>
+            <div style={{ ...pnl, marginBottom: 16 }}>
+              {kgHead("var(--accent)", "Vector backend", <span className="note" style={{ fontSize: 10 }}>lexical or semantic</span>)}
+              <div style={{ padding: 15 }}>
+                <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div className="chips">
+                    <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
+                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { if (denseVecs) setEmbedMode("neural"); else runNeuralEmbed(); }} disabled={provider === null && provKnown}>Neural · semantic</button>
+                  </div>
+                  {embedMode === "neural" && !denseVecs && <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || (provider === null && provKnown)}>{embedding ? "embedding…" : "▶ Embed with neural model"}</button>}
+                  <button className="btn sm" onClick={runEmbedding} disabled={embedding} style={{ marginLeft: "auto" }}>{embedding ? "…" : "▶ Run embedding"}</button>
                 </div>
-                {embedMode === "neural" && !denseVecs && <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || (provider === null && provKnown)}>{embedding ? "embedding…" : "▶ Embed with neural model"}</button>}
-                {embedMode === "neural" && denseVecs && embedInfo && <span className="note">real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</span>}
-                {provider === null && provKnown && <span className="note">neural embeddings need a provider (Admin → Providers) — TF-IDF works without one</span>}
+                {embedMode === "neural" && denseVecs && embedInfo && <div className="note" style={{ marginTop: 8 }}>real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</div>}
+                {embedMode === "tfidf" && <div className="note" style={{ marginTop: 8 }}>TF-IDF weights each term by rarity. Switch to Neural for real semantic embeddings{provider === null && provKnown ? " (needs a provider — TF-IDF works without one)" : ""} — the pipeline is identical.</div>}
+                {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
+                  const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
+                  const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
+                  return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
+                })()}
               </div>
-              {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
-                const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
-                const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
-                return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
-              })()}
             </div>
 
             {index && (() => {
@@ -729,8 +731,10 @@ export default function RagLab() {
               const buckets = clusters?.buckets ?? [];
               return (
                 <>
-                  <label className="fld">Watch one chunk become a vector — step through the embedding pipeline</label>
-                  <div className="chunk-inspect">
+                  <div style={{ ...pnl, marginBottom: 16 }}>
+                    {kgHead("var(--good)", "Watch one chunk become a vector", <span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span>)}
+                    <div style={{ padding: 15 }}>
+                  <div className="chunk-inspect" style={{ border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 }}>
                     <div className="pp-player" style={{ margin: "0 0 8px" }}>
                       <button className="pp-ctrl" title="First" onClick={() => { setEmbPlaying(false); setEmbIdx(0); }}>⏮</button>
                       <button className="pp-ctrl" title="Previous" onClick={() => { setEmbPlaying(false); setEmbIdx((i) => Math.max(0, i - 1)); }}>‹</button>
@@ -761,8 +765,12 @@ export default function RagLab() {
                       </div>
                     </div>
                   </div>
+                    </div>
+                  </div>
 
-                  <label className="fld">Vector store — chunks (rows) × top terms (columns), shaded by weight</label>
+                  <div style={{ ...pnl, marginBottom: 16 }}>
+                    {kgHead("var(--sky)", "Vector store — chunks × top terms", <span className="note" style={{ fontSize: 10 }}>shaded by weight</span>)}
+                    <div style={{ padding: 15 }}>
                   <div className="vstore" style={{ gridTemplateColumns: `64px repeat(${mTerms.length}, 1fr)` }}>
                     <div className="vs-corner" />
                     {mTerms.map((t) => <div key={t} className="vs-col" title={t}>{t}</div>)}
@@ -772,9 +780,13 @@ export default function RagLab() {
                     ])}
                   </div>
                   <div className="note" style={{ marginTop: 8 }}>Darker = that term matters more to that chunk. A question is embedded the exact same way; retrieval scores chunks whose strong terms <b>overlap</b> the question (cosine similarity).</div>
+                    </div>
+                  </div>
 
                   {/* how a real vector DB (Milvus) stores this */}
-                  <label className="fld" style={{ marginTop: 14 }}>How a real vector DB stores this — Milvus collection</label>
+                  <div style={{ ...pnl, marginBottom: 16 }}>
+                    {kgHead("var(--purple)", "How a real vector DB stores this — Milvus")}
+                    <div style={{ padding: 15 }}>
                   <div className="milvus">
                     <div className="mv-schema">
                       <div className="mv-line"><b>Collection</b><span>rag_chunks</span></div>
@@ -806,14 +818,20 @@ export default function RagLab() {
                     </div>
                     <div className="note" style={{ marginTop: 8 }}>Milvus stores each chunk as an <b>entity</b> (id + float vector + metadata) inside a <b>collection</b>, then builds an ANN index — IVF_FLAT clusters vectors into <b>nlist</b> buckets so a query only compares against the closest few (nprobe), staying fast at millions of vectors. Our in-browser store uses the same shape (TF-IDF vectors + cosine); swap in a neural embedder and it maps 1:1 to Milvus.</div>
                   </div>
+                    </div>
+                  </div>
 
-                  <label className="fld" style={{ marginTop: 14 }}>All chunk vectors (top terms) — scroll to see more</label>
-                  <div className="chunk-scroll">
+                  <div style={{ ...pnl, marginBottom: 16 }}>
+                    {kgHead("var(--orange)", "All chunk vectors", <span className="note" style={{ fontSize: 10 }}>{chunks.length} · top terms</span>)}
+                    <div style={{ padding: 12 }}>
+                  <div className="chunk-scroll" style={{ border: "none", background: "transparent", borderRadius: 0, padding: 0, margin: 0, maxHeight: 320 }}>
                     {chunks.map((c, i) => { const v = index.vectors[i]; const terms = topTermsW(v); return (
                       <div key={i} className={`chunk-card ${i === ei ? "on" : ""}`} style={{ borderLeftColor: "var(--sky)" }}>
                         <div className="ch"><span>chunk {i + 1} <span className="arrow-anim">→</span> vector<span className="src-tag">{c.docKind}</span></span><span>{Object.keys(v).length} dims</span></div>
                         {terms.map((t) => (<div key={t.term} className="tbar"><span className="tl">{t.term}</span><div className="tbaro"><i style={{ width: `${Math.round(t.w * 100)}%` }} /></div><span className="tw">{t.w.toFixed(2)}</span></div>))}
                       </div>); })}
+                  </div>
+                    </div>
                   </div>
                 </>
               );
