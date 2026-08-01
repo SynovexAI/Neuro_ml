@@ -294,6 +294,7 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .fx-tag{flex:0 0 auto;width:82px;font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:var(--faint)}
 .fx-res .kx{color:var(--accent)}
 .prep-ctl{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px}
+.mini-sel{font-family:var(--mono);font-size:10.5px;padding:2px 4px;border-radius:6px;border:1px solid var(--border);background:var(--panel);color:var(--text)}
 .oh-grid{display:inline-grid;gap:5px;font-size:13px;align-items:center;margin-top:4px}
 .oh-h{color:var(--faint);font-size:11px;text-align:center}
 .oh-lab{color:var(--muted);font-family:var(--mono);padding-right:6px;white-space:nowrap}

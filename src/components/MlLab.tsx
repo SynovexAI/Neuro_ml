@@ -231,7 +231,9 @@ export default function MlLab() {
   const modelTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [modelApplied, setModelApplied] = useState(0);
   const [modelApplying, setModelApplying] = useState(false);
+  const [modelSpeed, setModelSpeed] = useState(260); // ms per row when applying (bigger = slower)
   const modelApplyTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const modelSpeedRef = useRef(260);
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -615,19 +617,32 @@ ${evalBlock}`;
   const modelStageStop = () => { if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } };
   const modelApplyStop = () => { if (modelApplyTimer.current) { clearInterval(modelApplyTimer.current); modelApplyTimer.current = null; } setModelApplying(false); };
   // Slowly apply the (now fully-substituted) formula across every row so the graph fills in.
+  function modelApplyStart(total: number) {
+    if (modelApplyTimer.current) { clearInterval(modelApplyTimer.current); modelApplyTimer.current = null; }
+    modelApplyTimer.current = setInterval(() => { setModelApplied((a) => { if (a >= total) { if (modelApplyTimer.current) { clearInterval(modelApplyTimer.current); modelApplyTimer.current = null; } setModelApplying(false); return a; } return a + 1; }); }, modelSpeedRef.current);
+  }
   function modelApplyAll(maxStage: number, total: number) {
     modelStageStop(); setModelStage(maxStage);
     if (modelApplyTimer.current) { modelApplyStop(); return; }
     setModelApplied((a) => (a >= total ? 0 : a)); setModelApplying(true);
-    modelApplyTimer.current = setInterval(() => { setModelApplied((a) => { if (a >= total) { if (modelApplyTimer.current) { clearInterval(modelApplyTimer.current); modelApplyTimer.current = null; } setModelApplying(false); return a; } return a + 1; }); }, 95);
+    modelApplyStart(total);
   }
+  const setSpeed = (ms: number, total: number) => { setModelSpeed(ms); modelSpeedRef.current = ms; if (modelApplyTimer.current) modelApplyStart(total); };
   // Controls: step through the substitution chains, then apply the formula to every row.
   const modelStageControls = (maxStage: number, total: number) => (
-    <div className="prep-ctl">
+    <div className="prep-ctl" style={{ flexWrap: "wrap" }}>
       <button className="btn ghost sm" disabled={modelStage <= 0} onClick={() => { modelStageStop(); modelApplyStop(); setModelApplied(0); setModelStage((s) => Math.max(0, s - 1)); }}>← back</button>
       <button className="btn sm" disabled={modelStage >= maxStage} onClick={() => { modelStageStop(); modelApplyStop(); setModelStage((s) => Math.min(maxStage, s + 1)); }}>step →</button>
       <button className="btn sm" onClick={() => modelApplyAll(maxStage, total)}>{modelApplying ? "⏸ pause" : "▶ apply to all rows"}</button>
       <button className="btn ghost sm" onClick={() => { modelStageStop(); modelApplyStop(); setModelApplied(0); setModelStage(0); }}>↺ reset</button>
+      <span className="note mono" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>speed
+        <select className="mini-sel" value={modelSpeed} onChange={(e) => setSpeed(+e.target.value, total)}>
+          <option value={520}>0.5×</option>
+          <option value={260}>1×</option>
+          <option value={120}>2×</option>
+          <option value={45}>4×</option>
+        </select>
+      </span>
       <span className="note mono" style={{ marginLeft: "auto" }}>step {Math.min(modelStage, maxStage)} / {maxStage}</span>
     </div>
   );
@@ -935,7 +950,7 @@ ${evalBlock}`;
     const n = X.length, nf = names.length, K = classes?.length ?? 0;
     // plot geometry — every coordinate is clamped to a finite 0…1 so a missing/NaN
     // cell can never reach an SVG attribute (which would throw "Received NaN").
-    const PX0 = 30, PX1 = 344, PYb = 212, PYt = 20;
+    const PX0 = 30, PX1 = 344, PYb = 288, PYt = 22;
     const clamp01 = (t: number) => (Number.isFinite(t) ? Math.max(0, Math.min(1, t)) : 0);
     const sx = (t: number) => PX0 + (PX1 - PX0) * clamp01(t);
     const sy = (t: number) => PYb + (PYt - PYb) * clamp01(t);
@@ -950,7 +965,7 @@ ${evalBlock}`;
     const clsColor = (i: number) => PAL_ML[Y[i] % PAL_ML.length];
     const st = modelStage;
     const frame = <rect key="fr" x={PX0} y={PYt} width={PX1 - PX0} height={PYb - PYt} fill="none" stroke="var(--border)" />;
-    const svg = (kids: React.ReactNode) => <svg viewBox="0 0 360 240" style={{ width: "100%", borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>{frame}{kids}</svg>;
+    const svg = (kids: React.ReactNode) => <svg viewBox="0 0 360 310" style={{ width: "100%", borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>{frame}{kids}</svg>;
     const metric = (ids: number[]): number => { if (!ids.length) return 0; if (isReg) { const ys = ids.map((i) => Y[i]); const mu = ys.reduce((a, c) => a + c, 0) / ys.length; return ys.reduce((a, c) => a + (c - mu) ** 2, 0) / ys.length; } const c: Record<number, number> = {}; ids.forEach((i) => { c[Y[i]] = (c[Y[i]] || 0) + 1; }); let s = 1; for (const k in c) { const p = c[k] / ids.length; s -= p * p; } return s; };
     const bestSplit = (ids: number[], feats: number[]) => {
       const parent = metric(ids); let best = { gain: -1, feat: feats[0], thr: 0, gl: 0, gr: 0, nl: 0, nr: 0 };
@@ -981,8 +996,8 @@ ${evalBlock}`;
       const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
       intro = "A weighted sum of your features becomes a score z; the sigmoid squashes it to a probability, and 0.5 is the cut between the two classes.";
       legend = [
-        { sym: "x", desc: "a feature", how: `${names[idxF]} value of row 0`, val: fv(X[0]?.[idxF]) },
-        { sym: "\\mathbf w, b", desc: "weights & bias", how: "gradient descent: w ← w − η∇L", val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
+        { sym: "x", desc: "a feature", how: `the ${names[idxF]} cell of row 0`, val: fv(X[0]?.[idxF]) },
+        { sym: "\\mathbf w, b", desc: "weights & bias", how: `gradient descent over your ${n} rows`, val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
         { sym: "z", desc: "linear score", how: "z = b + Σⱼ wⱼ·xⱼ over the row", val: fv(z0) },
         { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "ŷ = 1 / (1 + e⁻ᶻ)", val: fv(p0) },
       ];
@@ -1011,10 +1026,10 @@ ${evalBlock}`;
       const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
       intro = "Fit a straight line so the average squared vertical gap (residual) between the line and your points is as small as possible.";
       legend = [
-        { sym: "x", desc: "a feature", how: `${names[idxF]} value of row 0`, val: fv(X[0]?.[idxF]) },
-        { sym: "\\mathbf w, b", desc: "slope & intercept", how: "gradient descent on squared error", val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
+        { sym: "x", desc: "a feature", how: `the ${names[idxF]} cell of row 0`, val: fv(X[0]?.[idxF]) },
+        { sym: "\\mathbf w, b", desc: "slope & intercept", how: `least-squares fit over your ${n} rows`, val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
         { sym: "\\hat y", desc: "prediction", how: "ŷ = b + Σⱼ wⱼ·xⱼ", val: gw ? fv(pred(X[0])) : "—" },
-        { sym: "\\mathcal L", desc: "mean squared error", how: "L = (1/n) Σ (ŷ−y)²", val: fv(mse) },
+        { sym: "\\mathcal L", desc: "mean squared error", how: `mean of (ŷ−y)² over ${msePairs.length} rows`, val: fv(mse) },
       ];
       exampleRow = idx[0] ?? 0; orderList = order;
       chainFor = (r) => { const yhr = pred(X[r]), rr = yhr - Y[r]; return [
@@ -1046,9 +1061,9 @@ ${evalBlock}`;
       const yhat = isReg ? fv(yhatNum) : String(classes?.[votes * 2 >= kk ? 1 : 0] ?? "—");
       intro = isReg ? "No training. For a new point, measure the distance to every stored point, keep the k nearest, and average their target." : "No training. For a new point, measure the distance to every stored point, keep the k nearest, and let them vote.";
       legend = [
-        { sym: "d", desc: "Euclidean distance", how: "d = √Σⱼ(qⱼ−xⱼ)² over features", val: `${fv(dNear)} (nearest)` },
+        { sym: "d", desc: "Euclidean distance", how: `√Σⱼ(qⱼ−xⱼ)² across ${nf} features`, val: `${fv(dNear)} (nearest)` },
         { sym: "k", desc: "neighbours kept", how: `n_neighbors setting = ${kk}`, val: String(kk) },
-        { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? "ŷ = (1/k) Σ yᵢ of neighbours" : "ŷ = most common label among k", val: yhat },
+        { sym: "\\hat y", desc: isReg ? "average of k" : "majority of k", how: isReg ? `mean target of the ${kk} nearest` : `most common label among the ${kk}`, val: yhat },
       ];
       const qx1 = X[qi]?.[idxF], qx2 = X[qi]?.[idxG];
       const nearD = near.slice(0, 5).map((i) => fv(dist(X[i]))).join(",\\ ");
@@ -1081,10 +1096,10 @@ ${evalBlock}`;
       const curve = (mu: number, va: number) => { const pts: string[] = []; for (let t = 0; t <= 60; t++) { const x = range[0] + (range[1] - range[0]) * (t / 60); pts.push(`${sx(t / 60)},${sy(bell(x, mu, va) * 0.9)}`); } return pts.join(" "); };
       intro = "Learn one bell curve (mean & variance) per class. A point's class score is that class's prior times the bell heights at the point.";
       legend = [
-        { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `mean of ${names[idxF]} within class ${classes?.[0] ?? 0}`, val: fv(sA.mu) },
-        { sym: "\\sigma^2", desc: "class variance", how: "Σ(x−μ)² / n within the class", val: fv(sA.va) },
-        { sym: "P(y)", desc: "class prior", how: `rows in class ÷ n = ${cA.length}/${idx.length}`, val: fv(priorA) },
-        { sym: "P(x\\mid y)", desc: "bell height at x", how: "e^(−(x−μ)²/2σ²)", val: fv(likeA) },
+        { sym: "\\mu", desc: `class mean (${names[idxF]})`, how: `sum of ${names[idxF]} ÷ ${cA.length} rows of class ${classes?.[0] ?? 0}`, val: fv(sA.mu) },
+        { sym: "\\sigma^2", desc: "class variance", how: `avg of (x−μ)² over those ${cA.length} rows`, val: fv(sA.va) },
+        { sym: "P(y)", desc: "class prior", how: `rows in class ÷ total = ${cA.length}/${idx.length}`, val: fv(priorA) },
+        { sym: "P(x\\mid y)", desc: "bell height at x", how: `Gaussian at x = ${fv(xq)} (row 0)`, val: fv(likeA) },
       ];
       const clsA = (classes?.[0] ?? "A").toString().replace(/[^a-zA-Z0-9 ]/g, " "), clsB = (classes?.[1] ?? "B").toString().replace(/[^a-zA-Z0-9 ]/g, " ");
       const rowOrder = [...idx].sort((a, c) => colF[a] - colF[c]);
@@ -1121,10 +1136,10 @@ ${evalBlock}`;
       if (kind === "tree") {
         intro = "Greedily test every feature threshold, keep the split that removes the most impurity, then recurse into if/else rules on each side.";
         legend = [
-          { sym: "G", desc: `${metricName} impurity`, how: isReg ? "variance of the target in a node" : "G = 1 − Σₖ pₖ² at a node", val: fv(sp.parent, 3) },
-          { sym: "n_L, n_R", desc: "rows each side", how: `rows with ${names[sp.feat]} ≤ / > thr`, val: `${sp.nl}, ${sp.nr}` },
+          { sym: "G", desc: `${metricName} impurity`, how: isReg ? `variance of the target over ${sp.nl + sp.nr} rows` : `1 − Σₖ pₖ² over ${sp.nl + sp.nr} rows`, val: fv(sp.parent, 3) },
+          { sym: "n_L, n_R", desc: "rows each side", how: `count of rows with ${names[sp.feat]} ≤ / > thr`, val: `${sp.nl}, ${sp.nr}` },
           { sym: "\\text{gain}", desc: "impurity removed", how: "G − (n_L/n)G_L − (n_R/n)G_R", val: fv(sp.gain, 3) },
-          { sym: "\\text{thr}", desc: "chosen threshold", how: `the ${names[sp.feat]} cut with max gain`, val: fv(sp.thr) },
+          { sym: "\\text{thr}", desc: "chosen threshold", how: `the ${names[sp.feat]} cut that maximises gain`, val: fv(sp.thr) },
         ];
         const pc: Record<number, number> = {}; rowsAll.forEach((i) => { pc[Y[i]] = (pc[Y[i]] || 0) + 1; }); const shares = Object.values(pc).map((c) => c / (rowsAll.length || 1));
         const featC = names[sp.feat].replace(/[^a-zA-Z0-9 ]/g, " ").slice(0, 12);
@@ -1169,14 +1184,14 @@ ${evalBlock}`;
         ];
         applyNote = "each tree casts its vote, then they aggregate";
         viz = (applied, curRow, stage) => svg(tx.map((x, i) => { const show = applied > i || (applied === 0 && i === curRow && stage >= 2); const hot = applied === 0 && i === curRow; return [
-          <line key={"a" + i} x1={x} y1={70} x2={x - 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
-          <line key={"b" + i} x1={x} y1={70} x2={x + 18} y2={112} stroke="var(--faint)" strokeWidth={1.5} />,
-          <circle key={"n" + i} cx={x} cy={70} r={hot ? 7 : 5} fill="#a855f7" stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />,
-          <text key={"t" + i} x={x - 8} y={58} fill="var(--faint)" fontSize={11} fontFamily="monospace">T{i + 1}</text>,
-          show ? <circle key={"vl" + i} cx={x - 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
-          show ? <circle key={"vr" + i} cx={x + 18} cy={124} r={6} fill={PAL_ML[votes[i]]} /> : null,
-          show ? <text key={"vt" + i} x={x - 10} y={150} fill={PAL_ML[votes[i]]} fontSize={11} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
-          applied >= total && i === 1 ? <text key="win" x={x - 44} y={196} fill="#f59e0b" fontSize={13} fontFamily="monospace">ŷ = {isReg ? "mean" : winner} (majority)</text> : null,
+          <line key={"a" + i} x1={x} y1={100} x2={x - 20} y2={158} stroke="var(--faint)" strokeWidth={1.5} />,
+          <line key={"b" + i} x1={x} y1={100} x2={x + 20} y2={158} stroke="var(--faint)" strokeWidth={1.5} />,
+          <circle key={"n" + i} cx={x} cy={100} r={hot ? 8 : 6} fill="#a855f7" stroke={hot ? "var(--text)" : undefined} strokeWidth={hot ? 1.5 : undefined} />,
+          <text key={"t" + i} x={x - 9} y={84} fill="var(--faint)" fontSize={12} fontFamily="monospace">T{i + 1}</text>,
+          show ? <circle key={"vl" + i} cx={x - 20} cy={172} r={7} fill={PAL_ML[votes[i]]} /> : null,
+          show ? <circle key={"vr" + i} cx={x + 20} cy={172} r={7} fill={PAL_ML[votes[i]]} /> : null,
+          show ? <text key={"vt" + i} x={x - 12} y={202} fill={PAL_ML[votes[i]]} fontSize={12} fontFamily="monospace">→ {classes?.[votes[i]] ?? (votes[i] ? "B" : "A")}</text> : null,
+          applied >= total && i === 1 ? <text key="win" x={x - 50} y={264} fill="#f59e0b" fontSize={14} fontFamily="monospace">ŷ = {isReg ? "mean" : winner} (majority)</text> : null,
         ]; }));
       }
     }
