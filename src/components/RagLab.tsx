@@ -112,6 +112,11 @@ export default function RagLab() {
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
+  const [providers, setProviders] = useState<{ id: string; provider: string; label: string | null }[]>([]);
+  const [providerId, setProviderId] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -182,8 +187,20 @@ export default function RagLab() {
     );
   }
 
+  async function loadModels(id?: string) {
+    setModelsLoading(true);
+    try {
+      const r = await fetch(`/api/models${id ? `?providerId=${encodeURIComponent(id)}` : ""}`);
+      const j = await r.json();
+      setProviders(j.providers || []);
+      setProvider(j.provider ?? null);
+      setProviderId(j.providerId || id || (j.providers?.[0]?.id ?? ""));
+      setModels(j.models || []);
+      setModel(j.default || (j.models?.[0] ?? ""));
+    } catch { /* leave as unconfigured */ } finally { setProvKnown(true); setModelsLoading(false); }
+  }
   useEffect(() => {
-    fetch("/api/models").then((r) => r.json()).then((j) => { setProvider(j.provider); setProvKnown(true); }).catch(() => setProvKnown(true));
+    loadModels();
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, []);
 
@@ -341,7 +358,7 @@ export default function RagLab() {
         { role: "system", content: "Extract a knowledge graph. Return ONLY a JSON array of triples, each {\"s\":\"subject\",\"r\":\"relation\",\"o\":\"object\"}. Use short noun-phrase entities and concise relations. Max 30 triples. No prose." },
         { role: "user", content: corpus },
       ];
-      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0 }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
       if (!res.ok || !res.body) throw new Error("extraction failed");
       const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
       for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
@@ -387,7 +404,7 @@ export default function RagLab() {
       { who: backend === "kg" ? "link entities" : "embed query", what: backend === "kg" ? "match query terms → graph nodes" : neural ? `question → ${embedInfo?.dim ?? 0}-d neural vector` : "question → TF-IDF vector" },
       { who: "retrieve", what: backend === "kg" ? `graph traversal · ${kgHops}-hop · top ${topK}` : backend === "hybrid" ? `graph → vector rank · top ${topK}` : `${strategy}${rerank === "mmr" ? " + MMR" : ""} · top-k ${topK}` },
       { who: "prompt", what: "inject retrieved context + sources" },
-      { who: "generate", what: `stream → ${provider || "provider"}` },
+      { who: "generate", what: `stream → ${model || provider || "provider"}` },
     ];
     setTraceStep(steps, 1);
     let top: { i: number; score: number }[];
@@ -419,11 +436,11 @@ export default function RagLab() {
     setMeta("generating…");
     const t0 = performance.now();
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2 }) });
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
       if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); setAnswer("⚠ " + (j.error || "failed")); setMeta("error"); setRunning(false); return; }
       const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
       for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); setAnswer(text); }
-      setMeta(`grounded · ${top.length} sources · ${Math.round(performance.now() - t0)}ms`);
+      setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${Math.round(performance.now() - t0)}ms`);
       setTrace(steps.map((s) => ({ ...s, state: "done" })));
     } catch (e) { setAnswer("⚠ " + (e as Error).message); setMeta("error"); }
     setRunning(false);
@@ -793,6 +810,16 @@ export default function RagLab() {
                 {backend !== "kg" && rerank === "mmr" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>λ (relevance↔diversity)</span><b>{mmrLambda.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={mmrLambda} onChange={(e) => setMmrLambda(+e.target.value)} /></div>}
                 {backend !== "vector" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Graph hops</span><b>{kgHops}</b></div><input type="range" min={1} max={3} value={kgHops} onChange={(e) => setKgHops(+e.target.value)} /></div>}
                 <div className="knob" style={{ margin: 0, minWidth: 140 }}><div className="kr"><span>Top-k</span><b>{topK}</b></div><input type="range" min={1} max={6} value={topK} onChange={(e) => setTopK(+e.target.value)} /></div>
+              </div>
+              <label className="fld">Generation model — the LLM that writes the grounded answer</label>
+              <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+                {providers.length > 1 && <select value={providerId} onChange={(e) => { setProviderId(e.target.value); loadModels(e.target.value); }} style={{ width: 176 }} title="Provider">{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>}
+                <select value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 244 }} disabled={modelsLoading || !models.length} title="Model">
+                  {modelsLoading ? <option>loading…</option> : models.length ? models.map((m) => <option key={m} value={m}>{m}</option>) : <option value="">no models available</option>}
+                </select>
+                <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Refresh model list">↻</button>
+                {provider && <span className="note">{providers.length > 1 ? provider + " · " : ""}{models.length} model{models.length === 1 ? "" : "s"}</span>}
+                {provKnown && !provider && <span className="note" style={{ color: "var(--warn)" }}>no provider configured — add one under Admin → Providers</span>}
               </div>
               <label className="fld">Question</label>
               <input type="text" value={question} onChange={(e) => setQuestion(e.target.value)} />
