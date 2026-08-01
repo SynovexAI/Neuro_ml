@@ -288,6 +288,11 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .prep-col-h{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
 .fx-line{opacity:.22;transition:opacity .35s ease;margin:8px 0}
 .fx-line.on{opacity:1}
+.fx-chain{border-left:2px solid var(--border);padding:3px 0 3px 11px;margin-bottom:12px;opacity:.32;transition:opacity .3s,border-color .3s}
+.fx-chain.on{opacity:1;border-color:var(--accent)}
+.fx-cl{display:flex;gap:8px;align-items:baseline;margin:3px 0}
+.fx-tag{flex:0 0 auto;width:82px;font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.03em;color:var(--faint)}
+.fx-res .kx{color:var(--accent)}
 .prep-ctl{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:10px}
 .oh-grid{display:inline-grid;gap:5px;font-size:13px;align-items:center;margin-top:4px}
 .oh-h{color:var(--faint);font-size:11px;text-align:center}
