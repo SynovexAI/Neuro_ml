@@ -218,6 +218,7 @@ export default function MlLab() {
   const [animIdx, setAnimIdx] = useState(0);
   const [animPlaying, setAnimPlaying] = useState(false);
   const [sigZ, setSigZ] = useState(1);
+  const [summaryCol, setSummaryCol] = useState("");
   // decision boundary + learning curve + editable code
   const [dbF1, setDbF1] = useState("");
   const [dbF2, setDbF2] = useState("");
@@ -634,37 +635,34 @@ ${evalBlock}`;
     </div>;
   }
 
-  function mathData() {
+  // "How the summary statistics come from the data" — formulas applied + visualized.
+  function mathSummary() {
     if (!ds) return null;
-    const feats = features.filter((f) => f !== target);
-    const col = (name: string) => ds.columns.find((c) => c.name === name)!;
-    const catFeats = feats.filter((f) => col(f).type === "cat");
-    const catMaps: Record<string, Map<string, number>> = {};
-    catFeats.forEach((f) => { const cats = Array.from(new Set(col(f).values.filter((v) => v != null).map(String))); catMaps[f] = new Map(cats.map((c, i) => [c, i])); });
-    const tcol = col(target); const cls = task === "classification";
-    const yMap = cls ? new Map(Array.from(new Set(tcol.values.filter((v) => v != null).map(String))).map((c, i) => [c, i])) : null;
-    const encRow = (i: number) => feats.map((f) => { const c = col(f); const v = c.values[i]; if (v == null) return 0; return c.type === "num" ? Number(v) : (catMaps[f].get(String(v)) ?? 0); });
-    const yEnc = (i: number) => { const v = tcol.values[i]; if (v == null) return 0; return cls ? (yMap!.get(String(v)) ?? 0) : Number(v); };
-    const N = Math.min(5, ds.nrows);
-    return mCard("turn the table into numbers", <>
-      <div className="note" style={{ marginBottom: 8, lineHeight: 1.6 }}>A model only does arithmetic, so every value must become a number. <b>Rule:</b> numeric columns pass through; each text category maps to an index; the target becomes {cls ? "a class index" : "the number to predict"}. Here it is <b>applied to your data</b>:</div>
-      {catFeats.length > 0 && (<>
-        <label className="fld">Encoding maps learned from the data</label>
-        {catFeats.slice(0, 4).map((f) => <div key={f} className="mathrow"><Katex tex={`\\text{${f.replace(/[^\w ]/g, " ")}} : \\{\\, ${[...catMaps[f].entries()].slice(0, 6).map(([k, i]) => `\\text{${k.replace(/[^\w ]/g, " ")}}\\!\\to\\!${i}`).join(",\\ ")}\\, \\}`} /></div>)}
-        {cls && <div className="mathrow"><Katex tex={`\\text{${target.replace(/[^\w ]/g, " ")}} : \\{\\, ${[...yMap!.entries()].slice(0, 6).map(([k, i]) => `\\text{${k.replace(/[^\w ]/g, " ")}}\\!\\to\\!${i}`).join(",\\ ")}\\, \\}`} /></div>}
-      </>)}
-      <label className="fld" style={{ marginTop: 10 }}>Preview — raw rows → the numeric matrix X and target y</label>
-      <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
-        <tr><th>raw row (first {feats.length} features)</th><th>→ X<sub>i</sub> (numbers)</th><th>y<sub>i</sub></th></tr>
-        {Array.from({ length: N }, (_, i) => <tr key={i}>
-          <td style={{ fontSize: 11, color: "var(--muted)", maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{feats.map((f) => String(col(f).values[i] ?? "∅")).join(", ")}</td>
-          <td className="mono" style={{ fontSize: 11 }}>[{encRow(i).map((x) => (Number.isInteger(x) ? x : x.toFixed(2))).join(", ")}]</td>
-          <td className="mono">{yEnc(i)}{cls ? ` (${tcol.values[i] ?? "∅"})` : ""}</td>
-        </tr>)}
-      </tbody></table></div>
-      <div className="mathrow" style={{ marginTop: 8 }}><Katex tex={`X \\in \\mathbb{R}^{\\,${ds.nrows}\\times ${feats.length}}, \\quad y \\in \\mathbb{R}^{\\,${ds.nrows}}`} /></div>
-      <div className="note" style={{ marginTop: 6 }}>Now every row is a vector of {feats.length} numbers. (Text uses a simple index here; Preprocessing refines it with one-hot + scaling.)</div>
-    </>);
+    const nums = ds.columns.filter((c) => c.type === "num");
+    if (!nums.length) return null;
+    const name = nums.find((c) => c.name === summaryCol)?.name || nums[0].name;
+    const v = colNumVals(name).slice().sort((a, b) => a - b); const n = v.length;
+    if (!n) return null;
+    const sum = v.reduce((a, b) => a + b, 0), mu = sum / n;
+    const ss = v.reduce((a, x) => a + (x - mu) ** 2, 0), sd = Math.sqrt(ss / n);
+    const qtile = (p: number) => { const idx = (n - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx); return v[lo] + (v[hi] - v[lo]) * (idx - lo); };
+    const median = qtile(0.5), q1 = qtile(0.25), q3 = qtile(0.75), mn = v[0], mx = v[n - 1];
+    const t = plotlyTheme();
+    return <div className="card math-card" style={{ marginTop: 16 }}>
+      <div className="card-h"><span className="t">🧮 How each summary statistic is computed</span><select value={name} onChange={(e) => setSummaryCol(e.target.value)} className="r" style={{ maxWidth: 190 }}>{nums.map((c) => <option key={c.name}>{c.name}</option>)}</select></div>
+      <div className="card-b">
+        <div className="note" style={{ marginBottom: 8 }}>Each number in the table above is a formula run over the {n} values of “{name}”. Here they are, <b>applied to your data</b>:</div>
+        <div className="mathrow"><Katex block tex={`\\mu = \\tfrac{1}{n}\\sum_i x_i = \\tfrac{${sum.toFixed(1)}}{${n}} = ${mu.toFixed(3)}`} /></div>
+        <div className="mathrow"><Katex block tex={`\\sigma = \\sqrt{\\tfrac{1}{n}\\sum_i (x_i-\\mu)^2} = \\sqrt{\\tfrac{${ss.toFixed(1)}}{${n}}} = ${sd.toFixed(3)}`} /></div>
+        <div className="note" style={{ margin: "4px 0" }}>Sort the values, then read off the positions (min, 25%, 50%, 75%, max):</div>
+        <div className="mathrow"><Katex tex={`\\min=${mn.toFixed(2)},\\ \\ Q_1=${q1.toFixed(2)},\\ \\ \\text{median}=${median.toFixed(2)},\\ \\ Q_3=${q3.toFixed(2)},\\ \\ \\max=${mx.toFixed(2)}`} /></div>
+        <label className="fld" style={{ marginTop: 12 }}>Box plot — the box is Q1→Q3, the line is the median, whiskers reach min/max, dashed = mean</label>
+        <Plot data={[{ type: "box", x: v, name, boxmean: true, marker: { color: "#5b7cff" }, line: { color: "#5b7cff" } }]} layout={{ ...chartLayout(t, "", name, ""), showlegend: false }} style={{ height: 170 }} />
+        <label className="fld" style={{ marginTop: 6 }}>Distribution — where the mean (orange) and median (green) fall</label>
+        <Plot data={[{ type: "histogram", x: colNumVals(name), marker: { color: "#5b7cff" }, opacity: 0.8 }]} layout={{ ...chartLayout(t, "", name, "count"), showlegend: false, shapes: [{ type: "line", x0: mu, x1: mu, y0: 0, y1: 1, yref: "paper", line: { color: "#f59e0b", width: 2 } }, { type: "line", x0: median, x1: median, y0: 0, y1: 1, yref: "paper", line: { color: "#3ecf7f", width: 2, dash: "dot" } }] }} style={{ height: 220 }} />
+        <div className="note" style={{ marginTop: 6 }}>When the mean sits far from the median the data is <b>skewed</b> — that&apos;s why we report both.</div>
+      </div>
+    </div>;
   }
   function mathEda() {
     if (!ds) return null;
@@ -683,7 +681,7 @@ ${evalBlock}`;
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
     return mCard(`proportions of “${uniCol}”`, <>
       <div className="mathrow"><Katex block tex={`p_k = \\frac{\\text{count}(k)}{n}`} /></div>
-      {top.map(([k, cnt]) => <div key={k} className="mathrow"><Katex tex={`p(\\text{${k.replace(/[^\w ]/g, "")}}) = \\tfrac{${cnt}}{${vals.length}} = ${(cnt / vals.length).toFixed(3)}`} /></div>)}
+      {top.map(([k, cnt]) => <div key={k} className="mathrow"><Katex tex={`p(\\text{${k.replace(/[^a-zA-Z0-9 ]/g, " ")}}) = \\tfrac{${cnt}}{${vals.length}} = ${(cnt / vals.length).toFixed(3)}`} /></div>)}
     </>);
   }
   function mathPrep() {
@@ -706,7 +704,7 @@ ${evalBlock}`;
       const cats = Array.from(new Set(ds.columns.find((c) => c.name === cf)!.values.filter((v) => v != null).map(String))).slice(0, 4);
       catBlock = <div style={{ marginTop: 14 }}>
         <label className="fld">One-hot encode — <b>{cf}</b></label>
-        {cats.map((cat, i) => <div key={cat} className="mathrow"><Katex tex={`\\text{${cat.replace(/[^\w ]/g, "")}} \\;\\rightarrow\\; [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}
+        {cats.map((cat, i) => <div key={cat} className="mathrow"><Katex tex={`\\text{${cat.replace(/[^a-zA-Z0-9 ]/g, " ")}} \\;\\rightarrow\\; [${cats.map((_, j) => (j === i ? 1 : 0)).join(",")}]`} /></div>)}
         <div className="note">One column per category; a 1 marks which one — turns text into numbers with no fake ordering.</div>
       </div>;
     }
@@ -1088,7 +1086,6 @@ ${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("acc
       <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> {mlMode === "maths" ? <>Every model here is implemented <b>from scratch</b> — these cards show the exact equations and intermediate numbers behind each step.</> : <>Models train from scratch in your browser so every step is inspectable. The <b>Get code</b> export uses scikit-learn.</>}</span></div>
       <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}<button className={step === "deploy" ? "on" : ""} disabled={!result} onClick={() => setStep("deploy")}><b>7</b>Test &amp; Export</button></div>
 
-      {mlMode === "maths" && step === "data" && mathData()}
       {mlMode === "maths" && step === "eda" && mathEda()}
       {mlMode === "maths" && step === "prep" && mathPrep()}
       {mlMode === "maths" && step === "model" && mathModel()}
@@ -1146,6 +1143,7 @@ ${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("acc
               <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>#</th>{ds.columns.map((c) => <th key={c.name}>{c.name} <span style={{ color: c.name === target ? "var(--accent)" : "var(--faint)" }}>{c.type}{c.name === target ? "·target" : ""}</span></th>)}</tr>{viewRows.map((r) => <tr key={r}><td style={{ color: "var(--faint)" }}>{r}</td>{ds.columns.map((c) => <td key={c.name}>{c.values[r] ?? "—"}</td>)}</tr>)}</tbody></table></div>
               <label className="fld" style={{ marginTop: 16 }}>Summary statistics (numeric columns · like pandas .describe())</label>
               <div style={{ overflowX: "auto" }}><table className="dtable"><tbody><tr><th>column</th><th>count</th><th>missing</th><th>mean</th><th>std</th><th>min</th><th>25%</th><th>50%</th><th>75%</th><th>max</th></tr>{desc.map((d) => <tr key={d.name}><td>{d.name}</td><td>{d.count}</td><td>{d.missing}</td><td>{d.mean.toFixed(2)}</td><td>{d.std.toFixed(2)}</td><td>{d.min.toFixed(1)}</td><td>{d.q25.toFixed(1)}</td><td>{d.q50.toFixed(1)}</td><td>{d.q75.toFixed(1)}</td><td>{d.max.toFixed(1)}</td></tr>)}</tbody></table></div>
+              {mlMode === "maths" && mathSummary()}
               <div className="stepnav"><button className="btn" onClick={() => setStep("eda")}>Next: EDA →</button></div>
             </>)}
           </div>
