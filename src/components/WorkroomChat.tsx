@@ -5,12 +5,17 @@ import Link from "next/link";
 import Markdown from "@/components/Markdown";
 
 export type AgentCfg = {
-  agentName?: string; agentType?: string; providerId?: string; model?: string;
-  temperature?: number; systemPrompt?: string; tools?: string[]; mcpIds?: string[]; kbIds?: string[];
+  runtime?: string; type?: string; agentType?: string;
+  agentName?: string; name?: string; model?: string;
 };
 type Msg = { role: "user" | "assistant"; text: string; ms?: number };
 
-export default function WorkroomChat({ agentName, cfg }: { agentName: string; cfg: AgentCfg }) {
+function kindLabel(cfg: AgentCfg): string {
+  if (cfg.runtime === "nat") return cfg.agentType === "tool_calling_agent" ? "NAT · Tool-calling" : "NAT · ReAct";
+  return cfg.type === "workflow" ? "Workflow" : "ReAct";
+}
+
+export default function WorkroomChat({ agentId, agentName, cfg }: { agentId: string; agentName: string; cfg: AgentCfg }) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -27,14 +32,9 @@ export default function WorkroomChat({ agentName, cfg }: { agentName: string; cf
     setBusy(true);
     const started = performance.now();
     try {
-      const res = await fetch("/api/agent/nat-run", {
+      const res = await fetch("/api/agent/run-published", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          task: history ? `${history}\nUser: ${q}` : q,
-          providerId: cfg.providerId, model: cfg.model, systemPrompt: cfg.systemPrompt,
-          agentType: cfg.agentType || "react_agent", tools: cfg.tools || [], temperature: cfg.temperature ?? 0.2,
-          mcpServerIds: cfg.mcpIds || [], knowledgeBaseIds: cfg.kbIds || [],
-        }),
+        body: JSON.stringify({ projectId: agentId, task: history ? `${history}\nUser: ${q}` : q }),
       });
       const j = await res.json().catch(() => null);
       const ms = Math.round(performance.now() - started);
@@ -51,7 +51,7 @@ export default function WorkroomChat({ agentName, cfg }: { agentName: string; cf
     <div className="wr-chat">
       <div className="wr-chat-head">
         <Link href="/workroom" className="btn ghost sm">← Workroom</Link>
-        <div className="wr-chat-title"><span className="agent-ic">🤖</span><b>{agentName}</b><span className="badge">{(cfg.agentType || "react_agent") === "tool_calling_agent" ? "Tool-calling" : "ReAct"}</span></div>
+        <div className="wr-chat-title"><span className="agent-ic">🤖</span><b>{agentName}</b><span className="badge">{kindLabel(cfg)}</span></div>
         <span style={{ flex: 1 }} />
         <Link href="/workroom/channels" className="btn ghost sm">🚀 Deploy</Link>
         {msgs.length > 0 && <button className="btn ghost sm" onClick={() => setMsgs([])}>Clear</button>}
@@ -62,7 +62,7 @@ export default function WorkroomChat({ agentName, cfg }: { agentName: string; cf
           <div className="wr-welcome">
             <div className="agent-ic big">🤖</div>
             <h3>Chat with {agentName}</h3>
-            <p className="note">Powered by the NVIDIA NeMo Agent Toolkit. Ask anything — it uses its tools and knowledge automatically.</p>
+            <p className="note">{cfg.runtime === "nat" ? "Powered by the NVIDIA NeMo Agent Toolkit." : "Runs your agent's reasoning loop live."} Ask anything — it uses its tools and knowledge automatically.</p>
             <div className="wr-starters">{starters.map((s) => <button key={s} className="wr-starter" onClick={() => send(s)}>{s}</button>)}</div>
           </div>
         ) : msgs.map((m, i) => (

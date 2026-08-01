@@ -36,6 +36,85 @@ function Artifact({ lang, code }: { lang: string; code: string }) {
   );
 }
 
+const PALETTE = ["var(--accent)", "#f59e0b", "#3b9e5f", "#8b5cf6", "#ef4444", "#0ea5e9", "#ec4899", "#14b8a6"];
+
+// Native SVG chart from a ```chart JSON block: {type:'bar'|'line'|'pie', title?, data:[{label,value}]}
+function ChartArtifact({ code }: { code: string }) {
+  let spec: { type?: string; title?: string; data?: { label: string; value: number }[] } | null = null;
+  let err = "";
+  try { spec = JSON.parse(code); } catch (e) { err = (e as Error).message; }
+  const data = (spec?.data || []).filter((d) => d && typeof d.value === "number");
+  if (err || !data.length) {
+    return <div className="md-artifact"><div className="md-artifact-h"><span className="badge">chart</span><span className="note" style={{ marginLeft: "auto" }}>{err ? "invalid JSON" : "no data"}</span></div><pre className="md-pre"><code>{code}</code></pre></div>;
+  }
+  const type = spec?.type === "line" ? "line" : spec?.type === "pie" ? "pie" : "bar";
+  const W = 520, H = 250, padX = 44, padY = 26, iw = W - padX * 2, ih = H - padY * 2;
+  const max = Math.max(...data.map((d) => d.value), 0) || 1;
+  const body = () => {
+    if (type === "pie") {
+      const total = data.reduce((a, d) => a + Math.max(0, d.value), 0) || 1;
+      const cx = 130, cy = H / 2, r = 90; let a0 = -Math.PI / 2;
+      return <>
+        {data.map((d, i) => {
+          const frac = Math.max(0, d.value) / total; const a1 = a0 + frac * Math.PI * 2;
+          const x0 = cx + r * Math.cos(a0), y0 = cy + r * Math.sin(a0), x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+          const large = frac > 0.5 ? 1 : 0; const path = `M${cx} ${cy} L${x0.toFixed(1)} ${y0.toFixed(1)} A${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)} Z`;
+          a0 = a1; return <path key={i} d={path} fill={PALETTE[i % PALETTE.length]} opacity={0.9} />;
+        })}
+        {data.map((d, i) => (
+          <g key={i} transform={`translate(${W - 200}, ${padY + i * 22})`}>
+            <rect width={12} height={12} rx={2} fill={PALETTE[i % PALETTE.length]} />
+            <text x={18} y={10} fontSize={12} fill="var(--muted)">{d.label} · {d.value}</text>
+          </g>
+        ))}
+      </>;
+    }
+    const x = (i: number) => padX + (data.length === 1 ? iw / 2 : (iw * i) / (data.length - 1));
+    const y = (v: number) => padY + ih - (v / max) * ih;
+    if (type === "line") {
+      const pts = data.map((d, i) => `${x(i).toFixed(1)},${y(d.value).toFixed(1)}`).join(" ");
+      return <>
+        <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={2.5} />
+        {data.map((d, i) => <g key={i}><circle cx={x(i)} cy={y(d.value)} r={3.5} fill="var(--accent)" /><text x={x(i)} y={H - 8} fontSize={11} fill="var(--muted)" textAnchor="middle">{d.label}</text></g>)}
+      </>;
+    }
+    const bw = (iw / data.length) * 0.62;
+    return <>{data.map((d, i) => { const bx = padX + (iw * i) / data.length + (iw / data.length - bw) / 2; const bh = (d.value / max) * ih; return (
+      <g key={i}>
+        <rect x={bx} y={padY + ih - bh} width={bw} height={Math.max(0, bh)} rx={3} fill={PALETTE[i % PALETTE.length]} />
+        <text x={bx + bw / 2} y={padY + ih - bh - 5} fontSize={11} fill="var(--muted)" textAnchor="middle">{d.value}</text>
+        <text x={bx + bw / 2} y={H - 8} fontSize={11} fill="var(--muted)" textAnchor="middle">{d.label}</text>
+      </g>
+    ); })}</>;
+  };
+  return (
+    <div className="md-artifact">
+      <div className="md-artifact-h"><span className="badge">chart</span>{spec?.title && <b style={{ fontSize: 12.5 }}>{spec.title}</b>}</div>
+      <div style={{ padding: 12, overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: W, height: "auto" }}>
+          {type !== "pie" && <line x1={padX} y1={padY + ih} x2={W - padX} y2={padY + ih} stroke="var(--border)" />}
+          {body()}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// Mermaid diagram rendered in a sandboxed iframe (loads mermaid from CDN).
+function MermaidArtifact({ code }: { code: string }) {
+  const [view, setView] = useState<"preview" | "code">("preview");
+  const esc = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"><\/script></head><body style="margin:0;padding:10px;overflow:auto;font-family:system-ui"><pre class="mermaid">${esc}</pre><script>try{mermaid.initialize({startOnLoad:true,securityLevel:"strict"})}catch(e){document.body.innerHTML='<p style=\\'color:#b91c1c;font:13px system-ui\\'>Could not render diagram.</p>'}<\/script></body></html>`;
+  return (
+    <div className="md-artifact">
+      <div className="md-artifact-h"><span className="badge">mermaid</span><div className="seg" style={{ width: 150, marginLeft: "auto" }}><button className={view === "preview" ? "on" : ""} onClick={() => setView("preview")}>Preview</button><button className={view === "code" ? "on" : ""} onClick={() => setView("code")}>Code</button></div></div>
+      {view === "preview"
+        ? <iframe title="mermaid" sandbox="allow-scripts" srcDoc={doc} style={{ width: "100%", height: 340, border: "none", background: "#fff", borderRadius: "0 0 8px 8px" }} />
+        : <pre className="md-pre"><code>{code}</code></pre>}
+    </div>
+  );
+}
+
 export default function Markdown({ text }: { text: string }) {
   const src = (text || "").replace(/\r\n?/g, "\n");
   const out: ReactNode[] = [];
@@ -47,7 +126,10 @@ export default function Markdown({ text }: { text: string }) {
       const lang = line.slice(3).trim().toLowerCase();
       const buf: string[] = []; i++;
       while (i < lines.length && !lines[i].startsWith("```")) { buf.push(lines[i]); i++; }
-      i++; out.push(<Artifact key={k++} lang={lang} code={buf.join("\n")} />);
+      i++; const code = buf.join("\n");
+      if (lang === "chart") out.push(<ChartArtifact key={k++} code={code} />);
+      else if (lang === "mermaid") out.push(<MermaidArtifact key={k++} code={code} />);
+      else out.push(<Artifact key={k++} lang={lang} code={code} />);
       continue;
     }
     if (/^#{1,6}\s/.test(line)) { const lvl = line.match(/^#+/)![0].length; const t = line.replace(/^#+\s/, ""); out.push(<div key={k++} className={`md-h md-h${Math.min(lvl, 3)}`}>{inline(t, `h${k}`)}</div>); i++; continue; }

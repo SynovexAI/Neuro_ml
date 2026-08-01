@@ -13,9 +13,9 @@ const LAB_HREF: Record<string, string> = {
 
 const QUICK = [
   { href: "/labs/agent", icon: "◈", title: "Build an agent", desc: "ReAct or workflow, with tools" },
+  { href: "/workroom", icon: "◐", title: "Open Workroom", desc: "Chat with & deploy your agents" },
   { href: "/labs/rag", icon: "❖", title: "Build a RAG bot", desc: "Chunk, embed, retrieve" },
   { href: "/kb", icon: "▤", title: "New knowledge base", desc: "Files or URLs → vectors" },
-  { href: "/labs/prompting", icon: "✎", title: "Tune a prompt", desc: "Compare, measure tokens" },
 ];
 
 const LABS = [

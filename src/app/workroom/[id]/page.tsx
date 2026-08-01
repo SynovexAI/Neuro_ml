@@ -15,7 +15,7 @@ export default async function WorkroomChatPage({ params }: { params: Promise<{ i
   const cfg = (row.config || {}) as AgentCfg;
   return (
     <Shell user={user} title={row.name}>
-      <WorkroomChat agentName={row.name} cfg={cfg} />
+      <WorkroomChat agentId={row.id} agentName={row.name} cfg={cfg} />
     </Shell>
   );
 }

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-type Agent = { id: string; name: string; model: string; agentType: string; toolCount: number; kbCount: number };
+type Agent = { id: string; name: string; model: string; runtime: string; kind: string; toolCount: number; kbCount: number };
 
 export default function WorkroomList() {
   const [agents, setAgents] = useState<Agent[] | null>(null);
@@ -28,10 +28,11 @@ export default function WorkroomList() {
       {agents.map((a) => (
         <Link key={a.id} href={`/workroom/${a.id}`} className="agent-card">
           <div className="agent-card-top"><span className="agent-ic">🤖</span><b>{a.name}</b></div>
-          <div className="note" style={{ marginTop: 4 }}>{a.agentType === "tool_calling_agent" ? "Tool-calling" : "ReAct"} · {a.model || "no model"}</div>
+          <div className="note" style={{ marginTop: 4 }}>{a.kind} · {a.model || "no model"}</div>
           <div className="agent-card-meta">
+            <span className="chip">{a.runtime === "nat" ? "⚡ NAT" : "🌐 In-browser"}</span>
             <span className="chip">{a.toolCount} tool{a.toolCount === 1 ? "" : "s"}</span>
-            {a.kbCount > 0 && <span className="chip">📚 {a.kbCount} KB</span>}
+            {a.kbCount > 0 && <span className="chip">📚 knowledge</span>}
           </div>
           <span className="agent-card-cta">Open chat →</span>
         </Link>

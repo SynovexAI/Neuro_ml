@@ -3,9 +3,8 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { channels, projects } from "@/lib/db/schema";
 import { decrypt } from "@/lib/crypto";
-import { runAgent } from "@/lib/agentRunner";
+import { runPublishedAgent } from "@/lib/runPublished";
 import { rateLimitDb } from "@/lib/ratelimit";
-import { cfgToRunInput } from "@/lib/channels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -37,7 +36,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const [proj] = await db.select().from(projects).where(eq(projects.id, ch.projectId));
   if (!proj || !proj.published) return NextResponse.json({ error: "This agent is unavailable." }, { status: 404, headers: CORS });
 
-  const r = await runAgent({ ...cfgToRunInput(proj.config), userId: ch.userId, task, agentName: proj.name });
+  const r = await runPublishedAgent({ userId: ch.userId, config: proj.config, task, agentName: proj.name });
   if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status, headers: CORS });
   return NextResponse.json({ answer: r.answer, latency_ms: r.latency_ms }, { headers: CORS });
 }

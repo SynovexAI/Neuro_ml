@@ -4,9 +4,8 @@ import { db } from "@/lib/db";
 import { channels, projects } from "@/lib/db/schema";
 import { decrypt } from "@/lib/crypto";
 import { sendMessage, webhookSecret } from "@/lib/telegram";
-import { runAgent } from "@/lib/agentRunner";
+import { runPublishedAgent } from "@/lib/runPublished";
 import { captureError } from "@/lib/monitor";
-import { cfgToRunInput } from "@/lib/channels";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,7 +29,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   try {
     const [proj] = await db.select().from(projects).where(eq(projects.id, ch.projectId));
     if (!proj || !proj.published) { await sendMessage(token, chatId, "⚠ This agent is no longer available."); return NextResponse.json({ ok: true }); }
-    const r = await runAgent({ ...cfgToRunInput(proj.config), userId: ch.userId, task: text, agentName: proj.name });
+    const r = await runPublishedAgent({ userId: ch.userId, config: proj.config, task: text, agentName: proj.name });
     await sendMessage(token, chatId, r.ok ? (r.answer || "(no answer)") : `⚠ ${r.error}`);
   } catch (e) {
     captureError(e, { where: "telegram.webhook", channel: id });

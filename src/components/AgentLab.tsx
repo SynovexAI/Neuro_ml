@@ -7,6 +7,7 @@ import {
 } from "@/lib/agentTools";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
+import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
 type Step = "type" | "build" | "run";
@@ -98,6 +99,8 @@ export default function AgentLab() {
   const [connectFrom, setConnectFrom] = useState<{ id: string; kind: "tool" | "agent" } | null>(null);
   const [connectXY, setConnectXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [saved, setSaved] = useState(false);
+  const [savedProjectId, setSavedProjectId] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown> }[]>([]);
   const [loadOpen, setLoadOpen] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -514,12 +517,33 @@ if __name__ == "__main__":
       steps: agentType === "workflow" ? steps.map((s) => ({ name: s.name, instruction: s.instruction })) : undefined, task,
     };
   }
+  // Create-or-update the saved project, returning its id (or "" on failure).
+  async function persist(): Promise<string> {
+    if (savedProjectId) {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: savedProjectId, name: name || "agent", config: agentConfig() }) });
+      return r.ok ? savedProjectId : "";
+    }
+    const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent", name: name || "agent", config: agentConfig() }) });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j?.id) { setSavedProjectId(j.id); return j.id; }
+    return "";
+  }
   async function saveAgent() {
     setMsg("");
     try {
-      const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "agent", name: name || "agent", config: agentConfig() }) });
-      if (r.ok) { setSaved(true); setTimeout(() => setSaved(false), 1600); } else { const j = await r.json().catch(() => ({})); setMsg(j.error || "Could not save the agent."); }
+      const id = await persist();
+      if (id) { setSaved(true); setTimeout(() => setSaved(false), 1600); } else setMsg("Could not save the agent.");
     } catch (e) { setMsg((e as Error).message); }
+  }
+  async function publishAgent() {
+    setPublishing(true); setMsg("");
+    try {
+      const id = await persist();
+      if (!id) { toast("Publish failed", "error"); return; }
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
+    } catch { toast("Publish failed", "error"); }
+    finally { setPublishing(false); }
   }
   function exportJson() { const blob = new Blob([JSON.stringify(agentConfig(), null, 2)], { type: "application/json" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.json`; a.click(); URL.revokeObjectURL(a.href); }
   async function loadAgents() {
@@ -528,8 +552,9 @@ if __name__ == "__main__":
     setLoadOpen(true);
   }
   /* eslint-disable @typescript-eslint/no-explicit-any */
-  function applyConfig(cfg: any) {
+  function applyConfig(cfg: any, id?: string) {
     if (!cfg) return;
+    setSavedProjectId(id || "");
     setAgentType(cfg.type === "workflow" ? "workflow" : "react");
     if (cfg.name) setName(String(cfg.name));
     if (cfg.description) setDescription(String(cfg.description));
@@ -550,7 +575,7 @@ if __name__ == "__main__":
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("project");
     if (!id) return;
-    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config); }).catch(() => {});
+    fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id); }).catch(() => {});
   }, []);
 
   const curType = TYPES.find((t) => t.id === agentType)!;
@@ -571,8 +596,9 @@ if __name__ == "__main__":
             <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
             <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
             <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
+            <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>
           </>}
-          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config)}>{a.name}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
+          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id)}>{a.name}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
         </div>
       </div>
       {runtime === "nat" ? <NatAgentPanel /> : <>
