@@ -283,6 +283,13 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .oh-lab{color:var(--muted);font-family:var(--mono);padding-right:6px;white-space:nowrap}
 .oh-c{text-align:center;border:1px solid var(--border);border-radius:6px;padding:6px 0;font-family:var(--mono);color:var(--faint);background:var(--panel);transition:background .2s,color .2s,border-color .2s}
 .oh-c.on{color:var(--good);background:var(--good-weak);border-color:color-mix(in srgb,var(--good) 45%,transparent);font-weight:600}
+.var-legend{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0;background:var(--panel)}
+.vl-title{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px}
+.vl-row{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:2px 0}
+.vl-sym{min-width:46px;flex:0 0 auto}
+.vl-desc{flex:1;color:var(--muted)}
+.vl-how{color:var(--faint)}
+.vl-val{color:var(--text);font-family:var(--mono);flex:0 0 auto}
 .mathrow{overflow-x:auto;padding:4px 0;margin:2px 0}
 .kx-block{display:block;margin:2px 0}
 .kx{white-space:nowrap}

@@ -580,6 +580,10 @@ ${evalBlock}`;
   const colNumVals = (name: string) => (ds?.columns.find((c) => c.name === name)?.values.filter((v) => v != null).map(Number) ?? []);
   const mCard = (title: string, body: React.ReactNode) => <div className="card math-card" style={{ marginBottom: 16 }}><div className="card-h"><span className="t">🧮 The maths — {title}</span></div><div className="card-b">{body}</div></div>;
   const PAL_ML = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf"];
+  // What each symbol in a formula means + the value it takes on this data.
+  const varLegend = (items: { sym: string; desc: string; how?: string; val?: string }[]) => (
+    <div className="var-legend"><div className="vl-title">what each symbol means · from your data</div>{items.map((it, i) => <div key={i} className="vl-row"><span className="vl-sym"><Katex tex={it.sym} /></span><span className="vl-desc">{it.desc}{it.how ? <span className="vl-how"> — {it.how}</span> : null}</span>{it.val != null && <span className="vl-val mono">{it.val}</span>}</div>)}</div>
+  );
 
   // Animated gradient descent: play the boundary/line improving as the loss drops.
   function gdAnimView() {
@@ -666,8 +670,21 @@ ${evalBlock}`;
     const rmin = Math.min(...rb), rmax = Math.max(...rb), amin = Math.min(...ra), amax = Math.max(...ra);
     const rpx = rb.map((x) => 4 + 92 * (x - rmin) / ((rmax - rmin) || 1));
     const apx = ra.map((x) => 4 + 92 * (x - amin) / ((amax - amin) || 1));
+    const items: { sym: string; desc: string; how?: string; val?: string }[] = [{ sym: "x", desc: "each raw value" }];
+    if (bn.length) {
+      const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn); const { med, q1, q3 } = quart(bn); const iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1;
+      if (s.op === "Scale / normalize") {
+        if (s.method === "StandardScaler") items.push({ sym: "\\mu", desc: "mean", how: "average of x", val: mu.toFixed(2) }, { sym: "\\sigma", desc: "std deviation", how: "spread of x", val: sd.toFixed(2) });
+        else if (s.method === "MinMaxScaler") items.push({ sym: "\\min", desc: "smallest value", val: mn.toFixed(2) }, { sym: "\\max", desc: "largest value", val: mx.toFixed(2) });
+        else if (s.method === "RobustScaler") items.push({ sym: "\\text{median}", desc: "middle value", val: med.toFixed(2) }, { sym: "\\text{IQR}", desc: "Q3 − Q1", how: "robust spread", val: iqr.toFixed(2) });
+        else if (s.method === "MaxAbsScaler") items.push({ sym: "\\max|x|", desc: "largest magnitude", val: maxabs.toFixed(2) });
+        items.push({ sym: "z", desc: "the scaled output value" });
+      } else if (s.op === "Handle outliers") items.push({ sym: "Q_1,\\ Q_3", desc: "quartiles", val: `${q1.toFixed(1)}, ${q3.toFixed(1)}` }, { sym: "\\text{IQR}", desc: "Q3 − Q1", val: iqr.toFixed(2) });
+      else if (s.op === "Bin / discretize") items.push({ sym: "\\min,\\max", desc: "column range", val: `${mn.toFixed(1)}, ${mx.toFixed(1)}` }, { sym: "k", desc: "number of bins" });
+    }
     return <>
       {stagedFormula(scaleStages(s, bn))}
+      {varLegend(items)}
       <label className="fld" style={{ marginTop: 6 }}>Every value slides raw → transformed (drag t or ▶ Play)</label>
       <div className="num-line"><div className="num-mid" />{pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * prepT}%` }} />)}</div>
       <div className="row" style={{ gap: 10, alignItems: "center", marginTop: 8 }}>
@@ -685,18 +702,18 @@ ${evalBlock}`;
     const methods = numeric ? ["Mean", "Median", "Most frequent", "Constant"] : ["Most frequent", "Constant"];
     const method = methods.includes(prepImputeMethod) ? prepImputeMethod : (methods.includes(s.method) ? s.method : methods[0]);
     const present = before.filter((v) => v != null);
-    let fill = "0"; let stages: { tex: string; at: number }[] = [];
+    let fill = "0"; let stages: { tex: string; at: number }[] = []; let impItems: { sym: string; desc: string; how?: string; val?: string }[] = [];
     if (numeric) {
       const nums = present as number[]; const sum = nums.reduce((a, b) => a + b, 0); const { med } = quart(nums.length ? nums : [0]);
       const cnt = new Map<number, number>(); nums.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (method === "Mean") { fill = (sum / (nums.length || 1)).toFixed(2); stages = [{ tex: `\\mu=\\frac{\\sum x}{n}`, at: 0 }, { tex: `\\mu=\\frac{${sum.toFixed(1)}}{${nums.length}}`, at: 0.2 }, { tex: `\\mu=${fill}`, at: 0.45 }]; }
-      else if (method === "Median") { fill = String(Math.round(med * 100) / 100); stages = [{ tex: `\\text{sort the values, take the middle}`, at: 0 }, { tex: `\\text{median}=${fill}`, at: 0.4 }]; }
-      else if (method === "Most frequent") { fill = String(mode ? mode[0] : 0); stages = [{ tex: `\\text{mode}=${fill}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; }
-      else { fill = "0"; stages = [{ tex: `\\text{fill}=0\\ (\\text{constant})`, at: 0 }]; }
+      if (method === "Mean") { fill = (sum / (nums.length || 1)).toFixed(2); stages = [{ tex: `\\mu=\\frac{\\sum x}{n}`, at: 0 }, { tex: `\\mu=\\frac{${sum.toFixed(1)}}{${nums.length}}`, at: 0.2 }, { tex: `\\mu=${fill}`, at: 0.45 }]; impItems = [{ sym: "x", desc: "each present value" }, { sym: "n", desc: "count of present values", val: String(nums.length) }, { sym: "\\textstyle\\sum x", desc: "sum of them", val: sum.toFixed(1) }, { sym: "\\mu", desc: "mean = the fill value", how: "sum ÷ n", val: fill }]; }
+      else if (method === "Median") { fill = String(Math.round(med * 100) / 100); stages = [{ tex: `\\text{sort the values, take the middle}`, at: 0 }, { tex: `\\text{median}=${fill}`, at: 0.4 }]; impItems = [{ sym: "\\text{median}", desc: "middle value when sorted", how: "robust to outliers", val: fill }]; }
+      else if (method === "Most frequent") { fill = String(mode ? mode[0] : 0); stages = [{ tex: `\\text{mode}=${fill}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; impItems = [{ sym: "\\text{mode}", desc: "most common value", how: `appears ${mode ? mode[1] : 0} times`, val: fill }]; }
+      else { fill = "0"; stages = [{ tex: `\\text{fill}=0\\ (\\text{constant})`, at: 0 }]; impItems = [{ sym: "0", desc: "a fixed constant you choose" }]; }
     } else {
       const strs = present as string[]; const cnt = new Map<string, number>(); strs.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (method === "Most frequent") { fill = mode ? mode[0] : "missing"; stages = [{ tex: `\\text{mode}=\\text{${String(fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; }
-      else { fill = "missing"; stages = [{ tex: `\\text{fill}=\\text{missing (constant)}`, at: 0 }]; }
+      if (method === "Most frequent") { fill = mode ? mode[0] : "missing"; stages = [{ tex: `\\text{mode}=\\text{${String(fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; impItems = [{ sym: "\\text{mode}", desc: "most common category", how: `appears ${mode ? mode[1] : 0} times`, val: fill }]; }
+      else { fill = "missing"; stages = [{ tex: `\\text{fill}=\\text{missing (constant)}`, at: 0 }]; impItems = [{ sym: "\\text{\"missing\"}", desc: "a new placeholder category" }]; }
     }
     const missIdx = before.map((v, i) => (v == null ? i : -1)).filter((i) => i >= 0);
     const showIdx = Array.from(new Set([0, 1, 2, 3, ...missIdx.slice(0, 4)])).filter((i) => i < before.length).sort((a, b) => a - b).slice(0, 8);
@@ -707,6 +724,7 @@ ${evalBlock}`;
         <span className="note">{missIdx.length} missing → fill with <b>{fill}</b></span>
       </div>
       {stagedFormula(stages)}
+      {varLegend(impItems)}
       {missIdx.length ? <>
         <label className="fld" style={{ marginTop: 6 }}>Every ∅ fills with the {method.toLowerCase()} value (▶ Play)</label>
         <div style={{ display: "flex", flexDirection: "column", gap: 5, maxWidth: 300 }}>
@@ -763,6 +781,14 @@ ${evalBlock}`;
         <div className="mathrow"><Katex block tex={`\\sigma = \\sqrt{\\tfrac{1}{n}\\sum_i (x_i-\\mu)^2} = \\sqrt{\\tfrac{${ss.toFixed(1)}}{${n}}} = ${sd.toFixed(3)}`} /></div>
         <div className="note" style={{ margin: "4px 0" }}>Sort the values, then read off the positions (min, 25%, 50%, 75%, max):</div>
         <div className="mathrow"><Katex tex={`\\min=${mn.toFixed(2)},\\ \\ Q_1=${q1.toFixed(2)},\\ \\ \\text{median}=${median.toFixed(2)},\\ \\ Q_3=${q3.toFixed(2)},\\ \\ \\max=${mx.toFixed(2)}`} /></div>
+        {varLegend([
+          { sym: "x_i", desc: "each value in the column", how: `${n} of them` },
+          { sym: "n", desc: "count of values", how: "how many rows", val: String(n) },
+          { sym: "\\textstyle\\sum x", desc: "sum of all values", how: "add them up", val: sum.toFixed(1) },
+          { sym: "\\mu", desc: "mean", how: "sum ÷ n", val: mu.toFixed(3) },
+          { sym: "\\sigma", desc: "standard deviation", how: "spread around the mean", val: sd.toFixed(3) },
+          { sym: "Q_1,\\ Q_3", desc: "lower / upper quartiles", how: "25% and 75% marks", val: `${q1.toFixed(1)}, ${q3.toFixed(1)}` },
+        ])}
         <label className="fld" style={{ marginTop: 12 }}>Box plot — the box is Q1→Q3, the line is the median, whiskers reach min/max, dashed = mean</label>
         <Plot data={[{ type: "box", x: v, name, boxmean: true, marker: { color: "#5b7cff" }, line: { color: "#5b7cff" } }]} layout={{ ...chartLayout(t, "", name, ""), showlegend: false }} style={{ height: 170 }} />
         <label className="fld" style={{ marginTop: 6 }}>Distribution — where the mean (orange) and median (green) fall</label>
@@ -770,26 +796,6 @@ ${evalBlock}`;
         <div className="note" style={{ marginTop: 6 }}>When the mean sits far from the median the data is <b>skewed</b> — that&apos;s why we report both.</div>
       </div>
     </div>;
-  }
-  function mathEda() {
-    if (!ds) return null;
-    const c = ds.columns.find((x) => x.name === uniCol); if (!c) return null;
-    if (c.type === "num") {
-      const v = colNumVals(uniCol); if (!v.length) return null;
-      const n = v.length, sum = v.reduce((a, b) => a + b, 0), mu = sum / n;
-      const ss = v.reduce((a, x) => a + (x - mu) ** 2, 0), sd = Math.sqrt(ss / n);
-      return mCard(`statistics of “${uniCol}”`, <>
-        <div className="mathrow"><Katex block tex={`\\mu = \\tfrac{1}{n}\\sum_{i=1}^{n} x_i = \\tfrac{${sum.toFixed(1)}}{${n}} = ${mu.toFixed(3)}`} /></div>
-        <div className="mathrow"><Katex block tex={`\\sigma = \\sqrt{\\tfrac{1}{n}\\sum_i (x_i-\\mu)^2} = \\sqrt{\\tfrac{${ss.toFixed(1)}}{${n}}} = ${sd.toFixed(3)}`} /></div>
-        <div className="mathrow"><Katex block tex={`\\min = ${Math.min(...v).toFixed(2)}, \\quad \\max = ${Math.max(...v).toFixed(2)}`} /></div>
-      </>);
-    }
-    const vals = c.values.filter((x) => x != null).map(String); const counts = new Map<string, number>(); vals.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
-    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
-    return mCard(`proportions of “${uniCol}”`, <>
-      <div className="mathrow"><Katex block tex={`p_k = \\frac{\\text{count}(k)}{n}`} /></div>
-      {top.map(([k, cnt]) => <div key={k} className="mathrow"><Katex tex={`p(\\text{${k.replace(/[^a-zA-Z0-9 ]/g, " ")}}) = \\tfrac{${cnt}}{${vals.length}} = ${(cnt / vals.length).toFixed(3)}`} /></div>)}
-    </>);
   }
   function mathPrep() {
     if (!ds) return null;
@@ -1205,7 +1211,6 @@ ${cls ? `acc = sum(1 for i in te if predict(X[i]) == y[i]) / len(te); print("acc
       <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> {mlMode === "maths" ? <>Every model here is implemented <b>from scratch</b> — these cards show the exact equations and intermediate numbers behind each step.</> : <>Models train from scratch in your browser so every step is inspectable. The <b>Get code</b> export uses scikit-learn.</>}</span></div>
       <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}<button className={step === "deploy" ? "on" : ""} disabled={!result} onClick={() => setStep("deploy")}><b>7</b>Test &amp; Export</button></div>
 
-      {mlMode === "maths" && step === "eda" && mathEda()}
       {mlMode === "maths" && step === "prep" && mathPrep()}
       {mlMode === "maths" && step === "model" && mathModel()}
       {mlMode === "maths" && step === "validation" && mathValidation()}
