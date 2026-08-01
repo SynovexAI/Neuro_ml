@@ -274,6 +274,9 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .num-line{position:relative;height:46px;background:var(--panel);border-radius:8px;margin:2px 0 4px}
 .num-mid{position:absolute;top:0;bottom:0;left:50%;width:1px;background:var(--border-strong)}
 .num-dot{position:absolute;top:16px;width:13px;height:13px;border-radius:50%;background:var(--accent);transform:translateX(-50%);opacity:.8;transition:left .5s ease}
+.num-zero{position:absolute;top:0;bottom:0;width:1px;background:var(--border-strong);border-left:1px dashed var(--faint)}
+.num-zero::after{content:attr(data-lab);position:absolute;top:-2px;left:3px;font-family:var(--mono);font-size:9px;color:var(--faint)}
+.num-axis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;color:var(--faint);padding:0 2px}
 .icell{display:flex;align-items:center;gap:8px;font-size:13px}
 .irow-lab{color:var(--faint);font-family:var(--mono);width:46px;flex:0 0 auto}
 .ibox{flex:1;border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-family:var(--mono);background:var(--panel)}

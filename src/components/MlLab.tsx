@@ -525,7 +525,11 @@ ${evalBlock}`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result]);
   useEffect(() => { setAnimIdx(0); setAnimPlaying(false); }, [gdAnimData]);
-  useEffect(() => { setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); else if (st && st.op === "Scale / normalize") setPrepScaleMethod(st.method); else if (st && st.op === "Encode categorical") setPrepEncodeMethod(st.method); }, [prepStepIdx, prepCol, steps, prepImputeMethod, prepScaleMethod, prepEncodeMethod]);
+  const resetStage = () => { setPrepStage(0); setPrepStagePlaying(false); if (stageTimer.current) { clearInterval(stageTimer.current); stageTimer.current = null; } };
+  // When you move to a different step/column, restart the animation and default the method from that step.
+  useEffect(() => { resetStage(); const st = steps[Math.min(Math.max(1, prepStepIdx), steps.length || 1) - 1]; if (st && st.op === "Impute missing") setPrepImputeMethod(st.method); else if (st && st.op === "Scale / normalize") setPrepScaleMethod(st.method); else if (st && st.op === "Encode categorical") setPrepEncodeMethod(st.method); }, [prepStepIdx, prepCol, steps]);
+  // When you pick a different method, restart the animation (but keep the selection).
+  useEffect(() => { resetStage(); }, [prepImputeMethod, prepScaleMethod, prepEncodeMethod]);
   useEffect(() => () => { if (stageTimer.current) clearInterval(stageTimer.current); }, []);
   useEffect(() => {
     if (!animPlaying || !gdAnimData) return;
@@ -683,9 +687,12 @@ ${evalBlock}`;
     const pairs = subsamplePairs(before, eff);
     if (!pairs.length) return <div className="note">Nothing numeric to animate here.</div>;
     const rb = pairs.map((p) => p[0]), ra = pairs.map((p) => p[1]);
-    const rmin = Math.min(...rb), rmax = Math.max(...rb), amin = Math.min(...ra), amax = Math.max(...ra);
-    const rpx = rb.map((x) => 4 + 92 * (x - rmin) / ((rmax - rmin) || 1));
-    const apx = ra.map((x) => 4 + 92 * (x - amin) / ((amax - amin) || 1));
+    // Shared absolute axis over BOTH raw and scaled values, so the shift/squeeze is visible
+    // (affine scalers preserve relative order, so per-range normalisation would show no motion).
+    const lo = Math.min(...rb, ...ra), hi = Math.max(...rb, ...ra), span = (hi - lo) || 1;
+    const pos = (x: number) => 4 + 92 * (x - lo) / span;
+    const rpx = rb.map(pos), apx = ra.map(pos);
+    const zeroPct = lo <= 0 && hi >= 0 ? pos(0) : null;
     const stages = scaleStages({ ...s, method }, bn);
     const nFormula = stages.length; const applySteps = 4; const maxStage = nFormula - 1 + applySteps;
     const tt = Math.max(0, Math.min(1, (prepStage - (nFormula - 1)) / applySteps));
@@ -713,9 +720,13 @@ ${evalBlock}`;
           {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
         </div>
         <div className="prep-col">
-          <div className="prep-col-h">every value slides raw → transformed</div>
-          <div className="num-line"><div className="num-mid" />{pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * tt}%` }} />)}</div>
-          <div className="note" style={{ marginTop: 8 }}>{tt < 1 ? "keep stepping — z is applied to more of the column" : "all values are now scaled"}</div>
+          <div className="prep-col-h">values slide raw → transformed (same axis)</div>
+          <div className="num-line">
+            {zeroPct != null && <span className="num-zero" style={{ left: `${zeroPct}%` }} data-lab="0" />}
+            {pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * tt}%` }} />)}
+          </div>
+          <div className="num-axis"><span>{lo.toFixed(1)}</span><span>{hi.toFixed(1)}</span></div>
+          <div className="note" style={{ marginTop: 8 }}>{tt < 1 ? `raw dots slide toward their ${isScale ? "scaled" : "transformed"} positions on one shared axis — step to move them` : "every point is now at its transformed value"}</div>
         </div>
       </div>
       {stageControls(maxStage)}
