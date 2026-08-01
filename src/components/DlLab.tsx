@@ -226,6 +226,23 @@ export default function DlLab() {
     const mad = w.reduce((a, v) => a + Math.abs(v), 0) / (w.length || 1);
     return <Plot data={[{ type: "histogram", x: w, marker: { color: "#a855f7" }, opacity: 0.85, nbinsx: 30 }] as never} layout={lay(`weight distribution — ${w.length} weights, mean |w| = ${mad.toFixed(2)}`, "weight value", "count", { height: H, showlegend: false, bargap: 0.03 }) as never} style={{ height: H, width: "100%" }} />;
   }
+  // per-epoch learning log — how loss / metrics move each epoch (newest first)
+  function learningLog() {
+    const metric = data?.task === "regression" ? "R²" : "acc";
+    if (!history.length) return <div className="note" style={{ padding: "50px 12px", textAlign: "center" }}>the learning log fills in as it trains — one row per epoch, newest on top.</div>;
+    const total = history.length; const stepN = Math.max(1, Math.ceil(total / 60));
+    const sampled = history.filter((_, i) => i % stepN === 0 || i === total - 1);
+    const rows = sampled.slice().reverse();
+    return <div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}><h4 className="fld" style={{ margin: 0 }}>Learning log</h4><span className="note">{total} epoch{total === 1 ? "" : "s"}{stepN > 1 ? ` · every ${stepN}` : ""}</span></div>
+      <div style={{ maxHeight: 300, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8 }}>
+        <table className="dtable" style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 11.5 }}><tbody>
+          <tr><th style={{ position: "sticky", top: 0, background: "var(--panel)" }}>epoch</th><th style={{ position: "sticky", top: 0, background: "var(--panel)" }}>loss</th><th style={{ position: "sticky", top: 0, background: "var(--panel)" }}>train {metric}</th><th style={{ position: "sticky", top: 0, background: "var(--panel)" }}>val {metric}</th><th style={{ position: "sticky", top: 0, background: "var(--panel)" }} /></tr>
+          {rows.map((r, i) => { const older = rows[i + 1]; const down = older ? r.loss < older.loss : true; const latest = i === 0; return <tr key={r.ep} style={latest ? { background: "var(--panel-2)" } : undefined}><td style={{ color: latest ? "var(--accent)" : undefined, fontWeight: latest ? 600 : undefined }}>{r.ep}</td><td>{r.loss.toFixed(4)}</td><td style={{ color: "var(--good)" }}>{r.acc.toFixed(3)}</td><td style={{ color: "#a855f7" }}>{r.vacc.toFixed(3)}</td><td style={{ color: down ? "var(--good)" : "var(--crit)" }}>{down ? "▼" : "▲"}</td></tr>; })}
+        </tbody></table>
+      </div>
+      <div className="note" style={{ marginTop: 6 }}>▼ loss fell vs the previous shown epoch · ▲ it rose. A steady ▼ that flattens = the model has learned what it can.</div>
+    </div>;
+  }
   // curves
   const curveFig = () => { if (!history.length) return null; const H = 280; const metric = data?.task === "regression" ? "R²" : "accuracy";
     return { loss: <Plot data={[{ type: "scatter", mode: "lines", name: "train", x: history.map((h) => h.ep), y: history.map((h) => h.loss), line: { color: "#5b7cff", width: 2 } }, { type: "scatter", mode: "lines", name: "val", x: history.map((h) => h.ep), y: history.map((h) => h.vloss), line: { color: "#f59e0b", width: 2, dash: "dot" } }] as never} layout={lay("loss ↓", "epoch", "loss", { showlegend: true, legend: { orientation: "h", y: -0.3 }, height: H }) as never} style={{ height: H, width: "100%" }} />,
@@ -419,14 +436,19 @@ export default function DlLab() {
               {stat(best ? best.vacc.toFixed(3) : "—", `validation ${metricName}`, "#a855f7")}
               {stat(best ? best.loss.toFixed(3) : "—", "loss")}
             </div>
-            {/* live network — connections form as it learns */}
+            {/* live network + learning log */}
             <div style={{ ...panelSt, marginBottom: 14 }}>
-              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                <h4 className="fld" style={{ margin: 0 }}>Network — weights forming live</h4>
-                <span className="note">green = positive weight · red = negative · thickness = magnitude</span>
+              <div className="split col-2e" style={{ gap: 18, alignItems: "start" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                    <h4 className="fld" style={{ margin: 0 }}>Network — weights forming live</h4>
+                    <span className="note">green + · red − · thickness = |w|</span>
+                  </div>
+                  {netDiagram()}
+                  <div className="note" style={{ marginTop: 6 }}>{epoch ? `epoch ${epoch}: each connection carries a weight the network keeps adjusting — strong edges (thick, saturated) emerge as it separates the classes.` : "press ▶ Train — the grey connections light up as the network learns."}</div>
+                </div>
+                <div>{learningLog()}</div>
               </div>
-              {netDiagram()}
-              <div className="note" style={{ marginTop: 6 }}>{epoch ? `epoch ${epoch}: each connection carries a weight the network keeps adjusting — watch strong edges (thick, saturated) emerge as it separates the classes.` : "press ▶ Train — the grey connections light up as the network learns."}</div>
             </div>
             {/* balanced 2×2 graph grid: boundary + loss / weights + accuracy */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14, alignItems: "start" }}>
