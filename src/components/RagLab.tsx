@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { chunkText, buildIndex, retrieve, retrieveDense, denseCos, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, type RagIndex, type Strategy, type Vec } from "@/lib/ragUtils";
+import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
 
 type Doc = { id: string; name: string; kind: string; text: string };
 type Chunk = { text: string; docName: string; docKind: string };
 type Step = "source" | "chunk" | "embed" | "query";
+type Backend = "vector" | "kg" | "hybrid";
 
 const SAMPLE = `Returns policy. Damaged items may be returned within 30 days of delivery for a full refund, provided the original packaging is included. Refunds are issued to the original payment method within 5 business days of the returned item being received. To start a return, sign in and open the order, then select the item and a reason for return. Store hours are 9am to 6pm on weekdays, closed on public holidays. Shipping is free on orders over $50, otherwise a flat $6 fee applies. International orders may take 10 to 15 business days to arrive. Gift cards are non-refundable. Warranty claims for electronics are handled by the manufacturer for the first 12 months.`;
 
@@ -72,6 +74,17 @@ export default function RagLab() {
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
 
+  // ── knowledge-graph backend ──
+  const [backend, setBackend] = useState<Backend>("vector");
+  const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
+  const [kgExtract, setKgExtract] = useState<"heuristic" | "llm">("heuristic");
+  const [kgHops, setKgHops] = useState(1);
+  const [maxNodes, setMaxNodes] = useState(22);
+  const [buildingKg, setBuildingKg] = useState(false);
+  const [kgPath, setKgPath] = useState<KgEdge[]>([]);
+  const [kgVisited, setKgVisited] = useState<string[]>([]);
+  const [kgSeeds, setKgSeeds] = useState<string[]>([]);
+
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
   const [topK, setTopK] = useState(3);
   // neural embeddings (real, via provider) + re-ranking + retrieval metrics
@@ -119,7 +132,7 @@ export default function RagLab() {
   }, []);
 
   // Chunks changed → any neural vectors are stale; drop back to TF-IDF until re-embedded.
-  useEffect(() => { setDenseVecs(null); setEmbedMode("tfidf"); setQVec(null); setMetricRows([]); setRelevant(new Set()); }, [chunks]);
+  useEffect(() => { setDenseVecs(null); setEmbedMode("tfidf"); setQVec(null); setMetricRows([]); setRelevant(new Set()); setGraph(null); setKgPath([]); setKgVisited([]); setKgSeeds([]); }, [chunks]);
   useEffect(() => { setQVec(null); setMetricRows([]); }, [question]);
   const combined = useMemo(() => docs.map((d) => d.text).join("\n\n"), [docs]);
   const totalWords = useMemo(() => combined.split(/\s+/).filter(Boolean).length, [combined]);
@@ -134,6 +147,41 @@ export default function RagLab() {
     return { assign, buckets, centroids, nlist: k };
   }, [index]);
 
+  const GW = 620, GH = 360;
+  const graphPos = useMemo(() => (graph ? layoutGraph(graph, GW, GH) : null), [graph]);
+  const canQuery = backend === "vector" ? !!index : backend === "kg" ? !!graph : (!!index && !!graph);
+  const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
+  const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+  const backendSel = (
+    <div style={{ marginBottom: 16 }}>
+      <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
+      <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, flexWrap: "wrap" }}>
+        {([["vector", "◆ Vector store"], ["kg", "🕸 Knowledge graph"], ["hybrid", "⚡ Hybrid (GraphRAG)"]] as [Backend, string][]).map(([b, l]) => <button key={b} onClick={() => setBackend(b)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: backend === b ? "var(--accent)" : "transparent", color: backend === b ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{l}</button>)}
+      </div>
+      <div className="note" style={{ marginTop: 6 }}>{backend === "vector" ? "Similarity search over embeddings — fuzzy, paraphrase-friendly." : backend === "kg" ? "Entities linked by relations, retrieved by traversal — explainable, multi-hop." : "Graph finds the relevant entities; vectors rank the chunks they point to."}</div>
+    </div>
+  );
+
+  // Premium graph renderer — nodes coloured by type, matched subgraph highlighted, traversed edges lit.
+  function graphSvg(g: KnowledgeGraph, pos: Record<string, { x: number; y: number }>, visited?: Set<string>, path?: KgEdge[]) {
+    const pathSet = new Set((path || []).map((e) => e.s + "→" + e.o));
+    const seedSet = new Set(kgSeeds);
+    return (
+      <svg viewBox={`0 0 ${GW} ${GH}`} width="100%" height={GH} style={{ display: "block", background: "var(--panel-2)", borderRadius: 10 }}>
+        {g.edges.map((e, i) => { const a = pos[e.s], b = pos[e.o]; if (!a || !b) return null; const on = pathSet.has(e.s + "→" + e.o); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          return <g key={i}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={on ? "#5b7cff" : "var(--border-strong)"} strokeWidth={on ? 2.2 : 1} opacity={on ? 0.95 : visited ? 0.22 : 0.5} />
+            {(on || g.edges.length <= 16) && <text x={mx} y={my - 3} fontSize={8.5} fill={on ? "#f59e0b" : "var(--faint)"} textAnchor="middle" fontStyle="italic">{e.rel.length > 14 ? e.rel.slice(0, 13) + "…" : e.rel}</text>}
+          </g>; })}
+        {g.nodes.map((n, i) => { const p = pos[n.id]; if (!p) return null; const on = visited?.has(n.id); const seed = seedSet.has(n.id); const r = 6 + Math.min(8, n.freq * 1.4);
+          return <g key={i} opacity={visited && !on ? 0.32 : 1}>
+            {on && <circle cx={p.x} cy={p.y} r={r + 4} fill="none" stroke="#5b7cff" strokeWidth={2} opacity={0.55} />}
+            <circle cx={p.x} cy={p.y} r={r} fill={seed ? "#3ecf7f" : n.type === "proper" ? "#a855f7" : "#5b7cff"} opacity={0.92} />
+            <text x={p.x} y={p.y + r + 10} fontSize={9.5} fill="var(--text)" textAnchor="middle" fontWeight={600}>{n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label}</text>
+          </g>; })}
+      </svg>
+    );
+  }
+
   useEffect(() => {
     fetch("/api/models").then((r) => r.json()).then((j) => { setProvider(j.provider); setProvKnown(true); }).catch(() => setProvKnown(true));
     return () => { if (timer.current) clearTimeout(timer.current); };
@@ -143,8 +191,14 @@ export default function RagLab() {
   useEffect(() => {
     if (step === "chunk" && chunks.length === 0 && docs.length) runChunking();
     if (step === "embed" && !index && chunks.length) runEmbedding();
+    if (step === "embed" && backend !== "vector" && !graph && chunks.length) buildGraphHeuristic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
+  // switching to a graph backend on the index step auto-extracts the graph
+  useEffect(() => {
+    if (step === "embed" && backend !== "vector" && !graph && chunks.length && !buildingKg) buildGraphHeuristic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backend]);
 
   // ── source ──
   async function onFiles(e: React.ChangeEvent<HTMLInputElement>) {
@@ -272,6 +326,34 @@ export default function RagLab() {
     } catch (e) { setMsg((e as Error).message); setEmbedMode("tfidf"); setDenseVecs(null); }
     setEmbedding(false);
   }
+  // ── knowledge-graph construction ──
+  function buildGraphHeuristic() {
+    if (!chunks.length) return;
+    setBuildingKg(true); setMsg("");
+    // defer so the spinner paints before the (fast) synchronous extraction
+    setTimeout(() => { setGraph(extractGraph(chunks.map((c) => c.text), { maxNodes })); setKgPath([]); setKgVisited([]); setKgSeeds([]); setBuildingKg(false); }, 20);
+  }
+  async function buildGraphLLM() {
+    if (!chunks.length) return; setBuildingKg(true); setMsg("");
+    try {
+      const corpus = chunks.map((c, i) => `[chunk ${i}] ${c.text}`).join("\n").slice(0, 8000);
+      const messages = [
+        { role: "system", content: "Extract a knowledge graph. Return ONLY a JSON array of triples, each {\"s\":\"subject\",\"r\":\"relation\",\"o\":\"object\"}. Use short noun-phrase entities and concise relations. Max 30 triples. No prose." },
+        { role: "user", content: corpus },
+      ];
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0 }) });
+      if (!res.ok || !res.body) throw new Error("extraction failed");
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+      for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+      const m = text.match(/\[[\s\S]*\]/); const triples = m ? JSON.parse(m[0]) : [];
+      const clean = (Array.isArray(triples) ? triples : []).filter((t: unknown): t is { s: string; r: string; o: string } => !!t && typeof (t as { s: unknown }).s === "string" && typeof (t as { o: unknown }).o === "string");
+      if (!clean.length) throw new Error("no triples returned");
+      setGraph(graphFromTriples(clean, chunks.map((c) => c.text))); setKgPath([]); setKgVisited([]); setKgSeeds([]);
+    } catch (e) { setMsg("LLM extraction: " + (e as Error).message + " — falling back to heuristic."); setGraph(extractGraph(chunks.map((c) => c.text), { maxNodes })); }
+    setBuildingKg(false);
+  }
+  function buildGraph() { if (kgExtract === "llm" && provider) buildGraphLLM(); else buildGraphHeuristic(); }
+
   async function ensureQVec(): Promise<number[] | null> {
     if (embedMode !== "neural" || !denseVecs) return null;
     if (qVec) return qVec;
@@ -298,21 +380,35 @@ export default function RagLab() {
     setMetricRows(rows);
   }
   async function ask() {
-    if (!index || chunks.length === 0) { setAnswer("Run chunking and embedding first."); return; }
+    if (chunks.length === 0 || !canQuery) { setAnswer("Build the index first (step 3)."); return; }
     setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
     const neural = embedMode === "neural" && !!denseVecs;
     const steps = [
-      { who: "embed query", what: neural ? `question → ${embedInfo?.dim ?? 0}-d neural vector` : "question → TF-IDF vector" },
-      { who: "retrieve", what: `${strategy}${rerank === "mmr" ? " + MMR" : ""} · top-k ${topK}` },
+      { who: backend === "kg" ? "link entities" : "embed query", what: backend === "kg" ? "match query terms → graph nodes" : neural ? `question → ${embedInfo?.dim ?? 0}-d neural vector` : "question → TF-IDF vector" },
+      { who: "retrieve", what: backend === "kg" ? `graph traversal · ${kgHops}-hop · top ${topK}` : backend === "hybrid" ? `graph → vector rank · top ${topK}` : `${strategy}${rerank === "mmr" ? " + MMR" : ""} · top-k ${topK}` },
       { who: "prompt", what: "inject retrieved context + sources" },
       { who: "generate", what: `stream → ${provider || "provider"}` },
     ];
     setTraceStep(steps, 1);
-    const qv = await ensureQVec();
-    const ranked = fullRank(strategy, qv);
-    const order = applyRerank(ranked, topK);
-    const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
-    const top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+    let top: { i: number; score: number }[];
+    if (backend === "kg" && graph) {
+      const r = retrieveGraph(graph, question, topK, kgHops);
+      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path);
+      top = r.chunkIds.map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+    } else if (backend === "hybrid" && graph && index) {
+      const r = retrieveGraph(graph, question, Math.max(topK * 3, 8), Math.max(kgHops, 2));
+      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path);
+      const cand = new Set(r.chunkIds); const qv = await ensureQVec();
+      const ranked = fullRank(strategy, qv); const inGraph = ranked.filter((h) => cand.has(h.i));
+      const order = applyRerank(inGraph.length ? inGraph : ranked, topK);
+      const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
+      top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+    } else {
+      const qv = await ensureQVec();
+      const ranked = fullRank(strategy, qv); const order = applyRerank(ranked, topK);
+      const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
+      top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+    }
     setHits(top);
     setTraceStep(steps, 3);
     const context = top.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
@@ -345,7 +441,7 @@ export default function RagLab() {
         <div>
           <div className="eyebrow">Lab 02 · flagship</div>
           <h2 className="page-h">RAG Lab</h2>
-          <p className="page-sub" style={{ margin: 0 }}>Add sources, watch them get chunked and embedded into a vector store, then ask — the answer is grounded and cites the exact chunk &amp; source.</p>
+          <p className="page-sub" style={{ margin: 0 }}>Add sources, chunk them, then index into a <b>vector store</b>, a <b>knowledge graph</b>, or both (hybrid) — ask, and the answer is grounded with citations.</p>
         </div>
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button></div>
       </div>
@@ -355,7 +451,7 @@ export default function RagLab() {
       <div className="stepper">
         {stepBtn("source", 1, "Source", true)}
         {stepBtn("chunk", 2, "Chunk", docs.length > 0)}
-        {stepBtn("embed", 3, "Embed & Index", docs.length > 0)}
+        {stepBtn("embed", 3, "Index", docs.length > 0)}
         {stepBtn("query", 4, "Retrieve & Answer", docs.length > 0)}
       </div>
 
@@ -489,11 +585,56 @@ export default function RagLab() {
         </div>
       )}
 
-      {/* STEP 3 — EMBED */}
+      {/* STEP 3 — INDEX (vector store / knowledge graph / hybrid) */}
       {step === "embed" && (
         <div className="card">
-          <div className="card-h"><span className="t">Embed &amp; store in vector index</span><span className="mono r">{embedding ? <><span className="busy-dot" />vectorizing…</> : index ? `${index.vectors.length} vectors` : "not built"}</span></div>
+          <div className="card-h"><span className="t">{backend === "kg" ? "Build the knowledge graph" : backend === "hybrid" ? "Index — vectors + graph" : "Embed & store in vector index"}</span><span className="mono r">{embedding || buildingKg ? <><span className="busy-dot" />{buildingKg ? "extracting…" : "vectorizing…"}</> : backend === "kg" ? (graph ? `${graph.nodes.length} nodes · ${graph.edges.length} edges` : "not built") : index ? `${index.vectors.length} vectors` : "not built"}</span></div>
           <div className="card-b">
+            {backendSel}
+
+            {backend !== "vector" && (
+              <div style={{ ...pnl, marginBottom: 16 }}>
+                {kgHead("#a855f7", "Knowledge graph", graph ? <span className="note" style={{ fontSize: 10 }}>{graph.nodes.length} entities · {graph.edges.length} relations</span> : undefined)}
+                <div style={{ padding: 14 }}>
+                  <div className="row" style={{ gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+                    <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Extraction</label>
+                      <div className="chips">
+                        <button className={`chip ${kgExtract === "heuristic" ? "on" : ""}`} onClick={() => setKgExtract("heuristic")}>Heuristic</button>
+                        <button className={`chip ${kgExtract === "llm" ? "on" : ""}`} onClick={() => setKgExtract("llm")} disabled={provider === null && provKnown} title={provider === null ? "needs a provider" : ""}>LLM-assisted</button>
+                      </div>
+                    </div>
+                    {kgExtract === "heuristic" && <div className="knob" style={{ margin: 0, minWidth: 160 }}><div className="kr"><span>Max entities</span><b>{maxNodes}</b></div><input type="range" min={10} max={36} step={2} value={maxNodes} onChange={(e) => setMaxNodes(+e.target.value)} /></div>}
+                    <button className="btn" onClick={buildGraph} disabled={buildingKg || !chunks.length}>{buildingKg ? "extracting…" : graph ? "↻ Rebuild graph" : "▶ Build graph"}</button>
+                    {kgExtract === "llm" && provider && <span className="note">uses {provider} to extract clean triples</span>}
+                    {kgExtract === "llm" && provider === null && provKnown && <span className="note">no provider — heuristic used instead</span>}
+                  </div>
+                  {graph && graphPos && graph.nodes.length > 0 ? (
+                    <div className="split col-2e" style={{ gap: 14, alignItems: "start" }}>
+                      <div>
+                        {graphSvg(graph, graphPos)}
+                        <div className="row" style={{ gap: 14, marginTop: 8, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
+                          <span className="row" style={{ gap: 5, alignItems: "center" }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#5b7cff" }} />concept</span>
+                          <span className="row" style={{ gap: 5, alignItems: "center" }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "#a855f7" }} />proper noun</span>
+                          <span className="note">node size = frequency · edge label = relation</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="fld">Extracted triples · {graph.edges.length}</label>
+                        <div style={{ maxHeight: 300, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
+                          <table className="dtable" style={{ width: "100%" }}><tbody>
+                            <tr><th style={{ textAlign: "left" }}>subject</th><th style={{ textAlign: "left" }}>relation</th><th style={{ textAlign: "left" }}>object</th></tr>
+                            {graph.edges.slice(0, 40).map((e, i) => <tr key={i}><td style={{ color: "#5b7cff" }}>{graph.nodes.find((n) => n.id === e.s)?.label}</td><td style={{ color: "var(--orange)", fontStyle: "italic" }}>{e.rel}</td><td style={{ color: "#3ecf7f" }}>{graph.nodes.find((n) => n.id === e.o)?.label}</td></tr>)}
+                          </tbody></table>
+                        </div>
+                        <div className="note" style={{ marginTop: 8 }}>{kgExtract === "heuristic" ? "Heuristic extraction: frequent entities linked by intra-sentence co-occurrence. Rough but deterministic — switch to LLM-assisted for cleaner triples." : "LLM-extracted triples grounded back to the chunks they appear in."}</div>
+                      </div>
+                    </div>
+                  ) : !buildingKg && <div className="note">Build the graph to extract entities and relations from the {chunks.length} chunks.</div>}
+                </div>
+              </div>
+            )}
+
+            {backend !== "kg" && (<>
             <div className="stat-row">
               <div className="stat">chunks<b>{chunks.length}</b></div>
               <div className="stat">vectors stored<b>{index ? index.vectors.length : 0}</b></div>
@@ -628,7 +769,8 @@ export default function RagLab() {
             })()}
             {!index && !embedding && <div className="note">Click Run embedding to vectorize the chunks.</div>}
             <div className="note" style={{ marginTop: 8 }}>Shown as TF-IDF term weights (clear to read). Neural embeddings (e.g. bge-small) can replace this backend — the pipeline is identical.</div>
-            <div className="stepnav"><button className="btn ghost" onClick={() => goStep("chunk")}>← Back</button><button className="btn" disabled={!index} onClick={() => goStep("query")}>Next: Retrieve &amp; Answer →</button></div>
+            </>)}
+            <div className="stepnav"><button className="btn ghost" onClick={() => goStep("chunk")}>← Back</button><button className="btn" disabled={!canQuery} onClick={() => goStep("query")}>Next: Retrieve &amp; Answer →</button></div>
           </div>
         </div>
       )}
@@ -639,21 +781,35 @@ export default function RagLab() {
           <div className="card">
             <div className="card-h"><span className="t">Retrieve &amp; ask</span></div>
             <div className="card-b">
-              {!index && <div className="warnbar">Run embedding first (step 3).</div>}
-              <label className="fld">Retrieval parameters</label>
+              {!canQuery && <div className="warnbar">Build the index first (step 3).</div>}
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}><label className="fld" style={{ margin: 0 }}>Retrieval parameters</label><span className="note" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em", color: backend === "kg" ? "#a855f7" : backend === "hybrid" ? "#f59e0b" : "var(--accent)" }}>{backend === "kg" ? "🕸 knowledge graph" : backend === "hybrid" ? "⚡ hybrid" : "◆ vector store"}</span></div>
               <div className="row" style={{ flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
-                <select value={strategy} onChange={(e) => setStrategy(e.target.value as Strategy)} style={{ width: 168 }}>
+                {backend !== "kg" && <select value={strategy} onChange={(e) => setStrategy(e.target.value as Strategy)} style={{ width: 168 }}>
                   <option value="hybrid">Hybrid</option><option value="vector">Vector ({embedMode === "neural" ? "neural" : "TF-IDF"})</option><option value="keyword">Keyword (BM25)</option>
-                </select>
-                <select value={rerank} onChange={(e) => setRerank(e.target.value as "none" | "mmr")} style={{ width: 168 }} title="Re-ranking">
+                </select>}
+                {backend !== "kg" && <select value={rerank} onChange={(e) => setRerank(e.target.value as "none" | "mmr")} style={{ width: 168 }} title="Re-ranking">
                   <option value="none">No re-ranking</option><option value="mmr">MMR re-rank (diversity)</option>
-                </select>
-                {rerank === "mmr" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>λ (relevance↔diversity)</span><b>{mmrLambda.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={mmrLambda} onChange={(e) => setMmrLambda(+e.target.value)} /></div>}
+                </select>}
+                {backend !== "kg" && rerank === "mmr" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>λ (relevance↔diversity)</span><b>{mmrLambda.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={mmrLambda} onChange={(e) => setMmrLambda(+e.target.value)} /></div>}
+                {backend !== "vector" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Graph hops</span><b>{kgHops}</b></div><input type="range" min={1} max={3} value={kgHops} onChange={(e) => setKgHops(+e.target.value)} /></div>}
                 <div className="knob" style={{ margin: 0, minWidth: 140 }}><div className="kr"><span>Top-k</span><b>{topK}</b></div><input type="range" min={1} max={6} value={topK} onChange={(e) => setTopK(+e.target.value)} /></div>
               </div>
               <label className="fld">Question</label>
               <input type="text" value={question} onChange={(e) => setQuestion(e.target.value)} />
-              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={ask} disabled={running || !index}>▶ Ask</button></div>
+              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={ask} disabled={running || !canQuery}>▶ Ask</button></div>
+
+              {backend !== "vector" && graph && graphPos && kgVisited.length > 0 && (
+                <div style={{ ...pnl, marginTop: 16 }}>
+                  {kgHead("#a855f7", "Graph traversal", <span className="note" style={{ fontSize: 10 }}>{kgSeeds.length} matched · {kgVisited.length} in subgraph</span>)}
+                  <div style={{ padding: 14 }}>
+                    {kgPath.length > 0 && <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12, fontSize: 11.5 }}>
+                      {kgPath.slice(0, 6).map((e, i) => <span key={i} className="row" style={{ gap: 6, alignItems: "center" }}><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(62,207,127,.14)", color: "#3ecf7f", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.s)?.label}</span><span style={{ color: "var(--orange)", fontStyle: "italic", fontSize: 10.5 }}>{e.rel} →</span><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(91,124,255,.14)", color: "#5b7cff", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.o)?.label}</span></span>)}
+                    </div>}
+                    {graphSvg(graph, graphPos, new Set(kgVisited), kgPath)}
+                    <div className="note" style={{ marginTop: 6 }}>Green = query-matched entities · highlighted = subgraph within {kgHops} hop(s). The chunks attached to these entities become the context.</div>
+                  </div>
+                </div>
+              )}
               {hits.length === 0 && <div className="note" style={{ marginTop: 16 }}>Ask to retrieve.</div>}
               {index && hits.length > 0 && (() => {
                 const qTerms = Array.from(new Set(tokenize(question)));
@@ -662,10 +818,10 @@ export default function RagLab() {
                 if (clusters) clusters.centroids.forEach((ct, c) => { const s = cosine(qv, ct); if (s > bs) { bs = s; probed = c; } });
                 return (
                   <>
-                    <label className="fld" style={{ marginTop: 16 }}>Query → tokens (embedded the same way as the chunks)</label>
+                    <label className="fld" style={{ marginTop: 16 }}>Query → tokens (matched against the {backend === "kg" ? "graph entities" : "chunk vectors"})</label>
                     <div className="q-terms">{qTerms.map((t) => <span key={t} className="q-term">{t}</span>)}</div>
 
-                    {clusters && (
+                    {backend !== "kg" && clusters && (
                       <>
                         <label className="fld" style={{ marginTop: 14 }}>ANN search path (Milvus IVF) — the query vector lands in its nearest bucket; only that bucket is scanned</label>
                         <div className="mv-buckets">
