@@ -91,3 +91,55 @@ export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: nu
     .sort((a, b) => b.score - a.score)
     .slice(0, k);
 }
+
+// ── dense (neural) embeddings support ──
+export function denseCos(a: number[], b: number[]): number {
+  let dot = 0, na = 0, nb = 0; const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+// Retrieve on dense vectors: keyword = BM25, vector = cosine on neural embeddings, hybrid = blend.
+export function retrieveDense(idx: RagIndex, query: string, qVec: number[], chunkVecs: number[][], strategy: Strategy, k: number): { i: number; score: number }[] {
+  const bm = norm(bm25Scores(idx, query));
+  const vec = norm(chunkVecs.map((v) => denseCos(qVec, v)));
+  let scores: number[];
+  if (strategy === "keyword") scores = bm;
+  else if (strategy === "vector") scores = vec;
+  else scores = bm.map((s, i) => 0.5 * s + 0.5 * vec[i]);
+  return scores.map((s, i) => ({ i, score: s })).sort((a, b) => b.score - a.score).slice(0, k);
+}
+
+// ── MMR re-ranking (diversity): trades relevance vs redundancy ──
+export function mmrRerank(cand: number[], rel: (i: number) => number, sim: (i: number, j: number) => number, lambda: number, k: number): number[] {
+  const pool = [...cand]; const selected: number[] = [];
+  while (selected.length < Math.min(k, cand.length) && pool.length) {
+    let best = pool[0], bestScore = -Infinity;
+    for (const i of pool) { const div = selected.length ? Math.max(...selected.map((j) => sim(i, j))) : 0; const score = lambda * rel(i) - (1 - lambda) * div; if (score > bestScore) { bestScore = score; best = i; } }
+    selected.push(best); pool.splice(pool.indexOf(best), 1);
+  }
+  return selected;
+}
+
+// ── retrieval-quality metrics vs a labelled relevant set ──
+export function retrievalMetrics(ranked: number[], relevant: Set<number>, k: number): { p: number; r: number; mrr: number; ndcg: number } {
+  const topK = ranked.slice(0, k);
+  const hits = topK.filter((i) => relevant.has(i)).length;
+  const p = k ? hits / k : 0;
+  const r = relevant.size ? hits / relevant.size : 0;
+  let mrr = 0; for (let i = 0; i < ranked.length; i++) if (relevant.has(ranked[i])) { mrr = 1 / (i + 1); break; }
+  let dcg = 0; topK.forEach((i, rank) => { if (relevant.has(i)) dcg += 1 / Math.log2(rank + 2); });
+  let idcg = 0; for (let rank = 0; rank < Math.min(k, relevant.size); rank++) idcg += 1 / Math.log2(rank + 2);
+  return { p, r, mrr, ndcg: idcg ? dcg / idcg : 0 };
+}
+
+// ── PCA to 2-D (power iteration) for visualising the embedding space ──
+export function pca2(vectors: number[][]): { x: number; y: number }[] {
+  const n = vectors.length, d = vectors[0]?.length || 0;
+  if (!n || !d) return vectors.map(() => ({ x: 0, y: 0 }));
+  const mean = new Array(d).fill(0); vectors.forEach((v) => v.forEach((x, j) => { mean[j] += x / n; }));
+  const cen = vectors.map((v) => v.map((x, j) => x - mean[j]));
+  const covMul = (vec: number[]) => { const Xv = cen.map((row) => row.reduce((a, x, j) => a + x * vec[j], 0)); const out = new Array(d).fill(0); cen.forEach((row, i) => row.forEach((x, j) => { out[j] += x * Xv[i] / n; })); return out; };
+  const power = (deflate?: number[]) => { let v = new Array(d).fill(0).map((_, i) => Math.sin(i + 1)); for (let it = 0; it < 40; it++) { let nv = covMul(v); if (deflate) { const proj = nv.reduce((a, x, j) => a + x * deflate[j], 0); nv = nv.map((x, j) => x - proj * deflate[j]); } const nrm = Math.sqrt(nv.reduce((a, x) => a + x * x, 0)) || 1; v = nv.map((x) => x / nrm); } return v; };
+  const pc1 = power(), pc2 = power(pc1);
+  return cen.map((row) => ({ x: row.reduce((a, x, j) => a + x * pc1[j], 0), y: row.reduce((a, x, j) => a + x * pc2[j], 0) }));
+}

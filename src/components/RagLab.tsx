@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { chunkText, buildIndex, retrieve, cosine, tokenize, queryVector, type RagIndex, type Strategy, type Vec } from "@/lib/ragUtils";
+import { chunkText, buildIndex, retrieve, retrieveDense, denseCos, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, type RagIndex, type Strategy, type Vec } from "@/lib/ragUtils";
+import Plot from "@/components/Plot";
+import { plotlyTheme } from "@/lib/edaCharts";
 
 type Doc = { id: string; name: string; kind: string; text: string };
 type Chunk = { text: string; docName: string; docKind: string };
@@ -72,6 +74,15 @@ export default function RagLab() {
 
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
   const [topK, setTopK] = useState(3);
+  // neural embeddings (real, via provider) + re-ranking + retrieval metrics
+  const [embedMode, setEmbedMode] = useState<"tfidf" | "neural">("tfidf");
+  const [denseVecs, setDenseVecs] = useState<number[][] | null>(null);
+  const [embedInfo, setEmbedInfo] = useState<{ model: string; dim: number } | null>(null);
+  const [qVec, setQVec] = useState<number[] | null>(null);
+  const [rerank, setRerank] = useState<"none" | "mmr">("none");
+  const [mmrLambda, setMmrLambda] = useState(0.7);
+  const [relevant, setRelevant] = useState<Set<number>>(new Set());
+  const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
   const [fetching, setFetching] = useState(false);
@@ -107,6 +118,9 @@ export default function RagLab() {
     }).catch(() => {});
   }, []);
 
+  // Chunks changed → any neural vectors are stale; drop back to TF-IDF until re-embedded.
+  useEffect(() => { setDenseVecs(null); setEmbedMode("tfidf"); setQVec(null); setMetricRows([]); setRelevant(new Set()); }, [chunks]);
+  useEffect(() => { setQVec(null); setMetricRows([]); }, [question]);
   const combined = useMemo(() => docs.map((d) => d.text).join("\n\n"), [docs]);
   const totalWords = useMemo(() => combined.split(/\s+/).filter(Boolean).length, [combined]);
   const vocab = index ? Object.keys(index.df).length : 0;
@@ -242,17 +256,63 @@ export default function RagLab() {
     catch { setSaved("Save failed"); }
     setTimeout(() => setSaved(""), 2500);
   }
+  // ── neural embeddings (real, via the provider's /embeddings endpoint) ──
+  async function embedViaApi(texts: string[]): Promise<number[][]> {
+    const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts }) });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || "embed failed");
+    return j.vectors as number[][];
+  }
+  async function runNeuralEmbed() {
+    if (!chunks.length) return; setEmbedding(true); setMsg("");
+    try {
+      const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text) }) });
+      const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
+      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]);
+    } catch (e) { setMsg((e as Error).message); setEmbedMode("tfidf"); setDenseVecs(null); }
+    setEmbedding(false);
+  }
+  async function ensureQVec(): Promise<number[] | null> {
+    if (embedMode !== "neural" || !denseVecs) return null;
+    if (qVec) return qVec;
+    try { const v = (await embedViaApi([question]))[0] || null; setQVec(v); return v; } catch { return null; }
+  }
+  // Full ranking of every chunk for a strategy (dense when neural, else TF-IDF/BM25).
+  function fullRank(strat: Strategy, qv: number[] | null): { i: number; score: number }[] {
+    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length);
+    return retrieve(index!, question, strat, chunks.length);
+  }
+  // Apply MMR re-ranking (diversity) to a ranked candidate list, returning top-k indices.
+  function applyRerank(ranked: { i: number; score: number }[], k: number): number[] {
+    if (rerank !== "mmr") return ranked.slice(0, k).map((h) => h.i);
+    const cand = ranked.slice(0, Math.min(ranked.length, Math.max(k * 3, k))).map((h) => h.i);
+    const relMap = new Map(ranked.map((h) => [h.i, h.score]));
+    const rel = (i: number) => relMap.get(i) ?? 0;
+    const sim = (embedMode === "neural" && denseVecs) ? (i: number, j: number) => denseCos(denseVecs[i], denseVecs[j]) : (i: number, j: number) => cosine(index!.vectors[i], index!.vectors[j]);
+    return mmrRerank(cand, rel, sim, mmrLambda, k);
+  }
+  async function evalRetrieval() {
+    if (!index) return; const qv = await ensureQVec();
+    const strats: Strategy[] = ["keyword", "vector", "hybrid"];
+    const rows = strats.map((s) => { const ranked = fullRank(s, qv); const order = applyRerank(ranked, chunks.length); const m = retrievalMetrics(order, relevant, topK); return { name: rerank === "mmr" ? `${s}+mmr` : s, ...m }; });
+    setMetricRows(rows);
+  }
   async function ask() {
     if (!index || chunks.length === 0) { setAnswer("Run chunking and embedding first."); return; }
     setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
+    const neural = embedMode === "neural" && !!denseVecs;
     const steps = [
-      { who: "embed query", what: "question → vector" },
-      { who: "retrieve", what: `${strategy} · top-k ${topK}` },
+      { who: "embed query", what: neural ? `question → ${embedInfo?.dim ?? 0}-d neural vector` : "question → TF-IDF vector" },
+      { who: "retrieve", what: `${strategy}${rerank === "mmr" ? " + MMR" : ""} · top-k ${topK}` },
       { who: "prompt", what: "inject retrieved context + sources" },
       { who: "generate", what: `stream → ${provider || "provider"}` },
     ];
     setTraceStep(steps, 1);
-    const top = retrieve(index, question, strategy, topK);
+    const qv = await ensureQVec();
+    const ranked = fullRank(strategy, qv);
+    const order = applyRerank(ranked, topK);
+    const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
+    const top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
     setHits(top);
     setTraceStep(steps, 3);
     const context = top.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
@@ -277,6 +337,7 @@ export default function RagLab() {
     <button className={step === k ? "on" : ""} disabled={!enabled} onClick={() => goStep(k)}><b>{n}</b>{label}</button>
   );
   const stepWords = Math.max(1, size - overlap);
+  const pLayout = (t: ReturnType<typeof plotlyTheme>, title: string, extra: Record<string, unknown> = {}) => ({ title: { text: title, font: { size: 13, color: t.text } }, paper_bgcolor: t.paper, plot_bgcolor: t.plot, font: { color: t.muted, size: 11 }, margin: { l: 44, r: 16, t: 40, b: 60 }, xaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, yaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, colorway: t.colorway, ...extra });
 
   return (
     <>
@@ -441,6 +502,24 @@ export default function RagLab() {
             </div>
             <div className="row" style={{ marginBottom: 12 }}><button className="btn" onClick={runEmbedding} disabled={embedding}>▶ Run embedding</button><span className="note">turns each chunk into a vector and stores it</span></div>
 
+            <div style={{ marginBottom: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+              <label className="fld">Vector backend — lexical (TF-IDF) or real semantic embeddings</label>
+              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <div className="chips">
+                  <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
+                  <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { if (denseVecs) setEmbedMode("neural"); else runNeuralEmbed(); }} disabled={provider === null && provKnown}>Neural · semantic</button>
+                </div>
+                {embedMode === "neural" && !denseVecs && <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || (provider === null && provKnown)}>{embedding ? "embedding…" : "▶ Embed with neural model"}</button>}
+                {embedMode === "neural" && denseVecs && embedInfo && <span className="note">real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</span>}
+                {provider === null && provKnown && <span className="note">neural embeddings need a provider (Admin → Providers) — TF-IDF works without one</span>}
+              </div>
+              {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
+                const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
+                const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
+                return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
+              })()}
+            </div>
+
             {index && (() => {
               const ei = Math.min(embIdx, chunks.length - 1);
               const toks = index.docs[ei];
@@ -563,9 +642,13 @@ export default function RagLab() {
               {!index && <div className="warnbar">Run embedding first (step 3).</div>}
               <label className="fld">Retrieval parameters</label>
               <div className="row" style={{ flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
-                <select value={strategy} onChange={(e) => setStrategy(e.target.value as Strategy)} style={{ width: 160 }}>
-                  <option value="hybrid">Hybrid</option><option value="vector">Vector (TF-IDF)</option><option value="keyword">Keyword (BM25)</option>
+                <select value={strategy} onChange={(e) => setStrategy(e.target.value as Strategy)} style={{ width: 168 }}>
+                  <option value="hybrid">Hybrid</option><option value="vector">Vector ({embedMode === "neural" ? "neural" : "TF-IDF"})</option><option value="keyword">Keyword (BM25)</option>
                 </select>
+                <select value={rerank} onChange={(e) => setRerank(e.target.value as "none" | "mmr")} style={{ width: 168 }} title="Re-ranking">
+                  <option value="none">No re-ranking</option><option value="mmr">MMR re-rank (diversity)</option>
+                </select>
+                {rerank === "mmr" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>λ (relevance↔diversity)</span><b>{mmrLambda.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={mmrLambda} onChange={(e) => setMmrLambda(+e.target.value)} /></div>}
                 <div className="knob" style={{ margin: 0, minWidth: 140 }}><div className="kr"><span>Top-k</span><b>{topK}</b></div><input type="range" min={1} max={6} value={topK} onChange={(e) => setTopK(+e.target.value)} /></div>
               </div>
               <label className="fld">Question</label>
@@ -603,13 +686,27 @@ export default function RagLab() {
                       const matched = qTerms.filter((t) => chunkToks.has(t));
                       return (
                         <div key={h.i} className="chunk-card reveal-in">
-                          <div className="ch"><span>chunk {h.i + 1}<span className="src-tag">{chunks[h.i].docKind}</span> {chunks[h.i].docName}</span><span style={{ color: "var(--accent)" }}>score {h.score.toFixed(2)}</span></div>
+                          <div className="ch"><span>chunk {h.i + 1}<span className="src-tag">{chunks[h.i].docKind}</span> {chunks[h.i].docName}</span><span style={{ display: "inline-flex", gap: 10, alignItems: "center" }}><label className="note" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}><input type="checkbox" checked={relevant.has(h.i)} onChange={() => setRelevant((s) => { const n = new Set(s); if (n.has(h.i)) n.delete(h.i); else n.add(h.i); return n; })} />relevant</label><span style={{ color: "var(--accent)" }}>score {h.score.toFixed(2)}</span></span></div>
                           <div className="q-match">{qTerms.map((t) => <span key={t} className={`q-chip ${matched.includes(t) ? "on" : ""}`}>{t}</span>)}</div>
                           <div className="q-matchnote">{matched.length}/{qTerms.length} query terms overlap this chunk</div>
                           <div style={{ color: "var(--muted)", marginTop: 6 }}>{highlightTerms(chunks[h.i].text.slice(0, 170), matched)}…</div>
                         </div>
                       );
                     })}
+                    <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                      <label className="fld">Retrieval quality — tick the chunks that actually answer the question, then evaluate</label>
+                      <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <button className="btn sm" onClick={evalRetrieval} disabled={relevant.size === 0}>▶ Evaluate P@k / recall / MRR / nDCG</button>
+                        <span className="note">{relevant.size} chunk{relevant.size === 1 ? "" : "s"} marked relevant</span>
+                        {relevant.size > 0 && <button className="btn ghost sm" onClick={() => { setRelevant(new Set()); setMetricRows([]); }}>clear</button>}
+                      </div>
+                      {metricRows.length > 0 && (() => {
+                        const t = plotlyTheme(); const mk: [string, "p" | "r" | "mrr" | "ndcg"][] = [["P@k", "p"], ["recall@k", "r"], ["MRR", "mrr"], ["nDCG", "ndcg"]];
+                        const traces = metricRows.map((row, ri) => ({ type: "bar", name: row.name, x: mk.map((m) => m[0]), y: mk.map((m) => row[m[1]]), marker: { color: t.colorway[ri % t.colorway.length] }, text: mk.map((m) => row[m[1]].toFixed(2)), textposition: "outside", cliponaxis: false }));
+                        return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, `Retrieval metrics @top-${topK} vs your ${relevant.size} relevant chunk(s)`, { barmode: "group", showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 320, yaxis: { range: [0, 1.12] } }) }} style={{ height: 320, width: "100%" }} /></div>;
+                      })()}
+                      {metricRows.length > 0 && <div className="note" style={{ marginTop: 6 }}>Higher is better. Compare strategies (and MMR on/off) to see which retrieval surfaces the relevant chunks first — this is how you’d pick a retriever objectively instead of by eye.</div>}
+                    </div>
                   </>
                 );
               })()}
