@@ -54,7 +54,7 @@ export default function DlLab() {
   const [balanceClasses, setBalanceClasses] = useState(false);
   const [exFx, setExFx] = useState(0);
   const [exFy, setExFy] = useState(1);
-  const [exMode, setExMode] = useState<"scatter" | "pca" | "dist">("scatter");
+  const [exMode, setExMode] = useState<"scatter" | "pca" | "dist" | "corr">("scatter");
 
   const [hidden, setHidden] = useState<number[]>([8, 6]);
   const [act, setAct] = useState("tanh");
@@ -304,6 +304,11 @@ export default function DlLab() {
   function modelJson() { const n = netRef.current; if (!n || !data) return "{}"; return JSON.stringify({ task: data.task, classes: data.classes, featNames: data.featNames, sizes: n.sizes, activation: n.act, scaler: scRef.current, weights: n.W, biases: n.b }, null, 2); }
   const mcard = (v: string, k: string, accent = false, badge?: [string, string]) => <div key={k} style={{ background: "linear-gradient(160deg, var(--panel), var(--surface))", border: `1px solid ${accent ? "var(--accent)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", position: "relative", overflow: "hidden" }}><div style={{ fontSize: 28, fontWeight: 600, color: accent ? "var(--accent)" : "var(--text)", lineHeight: 1 }}>{v}</div><div className="note" style={{ marginTop: 6, textTransform: "uppercase", letterSpacing: ".04em" }}>{k}</div>{badge && <span style={{ position: "absolute", right: 10, top: 12, fontSize: 11, color: badge[1], fontFamily: "var(--mono)" }}>{badge[0]}</span>}</div>;
   const panelSt: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 12, padding: 16, background: "var(--panel)" };
+  // shared premium panel primitives
+  const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
+  const pnlBody: React.CSSProperties = { padding: 16 };
+  const secHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "11px 16px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+  const statCard = (v: React.ReactNode, k: string, color?: string) => <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 11, padding: "11px 13px" }}><div style={{ fontSize: 20, fontWeight: 600, color: color || "var(--text)" }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>;
   const canExplore = !!data, best = history.length ? history[history.length - 1] : null;
 
   return (
@@ -351,20 +356,108 @@ export default function DlLab() {
         </div>
       )}
 
-      {step === "explore" && data && (
-        <div className="card"><div className="card-h"><span className="t">Explore — {data.source}</span><span className="mono r">{data.X.length} rows · {data.featNames.length} features · {data.task}</span></div>
+      {step === "explore" && data && (() => {
+        const isCsv = source === "csv" && !!ds;
+        const rows = data.X.length; const H = 340;
+        const featCount = isCsv && ds ? feats.filter((f) => f !== target).length : data.featNames.length;
+        const inputs = data.featNames.length;
+        const multiFeat = data.featNames.length > 1;
+        const cnt = classCounts; // per-class counts (null for regression)
+        // per-feature columns for the summary + correlation source
+        const sumCols: { name: string; type: "num" | "cat"; values: (number | string | null)[] }[] = isCsv && ds
+          ? ds.columns.filter((c) => feats.includes(c.name) && c.name !== target).map((c) => ({ name: c.name, type: c.type as "num" | "cat", values: c.values }))
+          : data.featNames.map((n, j) => ({ name: n, type: "num" as const, values: data.X.map((r) => r[j]) as (number | string | null)[] }));
+        // missing
+        let missCells = 0; const missByCol: { name: string; n: number }[] = [];
+        sumCols.forEach((c) => { const m = c.values.filter((v) => v == null).length; missCells += m; if (m) missByCol.push({ name: c.name, n: m }); });
+        missByCol.sort((a, b) => b.n - a.n);
+        const missPct = rows * featCount ? (missCells / (rows * featCount)) * 100 : 0;
+        // correlation of model inputs with the target (real Pearson)
+        const pearson = (a: number[], b: number[]) => { const n = a.length || 1; const ma = a.reduce((x, y) => x + y, 0) / n, mb = b.reduce((x, y) => x + y, 0) / n; let nu = 0, da = 0, db = 0; for (let i = 0; i < a.length; i++) { const x = a[i] - ma, y = b[i] - mb; nu += x * y; da += x * x; db += y * y; } return nu / (Math.sqrt(da * db) || 1); };
+        const cols = data.featNames.map((_, j) => data.X.map((r) => r[j]));
+        const ty = data.y.map(Number);
+        const ftCorr = data.featNames.map((n, j) => ({ name: n, r: pearson(cols[j], ty) })).filter((c) => Number.isFinite(c.r));
+        const topCorr = [...ftCorr].sort((a, b) => Math.abs(b.r) - Math.abs(a.r))[0];
+        // stat helpers
+        const stat = (a: number[]) => { const n = a.length || 1; const mean = a.reduce((x, y) => x + y, 0) / n; return { mean, std: Math.sqrt(a.reduce((s, v) => s + (v - mean) ** 2, 0) / n), min: Math.min(...a), max: Math.max(...a) }; };
+        const numBins = (a: number[], k = 9) => { if (!a.length) return new Array(k).fill(0); const mn = Math.min(...a), mx = Math.max(...a), sp = (mx - mn) || 1; const b = new Array(k).fill(0); a.forEach((v) => { let i = Math.floor((v - mn) / sp * k); if (i >= k) i = k - 1; if (i < 0) i = 0; b[i]++; }); return b; };
+        const spark = (bins: number[], color: string) => { const mx = Math.max(...bins, 1); return <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 22 }}>{bins.map((v, i) => <span key={i} style={{ width: 5, height: Math.max(2, (v / mx) * 22), background: color, borderRadius: 1, opacity: 0.65 }} />)}</div>; };
+        // insights
+        const insights: { ic: string; txt: React.ReactNode }[] = [];
+        if (cnt) { const mx = Math.max(...cnt), mn = Math.min(...cnt); const ratio = mn ? mx / mn : 1; insights.push({ ic: "⚖️", txt: ratio >= 1.5 ? <><b>Imbalanced</b> — {data.classes[cnt.indexOf(mn)]} is {ratio.toFixed(ratio < 10 ? 1 : 0)}× rarer than {data.classes[cnt.indexOf(mx)]}. Balance it in Preprocess.</> : <><b>Balanced</b> — classes within {ratio.toFixed(1)}× of each other.</> }); }
+        else { const s = stat(ty); insights.push({ ic: "🎯", txt: <>Target spans <b>{s.min.toFixed(1)}–{s.max.toFixed(1)}</b>, mean {s.mean.toFixed(1)}.</> }); }
+        if (topCorr) insights.push({ ic: "🔗", txt: <><b>{topCorr.name}</b> {cnt ? "associates with" : "↔"} target r={topCorr.r.toFixed(2)} — strongest linear signal.</> });
+        insights.push({ ic: "🩹", txt: missCells ? <><b>{missCells} missing</b> cell{missCells === 1 ? "" : "s"}{missByCol.length ? <> — mostly {missByCol.slice(0, 2).map((m) => m.name).join(", ")}</> : null}. Imputed in Preprocess.</> : <><b>No missing values</b> — data is complete.</> });
+        // view chips (need ≥2 features for scatter/pca/corr)
+        const VIEWS: [typeof exMode, string][] = multiFeat ? [["scatter", "Scatter"], ["pca", "PCA 2-D"], ["dist", "Distribution"], ["corr", "Correlation"]] : [["dist", "Distribution"]];
+        const curMode = VIEWS.some((v) => v[0] === exMode) ? exMode : "dist";
+        const viewChips = <div className="chips">{VIEWS.map(([m, l]) => <button key={m} className={`chip ${curMode === m ? "on" : ""}`} onClick={() => setExMode(m)}>{l}</button>)}</div>;
+        // correlation heatmap fig
+        const corr = curMode === "corr" ? cols.map((ci) => cols.map((cj) => pearson(ci, cj))) : null;
+        const corrScale: [number, string][] = [[0, "#e5484d"], [0.5, "#0d1117"], [1, "#5b7cff"]];
+        return <div className="card"><div className="card-h"><span className="t">Explore — {data.source}</span><span className="mono r">{rows} rows · {featCount} features · {data.task}</span></div>
           <div className="card-b">
-            {data.featNames.length > 1 && <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <div className="chips"><button className={`chip ${exMode === "scatter" ? "on" : ""}`} onClick={() => setExMode("scatter")}>2-feature scatter</button><button className={`chip ${exMode === "pca" ? "on" : ""}`} onClick={() => setExMode("pca")}>PCA projection</button><button className={`chip ${exMode === "dist" ? "on" : ""}`} onClick={() => setExMode("dist")}>distribution</button></div>
-              {(exMode === "scatter") && <><label className="note">X</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select><label className="note">Y</label><select value={exFy} onChange={(e) => setExFy(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></>}
-              {exMode === "dist" && <><label className="note">feature</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></>}
-            </div>}
-            {exploreFig && <Plot data={exploreFig.data as never} layout={lay(exploreFig.title, exploreFig.xl, exploreFig.yl, { showlegend: (exploreFig as { legend?: boolean }).legend !== false, legend: { orientation: "h", y: -0.18 }, height: 380, barmode: (exploreFig as { barmode?: string }).barmode }) as never} style={{ height: 380, width: "100%" }} />}
-            {classCounts && <div className="note" style={{ marginTop: 8 }}>class balance: {classCounts.map((c, i) => `${data.classes[i] ?? i}=${c}`).join("  ·  ")}{Math.max(...classCounts) / Math.min(...classCounts, 1) > 2 ? " — imbalanced; watch precision/recall, not just accuracy" : ""}</div>}
-            <div className="stepnav" style={{ marginTop: 14 }}><button className="btn ghost" onClick={() => setStep("data")}>← Back</button><button className="btn" onClick={() => setStep("prep")}>Next: Preprocess →</button></div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 16 }}>
+              {statCard(rows.toLocaleString(), "rows")}
+              {statCard(inputs !== featCount ? <>{featCount} <span style={{ fontSize: 12, color: "var(--faint)" }}>→ {inputs} in</span></> : featCount, "features")}
+              {statCard(data.task === "binary" ? "Binary" : data.task === "multiclass" ? "Multiclass" : "Regression", "task", "var(--purple)")}
+              {cnt ? statCard(data.classes.length, `classes · ${target || "target"}`) : statCard(`${stat(ty).min.toFixed(0)}–${stat(ty).max.toFixed(0)}`, `target · ${target || "y"}`)}
+              {statCard(`${missPct.toFixed(missPct && missPct < 0.1 ? 2 : 1)}%`, "missing cells", missCells ? "var(--orange)" : "var(--good)")}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr", gap: 16, alignItems: "stretch" }}>
+              <div style={pnl}>
+                {secHead("var(--accent)", "Visualize", viewChips)}
+                <div style={pnlBody}>
+                  {(curMode === "scatter" || curMode === "dist") && <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                    {curMode === "scatter" && <><label className="note">X</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select><label className="note">Y</label><select value={exFy} onChange={(e) => setExFy(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></>}
+                    {curMode === "dist" && <><label className="note">feature</label><select value={exFx} onChange={(e) => setExFx(+e.target.value)}>{data.featNames.map((f, i) => <option key={i} value={i}>{f}</option>)}</select></>}
+                  </div>}
+                  {curMode === "corr" && corr
+                    ? <Plot data={[{ z: corr, x: data.featNames, y: data.featNames, type: "heatmap", zmin: -1, zmax: 1, colorscale: corrScale, colorbar: { title: { text: "r" }, thickness: 12, len: 0.9 } }] as never} layout={lay("feature correlation (Pearson)", "", "", { height: H, xaxis: { tickangle: -40, automargin: true }, yaxis: { automargin: true } }) as never} style={{ height: H, width: "100%" }} />
+                    : exploreFig && <><Plot data={exploreFig.data as never} layout={lay(exploreFig.title, exploreFig.xl, exploreFig.yl, { showlegend: (exploreFig as { legend?: boolean }).legend !== false, legend: { orientation: "h", y: -0.2 }, height: H, barmode: (exploreFig as { barmode?: string }).barmode }) as never} style={{ height: H, width: "100%" }} /></>}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={pnl}>
+                  {secHead("#3ecf7f", cnt ? "Class balance" : "Target distribution", <span className="note" style={{ fontSize: 10 }}>{target || (cnt ? "class" : "y")}</span>)}
+                  <div style={pnlBody}>
+                    {cnt ? (() => { const mx = Math.max(...cnt, 1); return <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{cnt.map((c, i) => <div key={i} className="row" style={{ gap: 10, alignItems: "center", fontSize: 11.5 }}>
+                      <span style={{ flex: "0 0 64px", color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.classes[i] ?? `class ${i}`}</span>
+                      <div style={{ flex: 1, height: 16, background: "var(--panel-2)", borderRadius: 5, overflow: "hidden" }}><div style={{ width: `${(c / mx) * 100}%`, height: "100%", background: PAL[i % PAL.length], borderRadius: 5 }} /></div>
+                      <span className="mono" style={{ flex: "0 0 38px", textAlign: "right", color: "var(--faint)" }}>{c}</span>
+                    </div>)}</div>; })()
+                    : <Plot data={[{ type: "histogram", x: ty, marker: { color: "#3ecf7f" }, opacity: 0.85 }] as never} layout={lay("", target || "target", "count", { height: 150, showlegend: false }) as never} style={{ height: 150, width: "100%" }} />}
+                  </div>
+                </div>
+                <div style={{ ...pnl, flex: 1 }}>
+                  {secHead("var(--orange)", "At a glance")}
+                  <div style={{ ...pnlBody, paddingTop: 4 }}>{insights.map((s, i) => <div key={i} className="row" style={{ gap: 9, alignItems: "start", fontSize: 11.5, padding: "9px 0", borderTop: i ? "1px solid var(--border)" : "none", lineHeight: "16px" }}><span style={{ flex: "0 0 auto" }}>{s.ic}</span><span style={{ color: "var(--muted)" }}>{s.txt}</span></div>)}</div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ ...pnl, marginTop: 16 }}>
+              {secHead("var(--purple)", "Feature summary", <span className="note" style={{ fontSize: 10 }}>{sumCols.length} column{sumCols.length === 1 ? "" : "s"}</span>)}
+              <div style={{ overflowX: "auto" }}>
+                <table className="dtable" style={{ width: "100%" }}><tbody>
+                  <tr><th style={{ textAlign: "left" }}>feature</th><th>type</th><th>mean / mode</th><th>std</th><th>range</th><th>missing</th><th style={{ textAlign: "left" }}>distribution</th></tr>
+                  {sumCols.map((c, i) => { const miss = c.values.filter((v) => v == null).length;
+                    if (c.type === "num") { const nums = c.values.filter((v): v is number => v != null).map(Number); const s = stat(nums);
+                      return <tr key={i}><td style={{ color: "var(--text)", fontWeight: 500 }}>{c.name}</td><td><span style={{ fontSize: 9.5, padding: "1px 7px", borderRadius: 20, color: "var(--accent)", background: "rgba(91,124,255,.12)", border: "1px solid var(--border)" }}>num</span></td><td>{s.mean.toFixed(2)}</td><td>{s.std.toFixed(2)}</td><td>{s.min.toFixed(1)} – {s.max.toFixed(1)}</td><td style={{ color: miss ? "var(--orange)" : "var(--good)" }}>{miss}</td><td>{spark(numBins(nums), "#5b7cff")}</td></tr>;
+                    }
+                    const strs = c.values.filter((v): v is string => v != null).map(String); const cm = new Map<string, number>(); strs.forEach((v) => cm.set(v, (cm.get(v) || 0) + 1)); const mode = [...cm.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
+                    return <tr key={i}><td style={{ color: "var(--text)", fontWeight: 500 }}>{c.name}</td><td><span style={{ fontSize: 9.5, padding: "1px 7px", borderRadius: 20, color: "var(--purple)", background: "rgba(168,85,247,.12)", border: "1px solid var(--border)" }}>cat</span></td><td>{mode}</td><td style={{ color: "var(--faint)" }}>—</td><td>{cm.size} cats</td><td style={{ color: miss ? "var(--orange)" : "var(--good)" }}>{miss}</td><td>{spark([...cm.values()].slice(0, 9), "#a855f7")}</td></tr>;
+                  })}
+                </tbody></table>
+              </div>
+            </div>
+
+            <div className="stepnav" style={{ marginTop: 16 }}><button className="btn ghost" onClick={() => setStep("data")}>← Back</button><button className="btn" onClick={() => setStep("prep")}>Next: Preprocess →</button></div>
           </div>
-        </div>
-      )}
+        </div>;
+      })()}
 
       {step === "prep" && data && (() => {
         const nf = data.featNames.length; const H = 210;
@@ -419,9 +512,6 @@ export default function DlLab() {
           return { cats, counts: cats.map((c) => cm.get(c)!), map };
         })() : null;
         const SCALES: [ScaleMethod, string, string][] = [["standard", "Standard", "z=(x−μ)/σ"], ["minmax", "Min-Max", "→[0,1]"], ["robust", "Robust", "median/IQR"], ["none", "None", "raw"]];
-        const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
-        const pnlBody: React.CSSProperties = { padding: 16 };
-        const secHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "11px 16px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
         const cwShown = cnt ? (balanceClasses ? classWeights(data.y, K) : cnt.map(() => 1)) : null;
         const wBadge = (w: number) => { const up = w > 1.02; return <span className="mono" style={{ fontSize: 10.5, fontWeight: 600, padding: "1px 7px", borderRadius: 20, color: up ? "#3ecf7f" : "var(--faint)", background: up ? "rgba(62,207,127,.14)" : "var(--panel-2)", border: `1px solid ${up ? "rgba(62,207,127,.32)" : "var(--border)"}` }}>×{w.toFixed(2)}</span>; };
         const minC = cnt ? Math.min(...cnt) : 0, maxC = cnt ? Math.max(...cnt) : 0; const ratio = minC ? maxC / minC : 1;
