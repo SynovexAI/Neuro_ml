@@ -17,7 +17,7 @@ import {
   SINGLE_NUM, SINGLE_CAT, COMPARE_CHARTS, type EdaSpec,
 } from "@/lib/edaCharts";
 
-type Step = "data" | "eda" | "prep" | "model" | "validation" | "train";
+type Step = "data" | "eda" | "prep" | "model" | "validation" | "train" | "deploy";
 type ParamSpec = { name: string; type: "num" | "sel"; def: number | string; min?: number; max?: number; step?: number; opts?: string[] };
 
 const TREE_PARAMS: ParamSpec[] = [{ name: "max_depth", type: "num", def: 5, min: 1, max: 20, step: 1 }, { name: "min_samples_split", type: "num", def: 2, min: 2, max: 40, step: 1 }];
@@ -653,7 +653,7 @@ ${evalBlock}`;
       </div>
       {msg && <div className="err">{msg}</div>}
       <div className="teach-note"><span className="ic">🎓</span><span><b>Teaching engine.</b> Models train from scratch in your browser so every step is inspectable. It&apos;s a faithful but simplified approximation — the <b>Get code</b> export uses scikit-learn, the version you&apos;d ship.</span></div>
-      <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}</div>
+      <div className="stepper"><button className={step === "data" ? "on" : ""} onClick={() => setStep("data")}><b>1</b>Data</button>{stepBtn("eda", 2, "EDA")}{stepBtn("prep", 3, "Preprocessing")}{stepBtn("model", 4, "Model")}{stepBtn("validation", 5, "Validation")}{stepBtn("train", 6, "Train")}<button className={step === "deploy" ? "on" : ""} disabled={!result} onClick={() => setStep("deploy")}><b>7</b>Test &amp; Export</button></div>
 
       {/* STEP 1 DATA */}
       {step === "data" && (
@@ -1109,35 +1109,6 @@ ${evalBlock}`;
               </div>
             </div>
 
-            {/* test the trained model */}
-            <div className="card" style={{ marginTop: 16 }}>
-              <div className="card-h"><span className="t">Test the trained model</span>
-                <div className="tabs"><button className={testTab === "manual" ? "on" : ""} onClick={() => setTestTab("manual")}>Manual input</button><button className={testTab === "sample" ? "on" : ""} onClick={() => setTestTab("sample")}>Random sample</button></div>
-              </div>
-              <div className="card-b">
-                {testTab === "sample" && <div className="row" style={{ marginBottom: 12 }}><button className="btn" onClick={randomizeInputs}>🎲 Pick a random row &amp; predict</button><span className="note">fills the fields from a real row, then predicts &amp; compares to the true label</span></div>}
-                <div className="test-grid">
-                  {features.map((f) => { const c = ds.columns.find((x) => x.name === f); if (!c) return null; return (
-                    <div key={f} className="tf">
-                      <label className="fld">{f} <span style={{ color: "var(--faint)" }}>{c.type}</span></label>
-                      {c.type === "cat"
-                        ? <select value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))}>{Array.from(new Set(c.values.filter((x) => x != null).map(String))).slice(0, 60).map((o) => <option key={o}>{o}</option>)}</select>
-                        : <input type="text" value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))} />}
-                    </div>); })}
-                </div>
-                <div className="row" style={{ marginTop: 14, gap: 12, flexWrap: "wrap" }}>
-                  <button className="btn" onClick={() => predictRow(testInputs)}>▶ Predict</button>
-                  {testOut && (
-                    <div className={`pred-out ${testOut.ok === true ? "good" : testOut.ok === false ? "bad" : ""}`}>
-                      <span className="po-label">prediction</span>
-                      <span className="po-val">{trained?.classes ? testOut.pred : `${target} ≈ ${testOut.pred}`}</span>
-                      {testOut.actual != null && <span className="po-actual">actual <b>{testOut.actual}</b> {testOut.ok === true ? "✓" : testOut.ok === false ? "✗" : ""}</span>}
-                    </div>
-                  )}
-                </div>
-                <div className="note" style={{ marginTop: 10 }}>Inputs run through the exact same preprocessing pipeline, then the trained {MODEL_INFO[algo]?.label ?? algo} predicts. Categorical fields are limited to values seen in training.</div>
-              </div>
-            </div>
           </>)}
           {result && (<>
             {task === "classification" && numFeats().length >= 2 && (
@@ -1166,20 +1137,57 @@ ${evalBlock}`;
                 {(() => { const d = lcDiagnosis(); return d ? <div className="teach-note" style={{ marginTop: 10 }}><span className="ic">{d.cls === "ok" ? "✅" : d.cls === "bad" ? "⚠️" : "🔎"}</span><span><b>{d.label}.</b> {d.why}</span></div> : null; })()}
               </div>
             </div>
-            <div className="card" style={{ marginTop: 16 }}>
-              <div className="card-h"><span className="t">Complete workflow code — editable</span><div className="r"><button className="btn ghost sm" onClick={applyCodeToFlow}>↥ Apply to flow</button>{codeDirty && <button className="btn ghost sm" onClick={() => setCodeDirty(false)}>Reset</button>}<button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn ghost sm" onClick={download}>.py</button></div></div>
-              <div className="card-b">
-                <div className="note" style={{ marginBottom: 8 }}>Edit the code, then <b>Apply to flow</b> to sync recognised settings (algorithm, hyperparameters, test_size, cv, scaler, encoder) back into the steps above, then re-train.</div>
-                <textarea value={codeDirty ? codeDraft : buildCode()} onChange={(e) => { setCodeDraft(e.target.value); setCodeDirty(true); }} spellCheck={false} style={{ minHeight: 320, fontFamily: "var(--mono)", fontSize: 12, lineHeight: 1.5 }} />
-                <div className="row" style={{ marginTop: 12, gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                  <label className="fld" style={{ margin: 0 }}>Export trained model:</label>
-                  <button className="btn sm" onClick={exportPkl}>🥒 model.pkl</button>
-                  <button className="btn ghost sm" onClick={exportJson}>📄 model.json</button>
-                  <span className="note"><code>pickle.load(open(&quot;model.pkl&quot;,&quot;rb&quot;))</code> → the trained params as a dict.</span>
-                </div>
+            <div className="stepnav"><button className="btn ghost" onClick={() => setStep("validation")}>← Validation</button><button className="btn" onClick={() => setStep("deploy")}>Next: Test &amp; Export →</button></div>
+          </>)}
+        </>
+      )}
+
+      {/* STEP 7 — TEST & EXPORT */}
+      {step === "deploy" && ds && result && (
+        <>
+          <div className="teach-note"><span className="ic">📦</span><span><b>Test &amp; export.</b> Try the trained model on new inputs, edit the production code (Apply-to-flow syncs it back), and download the model.</span></div>
+          <div className="card">
+            <div className="card-h"><span className="t">Test the trained model</span>
+              <div className="tabs"><button className={testTab === "manual" ? "on" : ""} onClick={() => setTestTab("manual")}>Manual input</button><button className={testTab === "sample" ? "on" : ""} onClick={() => setTestTab("sample")}>Random sample</button></div>
+            </div>
+            <div className="card-b">
+              {testTab === "sample" && <div className="row" style={{ marginBottom: 12 }}><button className="btn" onClick={randomizeInputs}>🎲 Pick a random row &amp; predict</button><span className="note">fills the fields from a real row, then predicts &amp; compares to the true label</span></div>}
+              <div className="test-grid">
+                {features.map((f) => { const c = ds.columns.find((x) => x.name === f); if (!c) return null; return (
+                  <div key={f} className="tf">
+                    <label className="fld">{f} <span style={{ color: "var(--faint)" }}>{c.type}</span></label>
+                    {c.type === "cat"
+                      ? <select value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))}>{Array.from(new Set(c.values.filter((x) => x != null).map(String))).slice(0, 60).map((o) => <option key={o}>{o}</option>)}</select>
+                      : <input type="text" value={testInputs[f] ?? ""} onChange={(e) => setTestInputs((v) => ({ ...v, [f]: e.target.value }))} />}
+                  </div>); })}
+              </div>
+              <div className="row" style={{ marginTop: 14, gap: 12, flexWrap: "wrap" }}>
+                <button className="btn" onClick={() => predictRow(testInputs)}>▶ Predict</button>
+                {testOut && (
+                  <div className={`pred-out ${testOut.ok === true ? "good" : testOut.ok === false ? "bad" : ""}`}>
+                    <span className="po-label">prediction</span>
+                    <span className="po-val">{trained?.classes ? testOut.pred : `${target} ≈ ${testOut.pred}`}</span>
+                    {testOut.actual != null && <span className="po-actual">actual <b>{testOut.actual}</b> {testOut.ok === true ? "✓" : testOut.ok === false ? "✗" : ""}</span>}
+                  </div>
+                )}
+              </div>
+              <div className="note" style={{ marginTop: 10 }}>Inputs run through the exact same preprocessing pipeline, then the trained {MODEL_INFO[algo]?.label ?? algo} predicts. Categorical fields are limited to values seen in training.</div>
+            </div>
+          </div>
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="card-h"><span className="t">Complete workflow code — editable</span><div className="r"><button className="btn ghost sm" onClick={applyCodeToFlow}>↥ Apply to flow</button>{codeDirty && <button className="btn ghost sm" onClick={() => setCodeDirty(false)}>Reset</button>}<button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn ghost sm" onClick={download}>.py</button></div></div>
+            <div className="card-b">
+              <div className="note" style={{ marginBottom: 8 }}>Edit the code, then <b>Apply to flow</b> to sync recognised settings (algorithm, hyperparameters, test_size, cv, scaler, encoder) back into the steps above, then re-train.</div>
+              <textarea value={codeDirty ? codeDraft : buildCode()} onChange={(e) => { setCodeDraft(e.target.value); setCodeDirty(true); }} spellCheck={false} style={{ minHeight: 320, fontFamily: "var(--mono)", fontSize: 12, lineHeight: 1.5 }} />
+              <div className="row" style={{ marginTop: 12, gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <label className="fld" style={{ margin: 0 }}>Export trained model:</label>
+                <button className="btn sm" onClick={exportPkl}>🥒 model.pkl</button>
+                <button className="btn ghost sm" onClick={exportJson}>📄 model.json</button>
+                <span className="note"><code>pickle.load(open(&quot;model.pkl&quot;,&quot;rb&quot;))</code> → the trained params as a dict.</span>
               </div>
             </div>
-          </>)}
+          </div>
+          <div className="stepnav"><button className="btn ghost" onClick={() => setStep("train")}>← Back to Train</button></div>
         </>
       )}
 
