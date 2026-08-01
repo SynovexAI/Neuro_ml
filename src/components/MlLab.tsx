@@ -559,6 +559,16 @@ ${evalBlock}`;
     } catch { return null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, result, steps, testSize]);
+  // Ensemble decision regions for the Random Forest model-step graph (heavy → memoised).
+  const modelSurface = useMemo(() => {
+    if (mlMode !== "maths" || step !== "model" || !ds || task !== "classification" || algo !== "RandomForest") return null;
+    const nums = features.filter((f) => ds.columns.find((c) => c.name === f)?.type === "num");
+    if (nums.length < 2) return null;
+    const f1 = dbF1 && nums.includes(dbF1) ? dbF1 : nums[0];
+    const f2 = dbF2 && nums.includes(dbF2) && dbF2 !== f1 ? dbF2 : (nums.find((x) => x !== f1) || "");
+    try { return f2 ? decisionSurface(ds, target, f1, f2, cfgNow()) : null; } catch { return null; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mlMode, step, ds, target, features, task, algo, params, dbF1, dbF2, steps]);
 
   // Run the fitted model on a single raw record (same preprocessing → predict).
   function predictRow(inputs: Record<string, string>, actual?: string) {
@@ -1190,8 +1200,19 @@ ${evalBlock}`;
         applyNote = "each tree casts its vote, then they aggregate";
         viz = (applied, curRow, stage) => {
           const revealed = [...Array(shown).keys()].filter((i) => applied > i || (applied === 0 && i === curRow && stage >= 2));
-          const data: Record<string, unknown>[] = [{ type: "bar", orientation: "h", name: "each tree's vote", x: revealed.map(() => 1), y: revealed.map((i) => `T${i + 1}`), marker: { color: revealed.map((i) => PAL_ML[votes[i]]) }, text: revealed.map((i) => `→ ${voteLbl(i)}`), textposition: "inside", insidetextanchor: "middle", hoverinfo: "skip" }];
-          return mPlot(data, applied >= total ? `${shown} trees → majority vote = ${isReg ? "mean" : winner}` : "each tree casts its vote (colour = predicted class)", "one vote per tree", "tree", { xaxis: { range: [0, 1.15], showticklabels: false, zeroline: false } });
+          const voteAnn: Record<string, unknown>[] = revealed.map((i, k) => ({ xref: "paper", yref: "paper", x: 0.02, y: 0.97 - k * 0.08, text: `T${i + 1} → ${voteLbl(i)}`, showarrow: false, xanchor: "left", bgcolor: "rgba(0,0,0,0.35)", font: { color: PAL_ML[votes[i]], size: 12, family: "monospace" } }));
+          if (applied >= total) voteAnn.push({ xref: "paper", yref: "paper", x: 0.02, y: 0.97 - revealed.length * 0.08, text: `majority → ${isReg ? "mean" : winner}`, showarrow: false, xanchor: "left", bgcolor: "rgba(0,0,0,0.35)", font: { color: "#f59e0b", size: 13, family: "monospace" } });
+          if (modelSurface && !isReg) {
+            const s = modelSurface; const kk = s.classes.length; const cs: [number, string][] = []; for (let c = 0; c < kk; c++) { const col = PAL_ML[c % PAL_ML.length]; cs.push([kk <= 1 ? 0 : c / kk, col]); cs.push([kk <= 1 ? 1 : (c + 1) / kk, col]); }
+            const data: Record<string, unknown>[] = [
+              { type: "heatmap", x: s.xs, y: s.ys, z: s.z, showscale: false, colorscale: cs, zmin: -0.5, zmax: kk - 0.5, opacity: 0.32, hoverinfo: "skip", name: "forest regions" },
+              ...s.classes.map((cl, ci) => ({ type: "scatter", mode: "markers", name: String(cl), x: s.points.filter((p) => p.c === ci).map((p) => p.x), y: s.points.filter((p) => p.c === ci).map((p) => p.y), marker: { size: 7, color: PAL_ML[ci % PAL_ML.length], line: { width: 1, color: th.paper } } })),
+            ];
+            return mPlot(data, `random forest — the ensemble's decision regions · ${shown} trees vote`, s ? names[idxF] : "", names[idxG], { annotations: voteAnn });
+          }
+          // fallback: a vote panel (e.g. <2 numeric features)
+          const bar: Record<string, unknown>[] = [{ type: "bar", orientation: "h", name: "each tree's vote", x: revealed.map(() => 1), y: revealed.map((i) => `T${i + 1}`), marker: { color: revealed.map((i) => PAL_ML[votes[i]]) }, text: revealed.map((i) => `→ ${voteLbl(i)}`), textposition: "inside", insidetextanchor: "middle", hoverinfo: "skip" }];
+          return mPlot(bar, applied >= total ? `${shown} trees → majority = ${isReg ? "mean" : winner}` : "each tree casts its vote", "one vote per tree", "tree", { xaxis: { range: [0, 1.15], showticklabels: false, zeroline: false } });
         };
       }
     }
@@ -1435,17 +1456,27 @@ ${evalBlock}`;
     }
     function checkGraph(t: number): React.ReactNode {
       const H = 400;
+      const twoCol = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12, alignItems: "start" } as React.CSSProperties;
       if (!isReg) {
-        const cls = (classes ?? []).map(String); const M = Array.from({ length: K }, () => new Array(K).fill(0)); for (let i = 0; i < Math.min(t, nTe); i++) { const a = yte[i], p = preds[i]; if (a < K && p < K) M[a][p]++; }
+        const cls = (classes ?? []).map(String); const M = Array.from({ length: K }, () => new Array(K).fill(0)); let corr = 0; const nn = Math.min(t, nTe); for (let i = 0; i < nn; i++) { const a = yte[i], p = preds[i]; if (a < K && p < K) M[a][p]++; if (a === p) corr++; }
         const ann = [] as Record<string, unknown>[]; for (let a = 0; a < K; a++) for (let p = 0; p < K; p++) ann.push({ x: cls[p], y: cls[a], text: String(M[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 17 } });
-        return <Plot data={[{ type: "heatmap", x: cls, y: cls, z: M, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: true, colorbar: { title: { text: "count" } }, hoverinfo: "skip" }]} layout={{ ...chartLayout(th, "confusion matrix — the diagonal is correct, off-diagonal are mistakes", "predicted class →", "actual class ↓"), height: H, annotations: ann as never }} style={{ height: H, width: "100%" }} />;
+        const cm = finalM.task === "classification" ? finalM : null;
+        const mx: [string, number, string][] = [["accuracy", nn ? corr / nn : 0, "#3ecf7f"], ["precision", cm?.precision ?? 0, "#5b7cff"], ["recall", cm?.recall ?? 0, "#f59e0b"], ["F1", cm?.f1 ?? 0, "#a855f7"]];
+        const bars = <Plot data={[{ type: "bar", x: mx.map((m) => m[0]), y: mx.map((m) => m[1]), marker: { color: mx.map((m) => m[2]) }, text: mx.map((m) => m[1].toFixed(2)), textposition: "outside", cliponaxis: false, hoverinfo: "skip" }]} layout={{ ...chartLayout(th, "scores — 0 to 1, higher is better", "", "score"), yaxis: { range: [0, 1.08] }, showlegend: false, height: H }} style={{ height: H, width: "100%" }} />;
+        const matrix = <Plot data={[{ type: "heatmap", x: cls, y: cls, z: M, xgap: 4, ygap: 4, colorscale: [[0, th.plot], [0.5, "#f59e0b"], [1, "#3ecf7f"]], showscale: true, colorbar: { title: { text: "count" } }, hoverinfo: "skip" }]} layout={{ ...chartLayout(th, "confusion matrix — diagonal = correct, off-diagonal = mistakes", "predicted →", "actual ↓"), height: H, annotations: ann as never }} style={{ height: H, width: "100%" }} />;
+        return <div style={twoCol}>{bars}{matrix}</div>;
       }
       const xs: number[] = [], ys: number[] = []; for (let i = 0; i < Math.min(t, nTe); i++) { xs.push(yte[i]); ys.push(preds[i]); }
       const allV = [...preds, ...yte].filter(Number.isFinite); const lo = allV.length ? Math.min(...allV) : 0, hi = allV.length ? Math.max(...allV) : 1;
-      return <Plot data={[
+      const rm = finalM.task === "regression" ? finalM : null; let ss = 0, sst = 0; const ym = yte.reduce((a, v) => a + v, 0) / (yte.length || 1); const nn = Math.min(t, nTe); for (let i = 0; i < nn; i++) { ss += (preds[i] - yte[i]) ** 2; sst += (yte[i] - ym) ** 2; }
+      const r2live = nn ? 1 - ss / (sst || 1) : 0;
+      const rmx: [string, number, string][] = [["R²", Math.max(0, r2live), "#3ecf7f"], ["fit (1−RMSE/σ)", Math.max(0, 1 - (rm?.rmse ?? Math.sqrt(ss / (nn || 1))) / (Math.sqrt(sst / (nn || 1)) || 1)), "#5b7cff"]];
+      const bars = <Plot data={[{ type: "bar", x: rmx.map((m) => m[0]), y: rmx.map((m) => m[1]), marker: { color: rmx.map((m) => m[2]) }, text: rmx.map((m) => m[1].toFixed(2)), textposition: "outside", cliponaxis: false, hoverinfo: "skip" }]} layout={{ ...chartLayout(th, "goodness of fit — 0 to 1, higher is better", "", "score"), yaxis: { range: [0, 1.08] }, showlegend: false, height: H }} style={{ height: H, width: "100%" }} />;
+      const scatter = <Plot data={[
         { type: "scatter", mode: "lines", name: "ŷ = y (perfect)", x: [lo, hi], y: [lo, hi], line: { color: th.muted, dash: "dash", width: 1.5 } },
         { type: "scatter", mode: "markers", name: "test rows", x: xs, y: ys, marker: { size: 8, color: "#5b7cff", opacity: 0.8, line: { width: 1, color: th.paper } } },
-      ]} layout={{ ...chartLayout(th, "predicted vs actual — the closer to the dashed line, the better", "actual y", "predicted ŷ"), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
+      ]} layout={{ ...chartLayout(th, "predicted vs actual — closer to the line is better", "actual y", "predicted ŷ"), ...legendLayout, height: H }} style={{ height: H, width: "100%" }} />;
+      return <div style={twoCol}>{bars}{scatter}</div>;
     }
 
     // ── render ──
