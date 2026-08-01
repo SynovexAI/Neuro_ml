@@ -28,6 +28,27 @@ export function genDataset(kind: string, n = 240, noise = 0.15, seed = 3): DataS
   return { X, y, task: "binary", classes: ["0", "1"], featNames: ["x1", "x2"] };
 }
 
+// ── built-in univariate time series (seeded, real structure) ──
+export function genSeries(kind: string): { t: number[]; v: number[] } {
+  const rng = mulberry32(kind === "temp" ? 11 : kind === "traffic" ? 19 : 7);
+  const g = () => (rng() + rng() + rng() + rng() - 2) / 2; // ~N(0,~0.4)
+  const v: number[] = [];
+  if (kind === "temp") { for (let i = 0; i < 240; i++) v.push(15 + 10 * Math.sin(i / 40 * 2 * Math.PI) + g() * 2.5); }
+  else if (kind === "traffic") { for (let i = 0; i < 200; i++) v.push(50 + i * 0.15 + 9 * Math.sin(i / 7 * 2 * Math.PI) + g() * 3); }
+  else { for (let i = 0; i < 144; i++) v.push((100 + i * 0.9) * (1 + 0.18 * Math.sin(i / 12 * 2 * Math.PI)) + g() * 5); } // airline
+  return { t: v.map((_, i) => i), v };
+}
+// Slide a window over the FIRST DIFFERENCES (changes) → predict the next change.
+// Differencing removes trend/unit-root so the target is stationary and the MLP can
+// forecast beyond the training range; the level is reconstructed as vₜ = vₜ₋₁ + Δ̂.
+// Row j uses Δ[j..j+win-1] to predict Δ[j+win]; reconstructed level lands at time j+win+1.
+export function windowSeries(v: number[], win: number): { X: number[][]; y: number[]; featNames: string[] } {
+  const d: number[] = []; for (let i = 1; i < v.length; i++) d.push(v[i] - v[i - 1]);
+  const X: number[][] = [], y: number[] = [];
+  for (let i = 0; i + win < d.length; i++) { X.push(d.slice(i, i + win)); y.push(d[i + win]); }
+  return { X, y, featNames: Array.from({ length: win }, (_, j) => `Δlag_${win - j}`) };
+}
+
 // ── feature scaling (neural nets need scaled inputs) — returns {center, scale} as {mean, std} ──
 export type ScaleMethod = "standard" | "minmax" | "robust" | "none";
 export function fitScaler(X: number[][], method: ScaleMethod = "standard"): { mean: number[]; std: number[] } {

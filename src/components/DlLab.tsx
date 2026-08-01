@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  genDataset, initNet, newOpt, trainEpoch, fullEval, predictVec, predictClass,
+  genDataset, genSeries, windowSeries, initNet, newOpt, trainEpoch, fullEval, predictVec, predictClass,
   fitScaler, applyScaler, scaleRow, dlSurface, classWeights,
   type Net, type OptState, type DlTask, type Optimizer, type DlEval, type ScaleMethod,
 } from "@/lib/dlUtils";
@@ -25,14 +25,21 @@ const SAMPLES = [
   { k: "sine", l: "Sine", t: "regression", d: "1 feature → continuous target", why: "Regression — the net fits a smooth curve with a linear output and MSE loss." },
 ];
 const PAL = ["#5b7cff", "#f59e0b", "#3ecf7f", "#ef4444", "#a855f7", "#22b8cf", "#ec4899", "#84cc16"];
+const TS = [
+  { k: "air", l: "Airline passengers", d: "Trend + yearly seasonality", n: 144, unit: "monthly" },
+  { k: "temp", l: "Daily temperature", d: "Seasonal cycle + noise", n: 240, unit: "daily" },
+  { k: "traffic", l: "Web traffic", d: "Trend + weekly cycle", n: 200, unit: "daily" },
+];
 
-type Resolved = { X: number[][]; y: number[]; task: DlTask; classes: string[]; featNames: string[]; source: string };
+type Resolved = { X: number[][]; y: number[]; task: DlTask; classes: string[]; featNames: string[]; source: string; series?: { t: number[]; v: number[] }; chronological?: boolean; win?: number };
 
-// deterministic split
-function splitData(X: number[][], y: number[], testFrac: number) {
-  const n = X.length; const idx = [...Array(n).keys()];
+// deterministic split — chronological (no shuffle) for time series, else seeded random
+function splitData(X: number[][], y: number[], testFrac: number, chronological = false) {
+  const n = X.length; const nTe = Math.max(1, Math.round(n * testFrac));
+  if (chronological) { const cut = n - nTe; return { Xtr: X.slice(0, cut), ytr: y.slice(0, cut), Xte: X.slice(cut), yte: y.slice(cut) }; }
+  const idx = [...Array(n).keys()];
   let a = 12345; for (let i = n - 1; i > 0; i--) { a = (a * 1103515245 + 12345) & 0x7fffffff; const j = a % (i + 1); [idx[i], idx[j]] = [idx[j], idx[i]]; }
-  const nTe = Math.max(1, Math.round(n * testFrac)); const te = new Set(idx.slice(0, nTe));
+  const te = new Set(idx.slice(0, nTe));
   const Xtr: number[][] = [], ytr: number[] = [], Xte: number[][] = [], yte: number[] = [];
   X.forEach((r, i) => { if (te.has(i)) { Xte.push(r); yte.push(y[i]); } else { Xtr.push(r); ytr.push(y[i]); } });
   return { Xtr, ytr, Xte, yte };
@@ -40,7 +47,9 @@ function splitData(X: number[][], y: number[], testFrac: number) {
 
 export default function DlLab() {
   const [step, setStep] = useState<Step>("data");
-  const [source, setSource] = useState<"sample" | "csv">("sample");
+  const [source, setSource] = useState<"sample" | "csv" | "ts">("sample");
+  const [tsKind, setTsKind] = useState("air");
+  const [winSize, setWinSize] = useState(12);
   const [toy, setToy] = useState("spiral");
   const [noise, setNoise] = useState(0.12);
   const [ds, setDs] = useState<Dataset | null>(null);
@@ -87,7 +96,7 @@ export default function DlLab() {
 
   useEffect(() => () => { if (timer.current) clearInterval(timer.current); }, []);
 
-  // ── resolve dataset (sample or CSV) ──
+  // ── resolve dataset (sample, CSV, or time series) ──
   function resolveSample() {
     const d = genDataset(toy, 260, noise, 3);
     setData({ X: d.X, y: d.y, task: d.task, classes: d.classes, featNames: d.featNames, source: SAMPLES.find((s) => s.k === toy)?.l || toy });
@@ -98,6 +107,11 @@ export default function DlLab() {
     catch (e) { setMsg("Parse error: " + (e as Error).message); }
   }
   function onFile(f: File | null) { if (!f) return; const r = new FileReader(); r.onload = () => loadCSV(String(r.result), f.name); r.readAsText(f); }
+  function resolveSeries() {
+    const s = genSeries(tsKind); const w = Math.min(winSize, s.v.length - 2); const win = windowSeries(s.v, w);
+    setData({ X: win.X, y: win.y, task: "regression", classes: [], featNames: win.featNames, source: TS.find((t) => t.k === tsKind)?.l || tsKind, series: s, chronological: true, win: w });
+    resetTraining(); setStep("explore");
+  }
   function detectTask(d: Dataset, tgt: string): DlTask {
     const col = d.columns.find((c) => c.name === tgt); if (!col) return "binary";
     const vals = col.values.filter((v) => v != null); const uniq = new Set(vals.map(String)).size;
@@ -151,7 +165,7 @@ export default function DlLab() {
   function prepareSplit() {
     if (!data) return null;
     // Split raw first, then fit the scaler on TRAIN ONLY (no leakage), apply to both.
-    const raw = splitData(data.X, data.y, testFrac);
+    const raw = splitData(data.X, data.y, testFrac, !!data.chronological);
     const sc = fitScaler(raw.Xtr, scaleMethod); scRef.current = sc;
     const sp = { Xtr: applyScaler(raw.Xtr, sc), ytr: raw.ytr, Xte: applyScaler(raw.Xte, sc), yte: raw.yte }; splitRef.current = sp;
     // raw feature ranges (first two) for boundary axes
@@ -335,17 +349,41 @@ export default function DlLab() {
           const px = (v: number) => pad + ((v - xmn) / ((xmx - xmn) || 1)) * (w - 2 * pad); const py = (v: number) => h - pad - ((v - ymn) / ((ymx - ymn) || 1)) * (h - 2 * pad);
           return <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: "block", background: "var(--panel-2)", borderRadius: 8 }}>{d.X.map((p, i) => <circle key={i} cx={px(p[0])} cy={py(reg ? d.y[i] : p[1])} r={r} fill={reg ? "#3ecf7f" : PAL[d.y[i] % PAL.length]} opacity={0.8} />)}</svg>;
         };
-        const seg = (v: "sample" | "csv", label: string) => <button onClick={() => setSource(v)} style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: source === v ? "var(--accent)" : "transparent", color: source === v ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{label}</button>;
+        const seg = (v: "sample" | "csv" | "ts", label: string) => <button onClick={() => setSource(v)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: source === v ? "var(--accent)" : "transparent", color: source === v ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 500, cursor: "pointer" }}>{label}</button>;
+        const lineSvg = (vals: number[], w: number, h: number, color = "#3ecf7f") => { if (!vals.length) return null; const mn = Math.min(...vals), mx = Math.max(...vals), pad = 5; let dd = ""; vals.forEach((v, i) => { const x = pad + i / (vals.length - 1) * (w - 2 * pad); const y = h - pad - ((v - mn) / ((mx - mn) || 1)) * (h - 2 * pad); dd += (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1) + " "; }); return <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: "block", background: "var(--panel-2)", borderRadius: 8 }}><path d={dd} fill="none" stroke={color} strokeWidth={1.6} /></svg>; };
         const sel = SAMPLES.find((s) => s.k === toy) || SAMPLES[0]; const prev = genDataset(toy, 260, noise, 3);
+        const tsData = genSeries(tsKind);
         const typePill = (t: string) => <span style={{ marginLeft: "auto", fontSize: 9, padding: "1px 6px", borderRadius: 20, color: t === "cat" ? "var(--purple)" : "var(--accent)", background: t === "cat" ? "rgba(168,85,247,.12)" : "rgba(91,124,255,.12)" }}>{t}</span>;
         const missTotal = ds ? ds.columns.reduce((a, c) => a + c.values.filter((v) => v == null).length, 0) : 0;
         return <div className="card">
           <div className="card-h"><span className="t">Choose data</span></div>
           <div className="card-b">
-            <div className="note" style={{ marginTop: -4, marginBottom: 14 }}>Start from a built-in dataset to learn the flow, or upload your own CSV to train on real data.</div>
-            <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, marginBottom: 18 }}>{seg("sample", "◆ Built-in datasets")}{seg("csv", "⬆ Upload CSV")}</div>
+            <div className="note" style={{ marginTop: -4, marginBottom: 14 }}>Learn the flow on a built-in shape, forecast a time series, or upload your own CSV.</div>
+            <div style={{ display: "inline-flex", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 10, padding: 3, marginBottom: 18 }}>{seg("sample", "◆ Built-in shapes")}{seg("ts", "⏱ Time series")}{seg("csv", "⬆ Upload CSV")}</div>
 
-            {source === "sample" ? <>
+            {source === "ts" ? <>
+              <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--faint)", marginBottom: 10 }}>Forecasting datasets — predict the next value from recent history</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+                {TS.map((s) => <div key={s.k} onClick={() => setTsKind(s.k)} style={{ background: "var(--panel)", border: `1px solid ${tsKind === s.k ? "var(--accent)" : "var(--border)"}`, boxShadow: tsKind === s.k ? "0 0 0 1px var(--accent)" : "none", borderRadius: 12, padding: 12, cursor: "pointer" }}>
+                  {lineSvg(genSeries(s.k).v, 150, 56)}
+                  <div style={{ fontWeight: 600, fontSize: 13, marginTop: 9, display: "flex", alignItems: "center", justifyContent: "space-between" }}>{s.l}<span style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 20, color: "#3ecf7f", background: "rgba(62,207,127,.13)" }}>forecast</span></div>
+                  <div className="note" style={{ marginTop: 2 }}>{s.d} · {s.n} pts</div>
+                </div>)}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 18, alignItems: "center", marginTop: 14, background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: 14 }}>
+                <div>{lineSvg(tsData.v, 340, 120)}</div>
+                <div>
+                  <div className="knob"><div className="kr"><span>Window size (lags)</span><b>{Math.min(winSize, tsData.v.length - 2)}</b></div><input type="range" min={3} max={24} step={1} value={winSize} onChange={(e) => setWinSize(+e.target.value)} /></div>
+                  <div className="row" style={{ gap: 16, marginTop: 12 }}>
+                    <div><div style={{ fontSize: 16, fontWeight: 600 }}>{tsData.v.length}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>points</div></div>
+                    <div><div style={{ fontSize: 16, fontWeight: 600 }}>{Math.max(0, tsData.v.length - 1 - Math.min(winSize, tsData.v.length - 2))}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>windows</div></div>
+                    <div><div style={{ fontSize: 16, fontWeight: 600, color: "var(--accent)" }}>{Math.min(winSize, tsData.v.length - 2)}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>features</div></div>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--faint)", marginTop: 10 }}>The lab differences the series (predicts each <b style={{ color: "var(--text)" }}>change</b> from the last <b style={{ color: "var(--text)" }}>{Math.min(winSize, tsData.v.length - 2)}</b> changes, then reconstructs the level) so the trend can&apos;t run off-scale. Split is chronological — past trains, future tests.</div>
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={resolveSeries}>Use this series →</button></div>
+            </> : source === "sample" ? <>
               <div style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--faint)", marginBottom: 10 }}>Pick a shape — each teaches a different decision boundary</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
                 {SAMPLES.map((s) => <div key={s.k} onClick={() => setToy(s.k)} style={{ background: "var(--panel)", border: `1px solid ${toy === s.k ? "var(--accent)" : "var(--border)"}`, boxShadow: toy === s.k ? "0 0 0 1px var(--accent)" : "none", borderRadius: 12, padding: 12, cursor: "pointer" }}>
@@ -441,6 +479,7 @@ export default function DlLab() {
         const corrScale: [number, string][] = [[0, "#e5484d"], [0.5, "#0d1117"], [1, "#5b7cff"]];
         return <div className="card"><div className="card-h"><span className="t">Explore — {data.source}</span><span className="mono r">{rows} rows · {featCount} features · {data.task}</span></div>
           <div className="card-b">
+            {data.series && <div style={{ ...pnl, marginBottom: 16 }}>{secHead("#3ecf7f", "Series over time", <span className="note" style={{ fontSize: 10 }}>{data.win} lags → next value</span>)}<div style={pnlBody}><Plot data={[{ type: "scatter", mode: "lines", x: data.series.t, y: data.series.v, line: { color: "#3ecf7f", width: 1.6 } }] as never} layout={lay("", "time step", "value", { height: 230, showlegend: false }) as never} style={{ height: 230, width: "100%" }} /><div className="note" style={{ marginTop: 4 }}>The raw signal. To remove the trend, the lab trains on <b>first differences</b> (step-to-step changes): each row is a window of the previous {data.win} changes, and the model predicts the next change — then adds it back onto the last value to forecast the level.</div></div></div>}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 16 }}>
               {statCard(rows.toLocaleString(), "rows")}
               {statCard(inputs !== featCount ? <>{featCount} <span style={{ fontSize: 12, color: "var(--faint)" }}>→ {inputs} in</span></> : featCount, "features")}
@@ -531,6 +570,7 @@ export default function DlLab() {
           else summary.push({ ic: "🔤", txt: <>No categorical columns — no encoding needed</> });
         } else summary.push({ ic: "🔢", txt: <>Built-in <b>{data.source}</b> — all numeric, no missing values or categoricals</> });
         summary.push({ ic: "📏", txt: <>Scaling: <b>{scaleName}</b>{scaleMethod === "none" ? " — features keep their raw magnitudes" : ", fit on the training split only"}</> });
+        if (data.chronological) summary.push({ ic: "⏱️", txt: <>Split is <b>chronological</b> — trained on the earliest rows, tested on the latest. No shuffling, so the future never leaks into training.</> });
         if (cnt) summary.push({ ic: "⚖️", txt: balanceClasses ? <>Class weights <b>on</b> — rarer classes are upweighted in the loss</> : <>Class weights off — classes train in their natural proportion</> });
         const boxRaw = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => r[j]), marker: { color: "#5b7cff" }, boxpoints: false }));
         const boxScaled = data.featNames.map((f, j) => ({ type: "box", name: f, y: data.X.map((r) => (r[j] - scViz.mean[j]) / scViz.std[j]), marker: { color: "#3ecf7f" }, boxpoints: false }));
@@ -613,6 +653,7 @@ export default function DlLab() {
                       <div style={{ width: `${(1 - testFrac) * 100}%`, background: "var(--accent)", color: "#fff", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 0 }}>train · {nTrain}</div>
                       <div style={{ width: `${testFrac * 100}%`, background: "var(--panel-2)", color: "var(--muted)", fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", minWidth: 0 }}>test · {nTest}</div>
                     </div>
+                    {data.chronological && <div className="note" style={{ marginTop: 8, fontSize: 11 }}>⏱️ Chronological — earliest {nTrain} rows train, latest {nTest} forecast. Past → future, never shuffled.</div>}
                     {cnt && (() => { const mx = Math.max(...cnt, 1); return <div style={{ marginTop: 16 }}>
                       <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: 9 }}><span className="fld" style={{ margin: 0 }}>Class balance</span>{cwShown && <span className="note" style={{ fontSize: 10 }}>{balanceClasses ? "training weight" : "count"}</span>}</div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{cnt.map((c, i) => <div key={i} className="row" style={{ gap: 10, alignItems: "center", fontSize: 11.5 }}>
@@ -764,17 +805,34 @@ export default function DlLab() {
           <div className="card-b">
             {!evalR ? <div className="note">Train the network first (step 5).</div> : (() => {
               const isReg = evalR.task === "regression";
-              const badge: [string, string] = isReg ? (evalR.acc >= 0.8 ? ["▲ strong", "#3ecf7f"] : evalR.acc >= 0.5 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]) : (evalR.acc >= 0.9 ? ["▲ strong", "#3ecf7f"] : evalR.acc >= 0.75 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]);
               const m = !isReg && evalR.confusion ? prf(evalR.confusion) : { precision: 0, recall: 0, f1: 0 };
-              const mae = isReg && evalR.predActual ? (evalR.predActual.reduce((a, p) => a + Math.abs(p[0] - p[1]), 0) / evalR.predActual.length) : 0;
+              // Time series: reconstruct LEVELS over the test horizon (v̂ₜ = vₜ₋₁ + Δ̂) and score those instead of the raw changes.
+              const seriesPairs = isReg && data.series && netRef.current && scRef.current ? (() => {
+                const net = netRef.current!, sc = scRef.current!, win = data.win || data.featNames.length; const rows = data.X.length; const cut = rows - Math.max(1, Math.round(rows * testFrac)); const pairs: [number, number][] = [];
+                for (let j = cut; j < rows; j++) { const pd = predictVec(net, scaleRow(data.X[j], sc))[0]; pairs.push([data.series!.v[j + win + 1], data.series!.v[j + win] + pd]); }
+                return pairs;
+              })() : null;
+              let rAcc = evalR.acc, rRmse = Math.sqrt(evalR.loss), rMae = isReg && evalR.predActual ? evalR.predActual.reduce((a, p) => a + Math.abs(p[0] - p[1]), 0) / evalR.predActual.length : 0;
+              if (seriesPairs && seriesPairs.length) { const acts = seriesPairs.map((p) => p[0]); const mean = acts.reduce((a, b) => a + b, 0) / acts.length; let ssr = 0, sst = 0, ae = 0; seriesPairs.forEach(([a, p]) => { ssr += (p - a) ** 2; sst += (a - mean) ** 2; ae += Math.abs(p - a); }); rAcc = 1 - ssr / (sst || 1); rRmse = Math.sqrt(ssr / seriesPairs.length); rMae = ae / seriesPairs.length; }
+              const badge: [string, string] = isReg ? (rAcc >= 0.8 ? ["▲ strong", "#3ecf7f"] : rAcc >= 0.5 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]) : (evalR.acc >= 0.9 ? ["▲ strong", "#3ecf7f"] : evalR.acc >= 0.75 ? ["! fair", "#f59e0b"] : ["✕ weak", "#ef4444"]);
               return <>
                 {/* metric cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 20 }}>
                   {isReg
-                    ? [mcard(evalR.acc.toFixed(3), "R² (test)", true, badge), mcard(Math.sqrt(evalR.loss).toFixed(2), "RMSE"), mcard(mae.toFixed(2), "MAE")]
+                    ? [mcard(rAcc.toFixed(3), seriesPairs ? "R² (forecast)" : "R² (test)", true, badge), mcard(rRmse.toFixed(2), "RMSE"), mcard(rMae.toFixed(2), "MAE")]
                     : [mcard(`${(evalR.acc * 100).toFixed(1)}%`, "accuracy", true, badge), mcard(m.precision.toFixed(2), "precision"), mcard(m.recall.toFixed(2), "recall"), mcard(m.f1.toFixed(2), "F1 score")]}
                 </div>
                 {/* matrix / scatter + breakdown */}
+                {isReg && data.series && netRef.current && scRef.current && (() => {
+                  const net = netRef.current!, sc = scRef.current!, win = data.win || data.featNames.length; const series = data.series!;
+                  // one-step-ahead reconstructed level for every window: v̂[j+win+1] = v[j+win] + Δ̂
+                  const predX = data.X.map((_, j) => j + win + 1); const predLvl = data.X.map((r, j) => series.v[j + win] + predictVec(net, scaleRow(r, sc))[0]);
+                  const boundary = (data.X.length - Math.max(1, Math.round(data.X.length * testFrac))) + win + 1;
+                  return <div style={{ ...panelSt, marginBottom: 20 }}><h4 className="fld" style={{ margin: "0 0 8px" }}>Forecast — one-step-ahead predicted vs actual</h4>
+                    <Plot data={[{ type: "scatter", mode: "lines", name: "actual", x: series.t, y: series.v, line: { color: th.muted, width: 1.6 } }, { type: "scatter", mode: "lines", name: "predicted", x: predX, y: predLvl, line: { color: "#3ecf7f", width: 2 } }] as never} layout={{ ...lay("", "time step", "value", { showlegend: true, legend: { orientation: "h", y: -0.22 }, height: 340, margin: { l: 46, r: 12, t: 12, b: 46 } }), shapes: [{ type: "line", x0: boundary, x1: boundary, yref: "paper", y0: 0, y1: 1, line: { color: th.muted, dash: "dot", width: 1.4 } }], annotations: [{ x: boundary, y: 1, yref: "paper", yanchor: "bottom", text: "train ↔ test", showarrow: false, font: { color: th.muted, size: 10 } }] } as never} style={{ height: 340, width: "100%" }} />
+                    <div className="note" style={{ marginTop: 6 }}>Left of the dotted line the model trained on; right is pure forecast on unseen future steps. The net predicts each step&apos;s <b>change</b>, added back onto the last value to reconstruct the level.</div>
+                  </div>;
+                })()}
                 {isReg
                   ? evalR.predActual && <div style={{ ...panelSt, marginBottom: 20, maxWidth: 560 }}><h4 className="fld" style={{ margin: "0 0 8px" }}>Predicted vs actual (held-out test set)</h4><Plot data={[{ type: "scatter", mode: "markers", name: "test rows", x: evalR.predActual.map((p) => p[0]), y: evalR.predActual.map((p) => p[1]), marker: { color: "#5b7cff", size: 7, opacity: 0.75 } }, { type: "scatter", mode: "lines", name: "ŷ = y", x: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], y: [Math.min(...evalR.predActual.map((p) => p[0])), Math.max(...evalR.predActual.map((p) => p[0]))], line: { color: th.muted, dash: "dash" }, hoverinfo: "skip" }] as never} layout={lay("", "actual", "predicted", { showlegend: true, legend: { orientation: "h", y: -0.22 }, height: 340, margin: { l: 46, r: 12, t: 12, b: 46 } }) as never} style={{ height: 340, width: "100%" }} /></div>
                   : evalR.confusion && (() => { const cls = (evalR.classes ?? []).map(String); const cm = evalR.confusion; const ann: Record<string, unknown>[] = []; for (let a = 0; a < cls.length; a++) for (let p = 0; p < cls.length; p++) ann.push({ x: cls[p], y: cls[a], text: String(cm[a][p]), showarrow: false, font: { color: a === p ? "#eafff2" : "#ffe9e9", size: 16 } }); const sz = Math.min(380, 150 + cls.length * 72);
