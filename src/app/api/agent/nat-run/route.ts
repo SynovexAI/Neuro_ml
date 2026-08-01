@@ -102,7 +102,7 @@ export async function POST(req: Request) {
       latencyMs: Number(j?.latency_ms || 0), outcome: "success",
     }).catch((e) => captureError(e, { where: "nat-run.log" }));
 
-    return NextResponse.json(j);
+    return NextResponse.json({ ...j, usage: { total_tokens: pt + ct } });
   } catch (e) {
     if ((e as Error).name === "AbortError") return NextResponse.json({ error: "The agent run timed out." }, { status: 504 });
     captureError(e, { where: "nat-run", userId: user.id });

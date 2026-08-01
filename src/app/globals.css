@@ -186,6 +186,10 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .pick-row:hover{background:var(--panel)}
 .pick-row b{font-size:12.5px}
 .pick-row .pick-tick{margin-left:auto;font-size:11px;color:var(--accent);font-family:var(--mono)}
+.menu-pop{position:absolute;top:calc(100% + 4px);right:0;min-width:180px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rs);box-shadow:var(--shadow-md);padding:5px;z-index:40;animation:revealIn .14s ease both}
+.menu-hd{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);padding:5px 9px 3px}
+.menu-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;font-size:12.5px;cursor:pointer;white-space:nowrap}
+.menu-item:hover{background:var(--panel)}
 /* full-width flow builder */
 .flow-top{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-bottom:none;border-radius:var(--r) var(--r) 0 0;background:var(--surface)}
 .flow-body{display:grid;grid-template-columns:158px 1fr 244px;border:1px solid var(--border);border-radius:0 0 var(--r) var(--r);overflow:hidden;min-height:440px}
