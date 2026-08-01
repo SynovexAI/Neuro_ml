@@ -157,6 +157,7 @@ export default function RagLab() {
   const canQuery = backend === "vector" ? !!index : backend === "kg" ? !!graph : (!!index && !!graph);
   const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
   const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
       <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
@@ -478,40 +479,58 @@ export default function RagLab() {
           <div className="card-h"><span className="t">Add knowledge sources</span><span className="mono r">{docs.length} docs · {totalWords} words</span></div>
           <div className="card-b">
             {msg && <div className="err">{msg}</div>}
-            <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
-              <button className="btn ghost sm" onClick={() => fileRef.current?.click()} disabled={uploading}>{uploading ? <><span className="busy-dot" />Parsing…</> : "Upload files"}</button>
-              <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.log,.html,.tsv,.pdf,.docx,.doc,.xlsx,.xls,.xlsm,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onFiles} style={{ display: "none" }} />
-              <span className="note">txt · md · csv · json · html · <b>pdf</b> · <b>docx</b> · <b>xlsx</b></span>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 18 }}>
+              {([[String(docs.length), "documents"], [totalWords.toLocaleString(), "words"], [combined.length.toLocaleString(), "characters"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
             </div>
-            <div className="row" style={{ marginTop: 12, gap: 8 }}>
-              <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://… (web page to scrape)" />
-              <button className="btn ghost sm" onClick={fetchUrl} disabled={fetching} style={{ whiteSpace: "nowrap" }}>{fetching ? "Fetching…" : "Fetch URL"}</button>
+
+            <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.log,.html,.tsv,.pdf,.docx,.doc,.xlsx,.xls,.xlsm,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onFiles} style={{ display: "none" }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14, marginBottom: 20 }}>
+              <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>
+                <b style={{ fontSize: 13.5 }}>{uploading ? "Parsing…" : "Drop files here or click to upload"}</b>
+                <div className="note" style={{ marginTop: 5 }}>multiple files · parsed in-browser or on the server</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center", marginTop: 12 }}>
+                  {([["txt", false], ["md", false], ["csv", false], ["json", false], ["html", false], ["pdf", true], ["docx", true], ["xlsx", true]] as [string, boolean][]).map(([f, hot]) => <span key={f} style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 7px", borderRadius: 5, background: hot ? "rgba(91,124,255,.1)" : "var(--panel-2)", border: `1px solid ${hot ? "rgba(91,124,255,.4)" : "var(--border)"}`, color: hot ? "var(--accent)" : "var(--muted)" }}>{f}</span>)}
+                </div>
+              </div>
+              <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--sky)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Fetch a web page</span></div>
+                <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" style={{ marginBottom: 10 }} />
+                <button className="btn block" onClick={fetchUrl} disabled={fetching}>{fetching ? <><span className="busy-dot" />Fetching…</> : "Fetch & scrape URL"}</button>
+                <div className="note" style={{ marginTop: "auto", paddingTop: 10 }}>Extracts the readable article text and adds it as a document.</div>
+              </div>
             </div>
-            <label className="fld" style={{ marginTop: 16 }}>Loaded documents — check the preview before chunking</label>
+
+            <label className="fld">Loaded documents — preview before chunking</label>
             {docs.map((d) => {
               const words = d.text.split(/\s+/).filter(Boolean).length;
               const open = openDocs.has(d.id);
               const toggle = () => setOpenDocs((s) => { const n = new Set(s); if (n.has(d.id)) n.delete(d.id); else n.add(d.id); return n; });
+              const { ic, color } = docIcon(d.kind);
               return (
-                <div key={d.id} className={`doc-row ${open ? "open" : ""}`}>
-                  <div className="doc-item">
-                    <span className="kind">{d.kind}</span>
-                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
-                    <span className="note">{words.toLocaleString()} words · {d.text.length.toLocaleString()} chars</span>
-                    <button className="doc-prev-btn" onClick={toggle}>{open ? "Hide" : "Preview"}</button>
-                    <button className="x" onClick={() => removeDoc(d.id)} title="Remove">×</button>
+                <div key={d.id} style={{ ...pnl, marginBottom: 10 }}>
+                  <div className="row" style={{ gap: 12, alignItems: "center", padding: "11px 14px" }}>
+                    <div style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", fontSize: 15, flex: "0 0 auto", background: `color-mix(in srgb, ${color} 15%, transparent)`, color }}>{ic}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
+                      <div className="note" style={{ marginTop: 2 }}>{words.toLocaleString()} words · {d.text.length.toLocaleString()} chars</div>
+                    </div>
+                    <span style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color, background: `color-mix(in srgb, ${color} 12%, transparent)`, flex: "0 0 auto" }}>{d.kind}</span>
+                    <button className="btn ghost sm" onClick={toggle}>{open ? "Hide" : "Preview"}</button>
+                    <button onClick={() => removeDoc(d.id)} title="Remove" style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 17, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
                   </div>
-                  {open && (
-                    d.text.trim()
-                      ? <div className="doc-prev">{d.text.slice(0, 800)}{d.text.length > 800 ? " …" : ""}</div>
-                      : <div className="doc-prev empty">⚠ No text was extracted — this file may be a scanned image or an unsupported layout.</div>
-                  )}
+                  {open && (d.text.trim()
+                    ? <div style={{ borderTop: "1px solid var(--border)", padding: "11px 14px", fontFamily: "var(--mono)", fontSize: 11, color: "var(--muted)", lineHeight: 1.55, background: "var(--panel-2)", maxHeight: 120, overflow: "auto" }}>{d.text.slice(0, 800)}{d.text.length > 800 ? " …" : ""}</div>
+                    : <div style={{ borderTop: "1px solid var(--border)", padding: "11px 14px", fontSize: 11.5, color: "var(--warn)" }}>⚠ No text was extracted — this file may be a scanned image or an unsupported layout.</div>)}
                 </div>
               );
             })}
             {docs.length === 0 && <div className="note">No documents yet — upload a file or fetch a URL.</div>}
-            <label className="fld" style={{ marginTop: 14 }}>Combined data preview</label>
-            <div className="dprev">{combined.slice(0, 1500)}{combined.length > 1500 ? "\n…" : ""}</div>
+
+            <div style={{ ...pnl, marginTop: 16 }}>
+              {kgHead("#3ecf7f", "Combined preview", <span className="note" style={{ fontSize: 10 }}>what gets chunked</span>)}
+              <div style={{ padding: 14, fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 160, overflow: "auto" }}>{combined.slice(0, 1500)}{combined.length > 1500 ? "\n…" : ""}</div>
+            </div>
             <div className="stepnav"><button className="btn" disabled={docs.length === 0} onClick={() => goStep("chunk")}>Next: Chunk →</button></div>
           </div>
         </div>
