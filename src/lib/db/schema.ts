@@ -49,7 +49,7 @@ export const projects = mysqlTable("projects", {
   published: boolean("published").notNull().default(false), // usable in Workroom
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
-});
+}, (t) => [index("projects_user_idx").on(t.userId)]);
 
 // Deployments of a published agent to a channel (Telegram bot, API key, web widget).
 export const channels = mysqlTable("channels", {
@@ -76,7 +76,7 @@ export const usage = mysqlTable("usage", {
   // True when the provider didn't report usage and we estimated from text length.
   estimated: boolean("estimated").notNull().default(false),
   ts: timestamp("ts").defaultNow(),
-}, (t) => [index("usage_user_ts_idx").on(t.userId, t.ts)]);
+}, (t) => [index("usage_user_ts_idx").on(t.userId, t.ts), index("usage_ts_idx").on(t.ts)]);
 
 // Persistent fixed-window rate limiter (survives restarts / works across
 // serverless instances, unlike the in-memory fallback). One row per
@@ -116,7 +116,7 @@ export const mcpServers = mysqlTable("mcp_servers", {
   status: varchar("status", { length: 40 }).default("configured"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
-});
+}, (t) => [index("mcp_user_idx").on(t.userId)]);
 
 // One row per agent run (in-browser ReAct/workflow or NAT). Powers the agent
 // analytics: success rate, iterations, tool usage, tokens/cost, latency.

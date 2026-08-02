@@ -9,12 +9,6 @@ type Staged = { name: string; text: string };
 const CONNECTORS = [
   { id: "file", name: "File Upload", desc: "PDF, DOCX, XLSX, CSV, TXT", icon: "📄", ok: true },
   { id: "web", name: "Web page", desc: "Fetch & index a URL", icon: "🌐", ok: true },
-  { id: "confluence", name: "Confluence", desc: "Wiki pages & spaces", icon: "🟦", ok: false },
-  { id: "notion", name: "Notion", desc: "Pages & databases", icon: "⬛", ok: false },
-  { id: "sharepoint", name: "SharePoint", desc: "Microsoft 365 docs", icon: "🟩", ok: false },
-  { id: "gdrive", name: "Google Drive", desc: "Docs, sheets, slides", icon: "🟨", ok: false },
-  { id: "github", name: "GitHub", desc: "Repos, issues, wikis", icon: "🐙", ok: false },
-  { id: "db", name: "Database", desc: "SQL / warehouse table", icon: "🗄", ok: false },
 ];
 
 function fmtWhen(v?: string | null): string {
@@ -218,7 +212,7 @@ export default function KnowledgeBases() {
             <div className="mb">
               {!pick ? (
                 <>
-                  <div className="note" style={{ marginBottom: 10 }}>Pick a source. File upload and web pages work today — the rest are on the roadmap.</div>
+                  <div className="note" style={{ marginBottom: 10 }}>Pick a source, then upload files or add a web page — documents accumulate in the knowledge base.</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
                     {CONNECTORS.map((c) => (
                       <button key={c.id} type="button" disabled={!c.ok} onClick={() => c.ok && setPick(c.id)}

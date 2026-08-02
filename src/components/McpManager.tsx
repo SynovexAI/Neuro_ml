@@ -220,13 +220,12 @@ export default function McpManager() {
                       <div className="split col-2e" style={{ marginTop: 12 }}>
                         <div><label className="fld">Auth</label>
                           <select value={f.authType} onChange={(e) => setF({ ...f, authType: e.target.value as typeof f.authType })}>
-                            <option value="none">None</option><option value="bearer">API key (Bearer)</option><option value="apikey">API key (custom header)</option><option value="oauth">OAuth 2.1 (soon)</option>
+                            <option value="none">None</option><option value="bearer">API key (Bearer)</option><option value="apikey">API key (custom header)</option>
                           </select>
                         </div>
                         {f.authType === "apikey" && <div><label className="fld">Header name</label><input type="text" placeholder="X-API-Key" value={f.headerName} onChange={(e) => setF({ ...f, headerName: e.target.value })} /></div>}
                       </div>
                       {(f.authType === "apikey" || f.authType === "bearer") && (<><label className="fld" style={{ marginTop: 12 }}>Your key / token (stored encrypted)</label><input type="password" placeholder="paste your API key / token" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} /></>)}
-                      {f.authType === "oauth" && <div className="note" style={{ marginTop: 10 }}>OAuth sign-in is a later phase — use API key / Bearer for now.</div>}
                     </>
                   ) : (
                     <>

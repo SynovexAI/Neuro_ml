@@ -618,6 +618,7 @@ if __name__ == "__main__":
       </div>
       {runtime === "nat" ? <NatAgentPanel /> : <>
       {provKnown && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before you can run an agent.</div>}
+      <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>To attach <b>MCP servers</b> or <b>knowledge bases</b> to an agent, switch to the <b>NVIDIA NAT</b> runtime above — the in-browser runtime uses built-in tools only.</span></div>
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
 

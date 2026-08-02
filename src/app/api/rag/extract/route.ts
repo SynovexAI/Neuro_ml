@@ -32,7 +32,9 @@ export async function POST(req: Request) {
       const parser = new PDFParse({ data: new Uint8Array(buf) });
       const res = await parser.getText();
       text = res.text || "";
-    } else if (ext === "docx" || ext === "doc") {
+    } else if (ext === "doc") {
+      return NextResponse.json({ error: "Legacy .doc (Word 97–2003) isn't supported — open it in Word and Save As .docx, then upload." }, { status: 415 });
+    } else if (ext === "docx") {
       const mammoth = await import("mammoth");
       const res = await mammoth.extractRawText({ buffer: buf });
       text = res.value || "";
