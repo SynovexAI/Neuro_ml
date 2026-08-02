@@ -68,20 +68,21 @@ export function graphFromTriples(triples: { s: string; r: string; o: string }[],
 }
 
 // Entity-link the query → expand `hops` → collect chunks attached to the visited subgraph, ranked by coverage.
-export function retrieveGraph(g: KnowledgeGraph, query: string, k: number, hops = 1): { chunkIds: number[]; path: KgEdge[]; seeds: string[]; nodes: string[] } {
+export function retrieveGraph(g: KnowledgeGraph, query: string, k: number, hops = 1): { chunkIds: number[]; path: KgEdge[]; seeds: string[]; nodes: string[]; layers: Record<string, number> } {
   const q = new Set((query.toLowerCase().match(/[a-z0-9]+/g) || []));
   const seeds = g.nodes.filter((n) => q.has(n.id) || n.id.split(" ").some((t) => q.has(t))).map((n) => n.id);
   const visited = new Set(seeds), path: KgEdge[] = []; let frontier = new Set(seeds);
+  const layers: Record<string, number> = {}; seeds.forEach((s) => (layers[s] = 0));
   for (let h = 0; h < hops; h++) {
     const next = new Set<string>();
     for (const e of g.edges) { if (frontier.has(e.s) && !visited.has(e.o)) { next.add(e.o); path.push(e); } if (frontier.has(e.o) && !visited.has(e.s)) { next.add(e.s); path.push(e); } }
-    next.forEach((n) => visited.add(n)); frontier = next; if (!next.size) break;
+    next.forEach((n) => { if (!(n in layers)) layers[n] = h + 1; visited.add(n); }); frontier = next; if (!next.size) break;
   }
   for (const e of g.edges) if (seeds.includes(e.s) && seeds.includes(e.o) && !path.includes(e)) path.push(e);
   const score = new Map<number, number>();
   g.nodes.filter((n) => visited.has(n.id)).forEach((n) => n.chunks.forEach((ci) => score.set(ci, (score.get(ci) || 0) + 1)));
   const chunkIds = [...score.entries()].sort((a, b) => b[1] - a[1]).slice(0, k).map((e) => e[0]);
-  return { chunkIds, path, seeds, nodes: [...visited] };
+  return { chunkIds, path, seeds, nodes: [...visited], layers };
 }
 
 // Deterministic force-directed layout (seeded on a circle → no randomness) for the graph view.

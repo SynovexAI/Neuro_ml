@@ -85,6 +85,8 @@ export default function RagLab() {
   const [kgPath, setKgPath] = useState<KgEdge[]>([]);
   const [kgVisited, setKgVisited] = useState<string[]>([]);
   const [kgSeeds, setKgSeeds] = useState<string[]>([]);
+  const [kgLayers, setKgLayers] = useState<Record<string, number>>({});
+  const [kgPlayKey, setKgPlayKey] = useState(0);
 
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
   const [topK, setTopK] = useState(3);
@@ -170,18 +172,25 @@ export default function RagLab() {
   );
 
   // Premium graph renderer — nodes coloured by type, matched subgraph highlighted, traversed edges lit.
-  function graphSvg(g: KnowledgeGraph, pos: Record<string, { x: number; y: number }>, visited?: Set<string>, path?: KgEdge[]) {
+  // When `anim` is passed, the traversal plays as a BFS wave: edges draw source→target and nodes
+  // light up hop by hop (delay = the node's BFS layer). Remounts on anim.key to restart.
+  function graphSvg(g: KnowledgeGraph, pos: Record<string, { x: number; y: number }>, visited?: Set<string>, path?: KgEdge[], anim?: { key: number; layers: Record<string, number> }) {
     const pathSet = new Set((path || []).map((e) => e.s + "→" + e.o));
     const seedSet = new Set(kgSeeds);
+    const delayOf = (id: string) => (anim ? (anim.layers[id] ?? 0) * 0.6 + 0.15 : 0);
     return (
-      <svg viewBox={`0 0 ${GW} ${GH}`} width="100%" height={GH} style={{ display: "block", background: "var(--panel-2)", borderRadius: 10 }}>
+      <svg key={anim?.key} viewBox={`0 0 ${GW} ${GH}`} width="100%" height={GH} style={{ display: "block", background: "var(--panel-2)", borderRadius: 10 }}>
         {g.edges.map((e, i) => { const a = pos[e.s], b = pos[e.o]; if (!a || !b) return null; const on = pathSet.has(e.s + "→" + e.o); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-          return <g key={i}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={on ? "#5b7cff" : "var(--border-strong)"} strokeWidth={on ? 2.2 : 1} opacity={on ? 0.95 : visited ? 0.22 : 0.5} />
-            {(on || g.edges.length <= 16) && <text x={mx} y={my - 3} fontSize={8.5} fill={on ? "#f59e0b" : "var(--faint)"} textAnchor="middle" fontStyle="italic">{e.rel.length > 14 ? e.rel.slice(0, 13) + "…" : e.rel}</text>}
+          const len = Math.hypot(b.x - a.x, b.y - a.y); const eDelay = Math.max(delayOf(e.s), delayOf(e.o));
+          const lineStyle: React.CSSProperties = (anim && on) ? { strokeDasharray: len, strokeDashoffset: len, animation: "kg-draw .5s ease forwards", animationDelay: `${eDelay}s` } : {};
+          const lblStyle: React.CSSProperties = (anim && on) ? { animation: "kg-fade .4s ease both", animationDelay: `${eDelay + 0.35}s` } : {};
+          return <g key={i}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={on ? "#5b7cff" : "var(--border-strong)"} strokeWidth={on ? 2.2 : 1} opacity={on ? 0.95 : visited ? 0.22 : 0.5} style={lineStyle} />
+            {(on || g.edges.length <= 16) && <text x={mx} y={my - 3} fontSize={8.5} fill={on ? "#f59e0b" : "var(--faint)"} textAnchor="middle" fontStyle="italic" style={lblStyle}>{e.rel.length > 14 ? e.rel.slice(0, 13) + "…" : e.rel}</text>}
           </g>; })}
-        {g.nodes.map((n, i) => { const p = pos[n.id]; if (!p) return null; const on = visited?.has(n.id); const seed = seedSet.has(n.id); const r = 6 + Math.min(8, n.freq * 1.4);
-          return <g key={i} opacity={visited && !on ? 0.32 : 1}>
-            {on && <circle cx={p.x} cy={p.y} r={r + 4} fill="none" stroke="#5b7cff" strokeWidth={2} opacity={0.55} />}
+        {g.nodes.map((n, i) => { const p = pos[n.id]; if (!p) return null; const on = visited?.has(n.id); const seed = seedSet.has(n.id); const r = 6 + Math.min(8, n.freq * 1.4); const nDelay = delayOf(n.id);
+          const gStyle: React.CSSProperties = (anim && on) ? { animation: "kg-fade .42s ease both", animationDelay: `${nDelay}s` } : {};
+          return <g key={i} opacity={visited && !on ? 0.32 : 1} style={gStyle}>
+            {on && <circle cx={p.x} cy={p.y} r={r + 4} fill="none" stroke={seed ? "#3ecf7f" : "#5b7cff"} strokeWidth={2} opacity={0.55} style={(anim && seed) ? { animation: "kg-pulse 1.5s ease-in-out infinite", animationDelay: `${nDelay + 0.3}s` } : {}} />}
             <circle cx={p.x} cy={p.y} r={r} fill={seed ? "#3ecf7f" : n.type === "proper" ? "#a855f7" : "#5b7cff"} opacity={0.92} />
             <text x={p.x} y={p.y + r + 10} fontSize={9.5} fill="var(--text)" textAnchor="middle" fontWeight={600}>{n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label}</text>
           </g>; })}
@@ -413,11 +422,11 @@ export default function RagLab() {
     let top: { i: number; score: number }[];
     if (backend === "kg" && graph) {
       const r = retrieveGraph(graph, question, topK, kgHops);
-      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path);
+      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
       top = r.chunkIds.map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
     } else if (backend === "hybrid" && graph && index) {
       const r = retrieveGraph(graph, question, Math.max(topK * 3, 8), Math.max(kgHops, 2));
-      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path);
+      setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
       const cand = new Set(r.chunkIds); const qv = await ensureQVec();
       const ranked = fullRank(strategy, qv); const inGraph = ranked.filter((h) => cand.has(h.i));
       const order = applyRerank(inGraph.length ? inGraph : ranked, topK);
@@ -879,13 +888,13 @@ export default function RagLab() {
 
               {backend !== "vector" && graph && graphPos && kgVisited.length > 0 && (
                 <div style={{ ...pnl, marginTop: 16 }}>
-                  {kgHead("#a855f7", "Graph traversal", <span className="note" style={{ fontSize: 10 }}>{kgSeeds.length} matched · {kgVisited.length} in subgraph</span>)}
+                  {kgHead("#a855f7", "Graph traversal", <div className="row" style={{ gap: 10, alignItems: "center" }}><span className="note" style={{ fontSize: 10 }}>{kgSeeds.length} matched · {kgVisited.length} in subgraph</span><button className="btn ghost sm" onClick={() => setKgPlayKey((k) => k + 1)} title="Replay traversal">↻ Replay</button></div>)}
                   <div style={{ padding: 14 }}>
-                    {kgPath.length > 0 && <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12, fontSize: 11.5 }}>
-                      {kgPath.slice(0, 6).map((e, i) => <span key={i} className="row" style={{ gap: 6, alignItems: "center" }}><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(62,207,127,.14)", color: "#3ecf7f", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.s)?.label}</span><span style={{ color: "var(--orange)", fontStyle: "italic", fontSize: 10.5 }}>{e.rel} →</span><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(91,124,255,.14)", color: "#5b7cff", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.o)?.label}</span></span>)}
+                    {kgPath.length > 0 && <div key={`p-${kgPlayKey}`} className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12, fontSize: 11.5 }}>
+                      {kgPath.slice(0, 6).map((e, i) => <span key={i} className="row" style={{ gap: 6, alignItems: "center", animation: "kg-fade .4s ease both", animationDelay: `${i * 0.18 + 0.2}s` }}><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(62,207,127,.14)", color: "#3ecf7f", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.s)?.label}</span><span style={{ color: "var(--orange)", fontStyle: "italic", fontSize: 10.5 }}>{e.rel} →</span><span style={{ padding: "3px 9px", borderRadius: 20, background: "rgba(91,124,255,.14)", color: "#5b7cff", fontWeight: 600 }}>{graph.nodes.find((n) => n.id === e.o)?.label}</span></span>)}
                     </div>}
-                    {graphSvg(graph, graphPos, new Set(kgVisited), kgPath)}
-                    <div className="note" style={{ marginTop: 6 }}>Green = query-matched entities · highlighted = subgraph within {kgHops} hop(s). The chunks attached to these entities become the context.</div>
+                    {graphSvg(graph, graphPos, new Set(kgVisited), kgPath, { key: kgPlayKey, layers: kgLayers })}
+                    <div className="note" style={{ marginTop: 6 }}>Watch the traversal: query-matched entities (green) light up first, then edges draw outward hop by hop. The chunks attached to the lit subgraph become the context.</div>
                   </div>
                 </div>
               )}
