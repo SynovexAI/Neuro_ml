@@ -139,6 +139,27 @@ export function jsonExtractTool(input: string): string {
   return typeof cur === "object" ? JSON.stringify(cur).slice(0, 800) : String(cur);
 }
 
+// Native tools that run server-side in the web service (free-tier friendly, no MCP/NAT).
+async function nativeTool(tool: string, input: string): Promise<string> {
+  try {
+    const r = await fetch("/api/agent/native", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, input }) });
+    const j = await r.json();
+    if (!r.ok) return "Error: " + (j.error || "failed");
+    return j.text || "(no result)";
+  } catch (e) { return "Error: " + (e as Error).message; }
+}
+// Cross-turn memory in the browser (localStorage). Free, no backend.
+function memoryTool(input: string): string {
+  if (typeof localStorage === "undefined") return "Memory unavailable here.";
+  const NS = "agent_mem_"; const s = (input || "").trim();
+  const all = () => { const o: Record<string, string> = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; if (k.startsWith(NS)) o[k.slice(NS.length)] = localStorage.getItem(k) || ""; } return o; };
+  const setM = s.match(/^set\s+([^:=]+)[:=]\s*([\s\S]+)$/i); if (setM) { localStorage.setItem(NS + setM[1].trim(), setM[2].trim()); return `Saved "${setM[1].trim()}".`; }
+  const getM = s.match(/^get\s+(.+)$/i); if (getM) { const v = localStorage.getItem(NS + getM[1].trim()); return v != null ? `${getM[1].trim()} = ${v}` : `No memory for "${getM[1].trim()}".`; }
+  const delM = s.match(/^(?:delete|del|forget)\s+(.+)$/i); if (delM) { localStorage.removeItem(NS + delM[1].trim()); return `Forgot "${delM[1].trim()}".`; }
+  if (/^list\b/i.test(s) || !s) { const o = all(); const ks = Object.keys(o); return ks.length ? ks.map((k) => `${k} = ${o[k]}`).join("\n") : "Memory is empty."; }
+  return 'Use: "set key: value", "get key", "list", or "delete key".';
+}
+
 export const AGENT_TOOLS: AgentTool[] = [
   { id: "calculator", name: "calculator", desc: "evaluate an arithmetic / math expression", example: "2*(3+4)^2  or  sqrt(144)+pi", run: async (input) => { try { return String(safeCalc(input)); } catch (e) { return "Error: " + (e as Error).message; } } },
   { id: "datetime", name: "datetime", desc: "current date/time, or days until/since a date", example: "now  |  days until 2026-12-25", run: async (input) => dateTool(input) },
@@ -149,6 +170,12 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "statistics", name: "statistics", desc: "compute mean / median / min / max / stdev of a list of numbers", example: "12, 7, 9, 15, 6", run: async (input) => statsTool(input) },
   { id: "unit_convert", name: "unit_convert", desc: "convert between units — length, mass, or temperature", example: "10 km to mi", run: async (input) => unitTool(input) },
   { id: "json_extract", name: "json_extract", desc: "read a value from JSON by dot-path (line 1 = path, rest = JSON) — pairs with http_request", example: "stargazers_count\\n{ …json… }", run: async (input) => jsonExtractTool(input) },
+  { id: "web_search", name: "web_search", desc: "search the web (DuckDuckGo) — returns the top results with links", example: "latest mars rover mission", run: async (input) => nativeTool("web_search", input) },
+  { id: "wikipedia", name: "wikipedia", desc: "search Wikipedia and read article summaries", example: "retrieval augmented generation", run: async (input) => nativeTool("wikipedia", input) },
+  { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (title, abstract, link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
+  { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
+  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
+  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
