@@ -43,6 +43,7 @@ const CATALOG: Entry[] = [
   { id: "aws-knowledge", title: "AWS Knowledge", icon: "☁", iconRgb: "245,158,11", desc: "AWS service docs, guidance & best practices", transport: "http", url: "https://knowledge-mcp.global.api.aws", authType: "none", hosted: true, needs: "no key", note: "Free & keyless (no AWS account needed) — grounds answers in trusted AWS documentation." },
   { id: "grep", title: "Grep", icon: "🔎", iconRgb: "62,207,127", desc: "Search code across a million public GitHub repos", transport: "http", url: "https://mcp.grep.app", authType: "none", hosted: true, needs: "no key", note: "Free (by Vercel) — find real-world usage examples of any API or pattern." },
   { id: "globalping", title: "Globalping", icon: "🌍", iconRgb: "34,184,207", desc: "Run ping / traceroute / DNS / HTTP from probes worldwide", transport: "http", url: "https://mcp.globalping.dev/mcp", authType: "none", hosted: true, needs: "no key", note: "Free anonymous access — debug latency, DNS and uptime from many regions." },
+  { id: "wolfram", title: "Wolfram Alpha", icon: "🧮", iconRgb: "231,76,60", desc: "Computational answers — math, science, data, units", transport: "http", url: "https://agenttools.wolfram.com/mcp", authType: "none", hosted: true, needs: "no key", note: "Free (limited personal use), keyless — precise math/science the LLM would otherwise guess at." },
 ];
 
 export default function McpManager() {
