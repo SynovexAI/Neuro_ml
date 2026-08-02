@@ -48,6 +48,18 @@ export default function McpManager() {
   const [connectingId, setConnectingId] = useState("");
   const [msg, setMsg] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testRes, setTestRes] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  async function testDb() {
+    setTesting(true); setTestRes(null);
+    try {
+      const r = await fetch("/api/admin/mcp/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: f.secret }) });
+      const j = await r.json();
+      setTestRes(j.ok ? { ok: true, msg: `connected · ${j.latencyMs}ms${j.version ? " · " + j.version : ""}` } : { ok: false, msg: j.error || "connection failed" });
+    } catch (e) { setTestRes({ ok: false, msg: (e as Error).message }); }
+    setTesting(false);
+  }
 
   async function load() {
     setLoading(true);
@@ -71,7 +83,7 @@ export default function McpManager() {
   // Card click: no-key servers connect immediately; keyed / DB servers open a minimal modal.
   async function pick(e: Entry) {
     setMsg("");
-    if (e.keyLabel) { setActive(e); setF(baseFrom(e)); setConnectOpen(true); return; }
+    if (e.keyLabel) { setActive(e); setF(baseFrom(e)); setTestRes(null); setConnectOpen(true); return; }
     setConnectingId(e.id);
     if (await post(baseFrom(e))) { toast(`Connected “${e.title}”`, "success"); await load(); }
     setConnectingId("");
@@ -167,10 +179,12 @@ export default function McpManager() {
                 <div className="mb">
                   <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 14 }}>{[["transport", active.transport], active.url ? ["url", active.url] : active.command ? ["run", active.command] : null, active.envName ? ["env", active.envName] : null].filter(Boolean).map((x) => { const [k, v] = x as [string, string]; return <span key={k} className="mono" style={{ fontSize: 10.5, background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 6, padding: "3px 9px", color: "var(--faint)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}>{k}: {v}</span>; })}</div>
                   <label className="fld">{active.keyLabel} <span className="note" style={{ textTransform: "none" }}>· stored encrypted, never shown again</span></label>
-                  <input type="password" placeholder={active.keyPlaceholder} value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} />
+                  <input type="password" placeholder={active.keyPlaceholder} value={f.secret} onChange={(e) => { setF({ ...f, secret: e.target.value }); if (testRes) setTestRes(null); }} />
                   {active.note && <div className="note" style={{ marginTop: 10, lineHeight: 1.5 }}>{active.note}</div>}
+                  {active.id === "database" && testRes && <div className="note" style={{ marginTop: 10, color: testRes.ok ? "var(--good)" : "var(--crit)" }}>{testRes.ok ? "✓ " : "✗ "}{testRes.msg}</div>}
                   <div className="row" style={{ marginTop: 16, gap: 10 }}>
                     <button className="btn" onClick={add} disabled={busy || !f.secret.trim()}>{busy ? "Connecting…" : "Connect"}</button>
+                    {active.id === "database" && <button className="btn ghost" onClick={testDb} disabled={testing || !f.secret.trim()}>{testing ? "Testing…" : "Test connection"}</button>}
                     <button className="btn ghost" onClick={() => { setConnectOpen(false); setActive(null); }}>Cancel</button>
                     {msg && <span className="err" style={{ margin: 0 }}>{msg}</span>}
                   </div>
