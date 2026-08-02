@@ -28,6 +28,12 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   statistics: { icon: "📊", label: "Statistics" },
   unit_convert: { icon: "📐", label: "Unit convert" },
   json_extract: { icon: "🔎", label: "JSON extract" },
+  web_search: { icon: "🔍", label: "Web search" },
+  wikipedia: { icon: "📖", label: "Wikipedia" },
+  arxiv: { icon: "🔬", label: "arXiv" },
+  memory: { icon: "🧠", label: "Memory" },
+  db_schema: { icon: "🗄", label: "DB schema" },
+  db_query: { icon: "🐘", label: "DB query" },
 };
 
 // One-click starter agents — teach where/why agents are used.
@@ -182,7 +188,7 @@ export default function AgentLab() {
     { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 200, h: 88, bottom: ["model", "tools"] },
     { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 150, h: 56 },
     { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 172, h: 54 },
-    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid].icon, title: TOOL_META[tid].label, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 150, h: 54 })),
+    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 150, h: 54 })),
   ];
   const getPos = (id: string) => nodePos[id] || DEFAULT_POS[id] || toolDefault(Math.max(0, placedOrder.indexOf(id.replace("tool:", ""))));
   function portPos(n: ANode, which: "in" | "out" | "top" | number): [number, number] {
@@ -688,7 +694,7 @@ if __name__ == "__main__":
                   {addOpen && (
                     <div className="addmenu2">
                       <div className="hd">Add a tool node to the canvas</div>
-                      {AGENT_TOOLS.map((t) => { const on = placedTools.has(t.id); return <div key={t.id} className="ai" onClick={() => { togglePlaced(t.id); if (!on) setASel("tool:" + t.id); }}><span>{TOOL_META[t.id].icon}</span>{TOOL_META[t.id].label}<span className={`ai-state ${on ? "on" : ""}`}>{on ? "✓ on canvas" : "+ add"}</span></div>; })}
+                      {AGENT_TOOLS.map((t) => { const on = placedTools.has(t.id); return <div key={t.id} className="ai" onClick={() => { togglePlaced(t.id); if (!on) setASel("tool:" + t.id); }}><span>{TOOL_META[t.id]?.icon ?? "🔧"}</span>{TOOL_META[t.id]?.label ?? t.id}<span className={`ai-state ${on ? "on" : ""}`}>{on ? "✓ on canvas" : "+ add"}</span></div>; })}
                     </div>
                   )}
                 </div>
