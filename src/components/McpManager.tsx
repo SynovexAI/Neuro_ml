@@ -36,7 +36,7 @@ const CATALOG: Entry[] = [
   { id: "sequential-thinking", title: "Sequential Thinking", icon: "💭", iconRgb: "91,124,255", desc: "Step-by-step reasoning scaffold", transport: "stdio", command: "npx -y @modelcontextprotocol/server-sequential-thinking", authType: "none", needs: "no key" },
   { id: "time", title: "Time", icon: "⏰", iconRgb: "245,158,11", desc: "Dates & timezone conversions", transport: "stdio", command: "uvx mcp-server-time", authType: "none", needs: "no key" },
   { id: "github", title: "GitHub", icon: "🐙", iconRgb: "160,160,170", desc: "Repos, issues, PRs, code search", transport: "http", url: "https://api.githubcopilot.com/mcp", authType: "bearer", headerName: "Authorization", hosted: true, needs: "free token", keyLabel: "Your GitHub personal access token", keyPlaceholder: "ghp_…", note: "Create one at github.com → Settings → Developer settings → Personal access tokens. No deploy — GitHub hosts it." },
-  { id: "database", title: "Connect your database", icon: "🐘", iconRgb: "62,207,127", desc: "Chat with your Postgres — the agent queries it", transport: "stdio", command: "uvx postgres-mcp --access-mode=unrestricted", envName: "DATABASE_URI", authType: "none", needs: "connection string", keyLabel: "Your database URL", keyPlaceholder: "postgresql://user:pass@host:5432/dbname", note: "Free Postgres: Supabase, Neon, or Render. Read-write — the agent can also modify data, so point it at a database you're OK with an agent changing." },
+  { id: "database", title: "Connect your database", icon: "🐘", iconRgb: "62,207,127", desc: "Chat with your Postgres — the agent queries it", transport: "stdio", command: "uvx postgres-mcp", envName: "DATABASE_URI", authType: "none", needs: "connection string", keyLabel: "Your database URL", keyPlaceholder: "postgresql://user:pass@host:5432/dbname", note: "Free Postgres: Supabase, Neon, or Render. Reachable from Render (not localhost). Pick read-only or read-write below." },
 ];
 
 export default function McpManager() {
@@ -50,6 +50,8 @@ export default function McpManager() {
   const [connectOpen, setConnectOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testRes, setTestRes] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [dbWrite, setDbWrite] = useState(false); // false = read-only (safe default)
+  const dbCommand = (write: boolean) => `uvx postgres-mcp --access-mode=${write ? "unrestricted" : "restricted"}`;
 
   async function testDb() {
     setTesting(true); setTestRes(null);
@@ -83,7 +85,7 @@ export default function McpManager() {
   // Card click: no-key servers connect immediately; keyed / DB servers open a minimal modal.
   async function pick(e: Entry) {
     setMsg("");
-    if (e.keyLabel) { setActive(e); setF(baseFrom(e)); setTestRes(null); setConnectOpen(true); return; }
+    if (e.keyLabel) { setActive(e); setF(baseFrom(e)); setTestRes(null); setDbWrite(false); setConnectOpen(true); return; }
     setConnectingId(e.id);
     if (await post(baseFrom(e))) { toast(`Connected “${e.title}”`, "success"); await load(); }
     setConnectingId("");
@@ -92,7 +94,8 @@ export default function McpManager() {
 
   async function add() {
     setBusy(true); setMsg("");
-    if (await post(f)) { toast(`Connected “${f.name}”`, "success"); setF({ ...empty }); setConnectOpen(false); setActive(null); await load(); }
+    const form = active?.id === "database" ? { ...f, command: dbCommand(dbWrite) } : f;
+    if (await post(form)) { toast(`Connected “${form.name}”`, "success"); setF({ ...empty }); setConnectOpen(false); setActive(null); await load(); }
     setBusy(false);
   }
   async function patch(id: string, body: object, note?: string) {
@@ -177,9 +180,17 @@ export default function McpManager() {
               <>
                 <div className="mh" style={{ display: "flex", alignItems: "center", gap: 12 }}><span style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", fontSize: 16, background: `rgba(${active.iconRgb},.15)` }}>{active.icon}</span><div style={{ flex: 1 }}><b>Connect {active.title}</b><div className="note" style={{ marginTop: 2 }}>{active.desc}{active.hosted ? " · hosted, no deploy" : " · runs in the NAT runtime"}</div></div><button className="x" onClick={() => { setConnectOpen(false); setActive(null); }}>×</button></div>
                 <div className="mb">
-                  <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 14 }}>{[["transport", active.transport], active.url ? ["url", active.url] : active.command ? ["run", active.command] : null, active.envName ? ["env", active.envName] : null].filter(Boolean).map((x) => { const [k, v] = x as [string, string]; return <span key={k} className="mono" style={{ fontSize: 10.5, background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 6, padding: "3px 9px", color: "var(--faint)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}>{k}: {v}</span>; })}</div>
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 14 }}>{[["transport", active.transport], active.url ? ["url", active.url] : active.command ? ["run", active.id === "database" ? dbCommand(dbWrite) : active.command] : null, active.envName ? ["env", active.envName] : null].filter(Boolean).map((x) => { const [k, v] = x as [string, string]; return <span key={k} className="mono" style={{ fontSize: 10.5, background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 6, padding: "3px 9px", color: "var(--faint)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}>{k}: {v}</span>; })}</div>
                   <label className="fld">{active.keyLabel} <span className="note" style={{ textTransform: "none" }}>· stored encrypted, never shown again</span></label>
                   <input type="password" placeholder={active.keyPlaceholder} value={f.secret} onChange={(e) => { setF({ ...f, secret: e.target.value }); if (testRes) setTestRes(null); }} />
+                  {active.id === "database" && <>
+                    <label className="fld" style={{ marginTop: 14 }}>Access mode</label>
+                    <div className="chips">
+                      <button className={`chip ${!dbWrite ? "on" : ""}`} onClick={() => setDbWrite(false)}>🔒 Read-only</button>
+                      <button className={`chip ${dbWrite ? "on" : ""}`} onClick={() => setDbWrite(true)}>✎ Read-write</button>
+                    </div>
+                    <div className="note" style={{ marginTop: 8, lineHeight: 1.5, color: dbWrite ? "var(--warn)" : "var(--faint)" }}>{dbWrite ? "⚠ The agent can INSERT / UPDATE / DELETE and change your data — use only on a database you're OK with an agent modifying." : "The agent can only SELECT / read — safest for chatting with your data."}</div>
+                  </>}
                   {active.note && <div className="note" style={{ marginTop: 10, lineHeight: 1.5 }}>{active.note}</div>}
                   {active.id === "database" && testRes && <div className="note" style={{ marginTop: 10, color: testRes.ok ? "var(--good)" : "var(--crit)" }}>{testRes.ok ? "✓ " : "✗ "}{testRes.msg}</div>}
                   <div className="row" style={{ marginTop: 16, gap: 10 }}>
