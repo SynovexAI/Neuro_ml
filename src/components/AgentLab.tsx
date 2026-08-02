@@ -35,6 +35,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   db_schema: { icon: "🗄", label: "DB schema" },
   db_query: { icon: "🐘", label: "DB query" },
   github: { icon: "🐙", label: "GitHub" },
+  mcp: { icon: "🔌", label: "MCP server" },
 };
 
 // One-click starter agents — teach where/why agents are used.

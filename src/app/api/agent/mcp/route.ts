@@ -75,9 +75,17 @@ export async function POST(req: Request) {
 
   const b = await req.json().catch(() => ({}));
   const server = String(b.server || "github").trim();
-  const action = String(b.action || "list").trim();      // "list" | "call"
+  const action = String(b.action || "list").trim();      // "servers" | "list" | "call"
   const toolName = String(b.tool || "").trim();
   const argsRaw = b.args;
+
+  // List the hosted MCP servers this user has connected (stdio needs the NAT runtime).
+  if (action === "servers") {
+    const rows = await db.select().from(mcpServers).where(and(eq(mcpServers.userId, user.id), eq(mcpServers.enabled, true)));
+    const hosted = rows.filter((r) => r.transport !== "stdio").map((r) => r.name);
+    if (!hosted.length) return NextResponse.json({ text: "No hosted MCP servers connected. Add one (GitHub, DeepWiki, Context7, Hugging Face, Semgrep, …) on the MCP servers page." });
+    return NextResponse.json({ text: `Connected hosted MCP servers: ${hosted.join(", ")}. Use '<server> list' to see a server's tools.` });
+  }
 
   const srv = await getServer(user.id, server);
   if (!srv) return NextResponse.json({ text: `No MCP server named "${server}" is connected. Connect it on the MCP servers page.` });
