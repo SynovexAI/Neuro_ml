@@ -34,6 +34,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   memory: { icon: "🧠", label: "Memory" },
   db_schema: { icon: "🗄", label: "DB schema" },
   db_query: { icon: "🐘", label: "DB query" },
+  github: { icon: "🐙", label: "GitHub" },
 };
 
 // One-click starter agents — teach where/why agents are used.

@@ -148,6 +148,23 @@ async function nativeTool(tool: string, input: string): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
+// Proxy to a connected HOSTED MCP server (e.g. GitHub). "list" discovers tools;
+// JSON {"tool":"…","args":{…}} calls one. Runs via /api/agent/mcp — free-tier OK.
+async function mcpTool(server: string, input: string): Promise<string> {
+  const s = (input || "").trim();
+  let body: { server: string; action: string; tool?: string; args?: unknown };
+  if (!s || /^list$/i.test(s)) body = { server, action: "list" };
+  else if (s.startsWith("{")) {
+    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; body = { server, action: "call", tool: p.tool, args: p.args }; }
+    catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
+  } else body = { server, action: "call", tool: s };
+  try {
+    const r = await fetch("/api/agent/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) return "Error: " + (j.error || "failed");
+    return j.text || "(no result)";
+  } catch (e) { return "Error: " + (e as Error).message; }
+}
 // Cross-turn memory in the browser (localStorage). Free, no backend.
 function memoryTool(input: string): string {
   if (typeof localStorage === "undefined") return "Memory unavailable here.";
@@ -176,6 +193,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
   { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
   { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
+  { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
