@@ -171,7 +171,7 @@ export default function McpManager() {
         </div>
       </div>
 
-      <div className="note" style={{ marginTop: 12 }}>Tools from <b>enabled</b> servers appear in the Agent Lab palette, tagged MCP. stdio servers run inside the NAT runtime (its image must have <span className="mono">node/npx</span> &amp; <span className="mono">uvx</span> and the packages).</div>
+      <div className="note" style={{ marginTop: 12, lineHeight: 1.6 }}>You can connect &amp; store servers here (keys encrypted) anytime. <b>Live tool execution runs through the NAT agent runtime</b> — a small always-on service that isn&apos;t available on Render&apos;s free tier, so on free these are configured but not yet executable. Add the NAT runtime (a paid instance) to run them; your connected servers work as soon as it&apos;s online.</div>
 
       {connectOpen && (
         <div className="modal-wrap show" onClick={(e) => { if (e.target === e.currentTarget) { setConnectOpen(false); setActive(null); } }}>
