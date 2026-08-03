@@ -9,12 +9,6 @@ type Staged = { name: string; text: string };
 const CONNECTORS = [
   { id: "file", name: "File Upload", desc: "PDF, DOCX, XLSX, CSV, TXT", icon: "📄", ok: true },
   { id: "web", name: "Web page", desc: "Fetch & index a URL", icon: "🌐", ok: true },
-  { id: "confluence", name: "Confluence", desc: "Wiki pages & spaces", icon: "🟦", ok: false },
-  { id: "notion", name: "Notion", desc: "Pages & databases", icon: "⬛", ok: false },
-  { id: "sharepoint", name: "SharePoint", desc: "Microsoft 365 docs", icon: "🟩", ok: false },
-  { id: "gdrive", name: "Google Drive", desc: "Docs, sheets, slides", icon: "🟨", ok: false },
-  { id: "github", name: "GitHub", desc: "Repos, issues, wikis", icon: "🐙", ok: false },
-  { id: "db", name: "Database", desc: "SQL / warehouse table", icon: "🗄", ok: false },
 ];
 
 function fmtWhen(v?: string | null): string {
@@ -112,96 +106,82 @@ export default function KnowledgeBases() {
     setBusy("");
   }
 
-  const badge = (s: string) => s === "ready" ? "badge good" : s === "syncing" ? "badge warn" : s === "error" ? "badge" : "badge";
+  const stColor = (s: string) => s === "ready" ? "var(--good)" : s === "syncing" ? "var(--warn)" : s === "error" ? "var(--crit)" : "var(--faint)";
+  const stPill = (s: string): React.CSSProperties => ({ fontSize: 9.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 8px", borderRadius: 20, color: stColor(s), background: `color-mix(in srgb, ${stColor(s)} 14%, transparent)` });
+  const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 13, background: "var(--surface)", overflow: "hidden" };
+  const docIcon = (name: string): [string, string] => { const k = (name.split(".").pop() || "").toLowerCase(); if (/^https?:/.test(name)) return ["🌐", "34,184,207"]; if (k === "pdf") return ["📕", "240,97,109"]; if (["docx", "doc"].includes(k)) return ["📘", "91,124,255"]; if (["xlsx", "xls", "csv"].includes(k)) return ["📊", "62,207,127"]; return ["📄", "91,124,255"]; };
 
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-        <span className={`badge ${totals.failed ? "warn" : "good"}`}>{totals.failed ? `${totals.failed} failed` : "all synced"}</span>
-        <span className="badge">{kbs.length} sources</span>
-        <span className="badge">{totals.docs} docs</span>
-        <span style={{ flex: 1 }} />
-        <button className="btn" onClick={() => { setConnect(true); setPick(null); }}>+ Connect source</button>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-        <div className="metric"><span className="k">Total sources</span><span className="v">{kbs.length}</span></div>
-        <div className="metric"><span className="k">Active syncs</span><span className="v" style={{ color: totals.syncing ? "#f59e0b" : undefined }}>{totals.syncing}</span></div>
-        <div className="metric"><span className="k">Failed</span><span className="v" style={{ color: totals.failed ? "#e5484d" : undefined }}>{totals.failed}</span></div>
-        <div className="metric"><span className="k">Documents</span><span className="v">{totals.docs.toLocaleString()}</span></div>
-        <div className="metric"><span className="k">Chunks</span><span className="v">{totals.chunks.toLocaleString()}</span></div>
-      </div>
-
-      <input type="text" placeholder="Search sources…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ marginBottom: 14 }} />
-
-      <div className="card" style={{ marginBottom: sel ? 18 : 0 }}>
-        <div className="card-h"><span className="t">{shown.length} source{shown.length === 1 ? "" : "s"}</span></div>
-        <div className="card-b" style={{ padding: 0, overflowX: "auto" }}>
-          {kbs.length === 0 ? <div className="note" style={{ padding: 20, textAlign: "center" }}>No sources yet — click <b>+ Connect source</b> to add one.</div> : (
-            <table className="tbl">
-              <thead><tr><th style={{ paddingLeft: 16 }}>Source</th><th style={{ textAlign: "right" }}>Documents</th><th style={{ textAlign: "right" }}>Chunks</th><th>Status</th><th>Last sync</th><th></th></tr></thead>
-              <tbody>
-                {shown.map((k) => (
-                  <tr key={k.id} onClick={() => selectKb(k.id, k.docCount > 0)} style={{ cursor: "pointer", background: selId === k.id ? "var(--panel)" : undefined }}>
-                    <td style={{ paddingLeft: 16 }}><b style={{ fontSize: 13 }}>📄 {k.name}</b><div className="note">{k.embModel === "tfidf" ? "TF-IDF vectors" : k.embModel ? `embeddings · ${k.embModel}` : "not synced"}</div></td>
-                    <td className="mono" style={{ textAlign: "right" }}>{k.docCount}</td>
-                    <td className="mono" style={{ textAlign: "right", color: "var(--muted)" }}>{k.chunkCount}</td>
-                    <td><span className={badge(k.status)}>{k.status}</span></td>
-                    <td className="note" style={{ whiteSpace: "nowrap" }}>{fmtWhen(k.updatedAt)}</td>
-                    <td style={{ textAlign: "right", whiteSpace: "nowrap", paddingRight: 12 }}>
-                      <button className="btn ghost sm" title="Open" onClick={(e) => { e.stopPropagation(); selectKb(k.id, k.docCount > 0); }}>Open</button>
-                      <button className="btn ghost sm danger" title="Delete" style={{ marginLeft: 6 }} onClick={(e) => { e.stopPropagation(); removeKb(k); }}>🗑</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      <div className="row" style={{ alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div className="sec-title" style={{ margin: 0 }}>Your knowledge bases · {kbs.length}{totals.docs ? ` · ${totals.docs} docs` : ""}</div>
+        <div className="row" style={{ gap: 10, alignItems: "center" }}>
+          <input type="text" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 180 }} />
+          <button className="btn" onClick={() => { setConnect(true); setPick(null); }}>+ Connect source</button>
         </div>
       </div>
 
-      {sel && (
-        <div className="card">
-          <div className="card-h"><span className="t">{sel.name}</span><span className={badge(sel.status)} style={{ marginLeft: 8 }}>{sel.status}</span><span style={{ flex: 1 }} /><button className="btn ghost sm" onClick={() => setSelId(null)}>Close</button><button className="btn ghost sm danger" style={{ marginLeft: 6 }} onClick={() => removeKb(sel)}>Delete</button></div>
-          <div className="card-b">
-            <div className="seg" style={{ maxWidth: 300, marginBottom: 14 }}>
-              <button className={tab === "add" ? "on" : ""} onClick={() => setTab("add")}>Add documents</button>
-              <button className={tab === "docs" ? "on" : ""} onClick={() => setTab("docs")}>Documents{sel.docCount ? ` · ${sel.docCount}` : ""}</button>
+      {kbs.length === 0 ? <div style={{ ...pnl, padding: 26, textAlign: "center" }} className="note">No knowledge bases yet — click <b>+ Connect source</b> to create one.</div> : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 14, marginBottom: sel ? 20 : 0 }}>
+          {shown.map((k) => (
+            <div key={k.id} onClick={() => selectKb(k.id, k.docCount > 0)} style={{ ...pnl, padding: 15, cursor: "pointer", borderColor: selId === k.id ? "var(--accent)" : "var(--border)", boxShadow: selId === k.id ? "0 0 0 1px var(--accent)" : undefined }}>
+              <div className="row" style={{ gap: 11, alignItems: "center" }}>
+                <span style={{ width: 36, height: 36, borderRadius: 10, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: "var(--accent-weak)", color: "var(--accent-strong)" }}>🗄</span>
+                <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k.name}</div></div>
+                <span style={stPill(k.status)}>{k.status}</span>
+              </div>
+              <div className="row" style={{ gap: 16, marginTop: 12, fontFamily: "var(--mono)", fontSize: 11, color: "var(--muted)" }}>
+                <span><b style={{ color: "var(--text)" }}>{k.docCount}</b> docs</span>
+                <span><b style={{ color: "var(--text)" }}>{k.chunkCount}</b> chunks</span>
+                <span>{k.embModel === "tfidf" ? "TF-IDF" : k.embModel ? "embeddings" : "not built"}</span>
+              </div>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+                <span className="note">{fmtWhen(k.updatedAt)}</span>
+                <button className="btn ghost sm danger" onClick={(e) => { e.stopPropagation(); removeKb(k); }}>Delete</button>
+              </div>
             </div>
+          ))}
+        </div>
+      )}
+
+      {sel && (
+        <div style={pnl}>
+          <div className="row" style={{ alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--border)", background: "var(--panel)" }}>
+            <span style={{ width: 28, height: 28, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 14, background: "var(--accent-weak)", color: "var(--accent-strong)" }}>🗄</span>
+            <b style={{ fontSize: 14 }}>{sel.name}</b><span style={stPill(sel.status)}>{sel.status}</span>
+            <span style={{ flex: 1 }} /><button className="btn ghost sm" onClick={() => setSelId(null)}>Close</button><button className="btn ghost sm danger" onClick={() => removeKb(sel)}>Delete</button>
+          </div>
+          <div style={{ display: "flex", gap: 18, padding: "0 16px", borderBottom: "1px solid var(--border)", background: "var(--panel)" }}>
+            {(["add", "docs"] as const).map((tb) => <button key={tb} onClick={() => setTab(tb)} style={{ padding: "11px 0", background: "none", border: "none", borderBottom: `2px solid ${tab === tb ? "var(--accent)" : "transparent"}`, color: tab === tb ? "var(--accent-strong)" : "var(--muted)", fontSize: 12.5, fontWeight: tab === tb ? 600 : 500, cursor: "pointer", fontFamily: "inherit" }}>{tb === "add" ? "Add documents" : `Documents${sel.docCount ? ` · ${sel.docCount}` : ""}`}</button>)}
+          </div>
+          <div style={{ padding: 16 }}>
             {tab === "add" ? (
               <>
-                <div className="kb-drop">
-                  <div style={{ fontSize: 26, opacity: 0.45, lineHeight: 1 }}>⬆</div>
-                  <div style={{ fontWeight: 600, fontSize: 13.5, marginTop: 6 }}>Add documents</div>
-                  <div className="note" style={{ marginTop: 2 }}>PDF · DOCX · XLSX · CSV · TXT — or a web page</div>
-                  <div className="row" style={{ gap: 8, marginTop: 12, justifyContent: "center" }}>
-                    <button className="btn sm" onClick={() => fileRef.current?.click()} disabled={busy === "extract"}>{busy === "extract" ? "Reading…" : "Choose files"}</button>
-                    <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.doc,.xlsx,.xls" onChange={(e) => addFiles(e.target.files)} style={{ display: "none" }} />
-                  </div>
-                  <div className="row" style={{ gap: 8, marginTop: 10, maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
-                    <input type="text" placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} />
-                    <button className="btn ghost sm" onClick={addUrl} disabled={busy === "url"}>{busy === "url" ? "Fetching…" : "Add URL"}</button>
-                  </div>
+                <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 22, textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                  <div style={{ fontSize: 24, marginBottom: 5 }}>{busy === "extract" ? <span className="busy-dot" /> : "⬆"}</div>
+                  <b style={{ fontSize: 13.5 }}>{busy === "extract" ? "Reading…" : "Drop files here or click to upload"}</b>
+                  <div className="note" style={{ marginTop: 5 }}>PDF · DOCX · XLSX · CSV · TXT — multiple at once, they accumulate in this KB</div>
+                  <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.doc,.xlsx,.xls" onChange={(e) => addFiles(e.target.files)} style={{ display: "none" }} />
                 </div>
+                <div className="row" style={{ gap: 8, marginTop: 12 }}><input type="text" placeholder="https://… (web page)" value={url} onChange={(e) => setUrl(e.target.value)} onClick={(e) => e.stopPropagation()} /><button className="btn ghost sm" onClick={addUrl} disabled={busy === "url"} style={{ whiteSpace: "nowrap" }}>{busy === "url" ? "Fetching…" : "Add URL"}</button></div>
                 {staged.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <label className="fld">Staged for sync ({staged.length})</label>
-                    {staged.map((d, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "5px 0", borderBottom: "1px solid var(--border)" }}>
-                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+                  <div style={{ marginTop: 14 }}>
+                    <label className="fld">Staged · {staged.length} ready to add</label>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{staged.map((d, i) => { const [ic, rgb] = docIcon(d.name); return (
+                      <div key={i} className="row" style={{ alignItems: "center", gap: 10, border: "1px solid var(--border)", borderRadius: 9, padding: "9px 12px", background: "var(--panel)" }}>
+                        <span style={{ width: 26, height: 26, borderRadius: 7, display: "grid", placeItems: "center", fontSize: 13, background: `rgba(${rgb},.14)`, flex: "0 0 auto" }}>{ic}</span>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
                         <span className="note">{Math.round(d.text.length / 1000)}k chars</span>
                         <button className="btn ghost sm" onClick={() => setStaged((s) => s.filter((_, j) => j !== i))}>×</button>
-                      </div>
-                    ))}
-                    <div className="row" style={{ gap: 14, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+                      </div>); })}</div>
+                    <div className="row" style={{ gap: 14, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
                       <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Chunk size (words)</span><b>{chunkSize}</b></div><input type="range" min={20} max={200} step={10} value={chunkSize} onChange={(e) => { const v = +e.target.value; setChunkSize(v); if (chunkOverlap > v - 1) setChunkOverlap(Math.max(0, v - 1)); }} /></div>
                       <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Overlap (words)</span><b>{chunkOverlap}</b></div><input type="range" min={0} max={Math.max(0, chunkSize - 1)} step={2} value={chunkOverlap} onChange={(e) => setChunkOverlap(+e.target.value)} /></div>
-                      <span className="note">smaller chunks = more precise retrieval; larger = more context per chunk</span>
                     </div>
-                    <button className="btn block" style={{ marginTop: 12 }} onClick={sync} disabled={busy === "sync"}>{busy === "sync" ? "Syncing → embedding + storing vectors…" : `⟳ Sync ${staged.length} doc${staged.length === 1 ? "" : "s"} to vector store`}</button>
+                    <button className="btn block" style={{ marginTop: 14 }} onClick={sync} disabled={busy === "sync"}>{busy === "sync" ? "Syncing → embedding + storing vectors…" : `⟳ Add ${staged.length} doc${staged.length === 1 ? "" : "s"} to this knowledge base`}</button>
                   </div>
                 )}
-                {sel.docCount > 0 && staged.length === 0 && <div className="note" style={{ marginTop: 12 }}>Re-syncing <b>replaces</b> the current contents ({sel.docCount} docs). Add files/URLs above, then sync.</div>}
+                {sel.docCount > 0 && staged.length === 0 && <div className="note" style={{ marginTop: 12 }}>This KB already holds <b>{sel.docCount} doc{sel.docCount === 1 ? "" : "s"}</b>. New files/URLs you sync are <b>added</b> to it — nothing is replaced.</div>}
                 {msg && <div className={msg.startsWith("Synced") ? "note" : "err"} style={{ marginTop: 10 }}>{msg}</div>}
               </>
             ) : (
@@ -209,18 +189,15 @@ export default function KnowledgeBases() {
                 {sel.status === "syncing" ? <div className="note">Syncing…</div>
                   : syncedDocs.length === 0 ? <div className="note">Nothing synced yet — switch to <b>Add documents</b> to ingest files or URLs.</div>
                   : (<>
-                      <div className="stat-row" style={{ marginBottom: 12 }}>
-                        <div className="stat"><b>{sel.docCount}</b>documents</div>
-                        <div className="stat"><b>{sel.chunkCount}</b>chunks</div>
-                        <div className="stat"><b>{sel.embModel === "tfidf" ? "TF-IDF" : "embeddings"}</b>vector store</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 14 }}>
+                        {([[String(sel.docCount), "documents"], [String(sel.chunkCount), "chunks"], [sel.embModel === "tfidf" ? "TF-IDF" : "embeddings", "vector store"]] as [string, string][]).map(([v, kk]) => <div key={kk} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 11, padding: "11px 14px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600 }}>{v}</div><div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 2 }}>{kk}</div></div>)}
                       </div>
-                      {syncedDocs.map((d, i) => (
-                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
-                          <span style={{ fontSize: 15, opacity: 0.5 }}>📄</span>
-                          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.docName || "document"}</span>
+                      {syncedDocs.map((d, i) => { const [ic, rgb] = docIcon(d.docName || ""); return (
+                        <div key={i} className="row" style={{ alignItems: "center", gap: 10, fontSize: 12.5, padding: "9px 0", borderBottom: "1px solid var(--border)" }}>
+                          <span style={{ width: 26, height: 26, borderRadius: 7, display: "grid", placeItems: "center", fontSize: 13, background: `rgba(${rgb},.14)`, flex: "0 0 auto" }}>{ic}</span>
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.docName || "document"}</span>
                           <span className="note">{d.chunks} chunks</span>
-                        </div>
-                      ))}
+                        </div>); })}
                     </>)}
               </>
             )}
@@ -235,7 +212,7 @@ export default function KnowledgeBases() {
             <div className="mb">
               {!pick ? (
                 <>
-                  <div className="note" style={{ marginBottom: 10 }}>Pick a source. File upload and web pages work today — the rest are on the roadmap.</div>
+                  <div className="note" style={{ marginBottom: 10 }}>Pick a source, then upload files or add a web page — documents accumulate in the knowledge base.</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
                     {CONNECTORS.map((c) => (
                       <button key={c.id} type="button" disabled={!c.ok} onClick={() => c.ok && setPick(c.id)}

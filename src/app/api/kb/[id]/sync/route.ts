@@ -35,20 +35,39 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   await db.update(knowledgeBases).set({ status: "syncing" }).where(eq(knowledgeBases.id, id));
   try {
-    const chunks = chunkDocs(docs, Number(b.chunkSize) || 60, Number(b.chunkOverlap) ?? 12).slice(0, MAX_CHUNKS);
-    const { embModel, embMeta, vectors } = await embedChunks(chunks.map((c) => c.text), prov);
+    const newChunks = chunkDocs(docs, Number(b.chunkSize) || 60, Number(b.chunkOverlap) ?? 12);
+    const emb = await embedChunks(newChunks.map((c) => c.text), prov);
 
-    await db.delete(kbChunks).where(eq(kbChunks.kbId, id));
-    for (let i = 0; i < chunks.length; i += 200) {
-      const slice = chunks.slice(i, i + 200);
+    // Documents ACCUMULATE in a KB: append the new docs rather than replacing.
+    // Neural embeddings are per-chunk independent → just append. TF-IDF weights depend
+    // on the whole corpus, so recompute over existing + new and rewrite all vectors.
+    let embModel = emb.embModel, embMeta = emb.embMeta;
+    let rows: { docName: string | null; text: string; vec: number[] | null }[];
+    let replaceAll = false, baseIdx = 0;
+
+    if (emb.embModel === "tfidf") {
+      const existing = await db.select({ docName: kbChunks.docName, text: kbChunks.text }).from(kbChunks).where(eq(kbChunks.kbId, id)).orderBy(kbChunks.idx);
+      const all = [...existing.map((e) => ({ docName: e.docName, text: e.text ?? "" })), ...newChunks.map((c) => ({ docName: c.docName as string | null, text: c.text }))].slice(0, MAX_CHUNKS);
+      const re = await embedChunks(all.map((c) => c.text), prov);
+      embModel = re.embModel; embMeta = re.embMeta; replaceAll = true;
+      rows = all.map((c, k) => ({ docName: c.docName, text: c.text, vec: (re.vectors[k] as number[] | undefined) ?? null }));
+    } else {
+      baseIdx = kb.chunkCount || 0;
+      const nc = newChunks.slice(0, Math.max(0, MAX_CHUNKS - baseIdx));
+      rows = nc.map((c, k) => ({ docName: c.docName as string | null, text: c.text, vec: (emb.vectors[k] as number[] | undefined) ?? null }));
+    }
+
+    if (replaceAll) await db.delete(kbChunks).where(eq(kbChunks.kbId, id));
+    for (let i = 0; i < rows.length; i += 200) {
+      const slice = rows.slice(i, i + 200);
       await db.insert(kbChunks).values(slice.map((c, j) => ({
-        id: uid(), kbId: id, docName: c.docName, idx: i + j, text: c.text, embedding: vectors[i + j] ?? null,
+        id: uid(), kbId: id, docName: c.docName, idx: (replaceAll ? 0 : baseIdx) + i + j, text: c.text, embedding: c.vec,
       })));
     }
-    await db.update(knowledgeBases).set({
-      status: "ready", docCount: docs.length, chunkCount: chunks.length, embModel, embMeta,
-    }).where(eq(knowledgeBases.id, id));
-    return NextResponse.json({ ok: true, chunkCount: chunks.length, embModel });
+    const docCount = (kb.docCount || 0) + docs.length;
+    const chunkCount = replaceAll ? rows.length : (kb.chunkCount || 0) + rows.length;
+    await db.update(knowledgeBases).set({ status: "ready", docCount, chunkCount, embModel, embMeta }).where(eq(knowledgeBases.id, id));
+    return NextResponse.json({ ok: true, chunkCount, added: rows.length, embModel });
   } catch (e) {
     captureError(e, { where: "kb.sync", kbId: id });
     await db.update(knowledgeBases).set({ status: "error" }).where(eq(knowledgeBases.id, id)).catch(() => {});

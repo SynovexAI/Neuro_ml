@@ -12,7 +12,7 @@ export default async function McpPage() {
     <Shell user={user} title="MCP servers">
       <div className="eyebrow">Studio</div>
       <h2 className="page-h">MCP servers</h2>
-      <p className="page-sub">Connect your own Model Context Protocol servers with your own keys — their tools become available to your agents. Secrets are encrypted and never shown again.</p>
+      <p className="page-sub">Give your agents tools. Free web, research &amp; memory servers connect in one click; connect your own database to chat with your data. Keys are encrypted and never shown again.</p>
       <McpManager />
     </Shell>
   );

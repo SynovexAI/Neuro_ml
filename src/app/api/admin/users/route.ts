@@ -12,7 +12,7 @@ export async function GET() {
     id: users.id, email: users.email, name: users.name,
     role: users.role, status: users.status,
     monthlyTokenLimit: users.monthlyTokenLimit, createdAt: users.createdAt,
-  }).from(users);
+  }).from(users).orderBy(sql`${users.createdAt} DESC`).limit(1000);
 
   // Current-month token usage per user (UTC month).
   const now = new Date();

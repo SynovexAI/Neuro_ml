@@ -66,10 +66,20 @@ export async function retrieve(
   if (!chunks.length) return [];
   let scored: { text: string; score: number }[];
   if (kb.embModel && kb.embModel !== "tfidf") {
-    let qv: number[];
-    try { qv = (await embedTexts(provider.baseUrl, provider.apiKey, kb.embModel, [query]))[0]; }
-    catch { return []; }
-    scored = chunks.map((c) => ({ text: c.text || "", score: denseCos(qv, (c.embedding as number[]) || []) }));
+    let qv: number[] | null = null;
+    try { qv = (await embedTexts(provider.baseUrl, provider.apiKey, kb.embModel, [query]))[0] ?? null; }
+    catch { qv = null; }
+    if (qv) {
+      scored = chunks.map((c) => ({ text: c.text || "", score: denseCos(qv!, (c.embedding as number[]) || []) }));
+    } else {
+      // Provider/embedding unavailable (e.g. the active provider changed and can't
+      // produce this KB's embedding model). Fall back to lexical (TF-IDF over the
+      // stored chunk text) so the KB still returns relevant context instead of nothing.
+      const texts = chunks.map((c) => c.text || "");
+      const lidx = buildIndex(texts);
+      const lqv = queryVector(lidx, query);
+      scored = chunks.map((c, i) => ({ text: c.text || "", score: cosine(lqv, lidx.vectors[i]) }));
+    }
   } else {
     const meta = (kb.embMeta as { df: Record<string, number>; N: number }) || { df: {}, N: 1 };
     const idx = { df: meta.df, N: meta.N, avgdl: 1, docs: [], vectors: [] } as unknown as RagIndex;

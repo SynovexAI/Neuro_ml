@@ -107,13 +107,21 @@ export async function runAgent(inp: RunInput): Promise<RunResult> {
     const j = await res.json().catch(() => null) as { answer?: string; latency_ms?: number; tool_names?: string[]; unsupported_tools?: string[]; profiler?: Record<string, unknown>; context_used?: boolean; detail?: string } | null;
     if (!res.ok) return { ok: false, status: 502, error: j?.detail || `NAT service error ${res.status}` };
 
-    const pt = estimateTokens(task + (inp.systemPrompt || "")), ct = estimateTokens(j?.answer || "");
-    void recordUsage({ userId: inp.userId, lab: "agent-nat", model, promptTokens: pt, completionTokens: ct, estimated: true });
+    // Prefer real per-step token usage from NAT's profiler (covers every LLM call
+    // in the loop + tool round-trips), not just task+answer. Fall back to an estimate.
+    const steps = (j?.profiler as { steps?: { tokens?: number }[] } | undefined)?.steps || [];
+    const profTokens = steps.reduce((a, s) => a + (Number(s?.tokens) || 0), 0);
+    const estAnswer = estimateTokens(j?.answer || "");
+    const measured = profTokens > 0;
+    const ct = measured ? Math.min(estAnswer, profTokens) : estAnswer;
+    const pt = measured ? Math.max(0, profTokens - ct) : estimateTokens(task + (inp.systemPrompt || ""));
+    const totalTokens = pt + ct;
+    void recordUsage({ userId: inp.userId, lab: "agent-nat", model, promptTokens: pt, completionTokens: ct, estimated: !measured });
     db.insert(agentRuns).values({
       id: uid(), userId: inp.userId, agentName: inp.agentName || "NAT agent", agentType: "nat", runtime: "nat",
-      provider: prov.provider, model, iterations: 0,
+      provider: prov.provider, model, iterations: steps.length,
       toolCalls: (j?.tool_names || []).map((t) => ({ tool: t, count: 1 })), toolCallCount: (j?.tool_names || []).length,
-      promptTokens: pt, completionTokens: ct, totalTokens: pt + ct,
+      promptTokens: pt, completionTokens: ct, totalTokens,
       latencyMs: Number(j?.latency_ms || 0), outcome: "success",
     }).catch((e) => captureError(e, { where: "agentRunner.log" }));
 
