@@ -2,53 +2,124 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
+import Toaster from "./Toaster";
+import ThemeToggle from "./ThemeToggle";
 
 type Role = "admin" | "student";
 export type ShellUser = { name?: string | null; email: string; role: Role };
 
-const LABS = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/labs/prompting", label: "Prompting Lab" },
-  { href: "/labs/rag", label: "RAG Lab" },
-  { href: "/labs/agent", label: "Agent Lab" },
-  { href: "/labs/ml", label: "ML Lab" },
-  { href: "/labs/dl", label: "DL Lab" },
-  { href: "/labs/etl", label: "ETL Lab" },
+type Zone = { id: string; label: string; desc: string; icon: string; home: string; adminOnly?: boolean; items: { href: string; label: string }[] };
+
+const ZONES: Zone[] = [
+  {
+    id: "studio", label: "Studio", desc: "Dashboard, build, knowledge", icon: "◈", home: "/dashboard",
+    items: [
+      { href: "/dashboard", label: "Dashboard" },
+      { href: "/compose", label: "Compose" },
+      { href: "/kb", label: "Knowledge bases" },
+      { href: "/studio/mcp", label: "MCP servers" },
+      { href: "/admin/providers", label: "Providers & models" },
+      { href: "/projects", label: "My Projects" },
+      { href: "/templates", label: "Templates" },
+    ],
+  },
+  {
+    id: "labs", label: "Labs", desc: "Prompting, RAG, agents, ML", icon: "⚗", home: "/labs/prompting",
+    items: [
+      { href: "/labs/prompting", label: "Prompting Lab" },
+      { href: "/labs/rag", label: "RAG Lab" },
+      { href: "/labs/agent", label: "Agent Lab" },
+      { href: "/labs/ml", label: "ML Lab" },
+      { href: "/labs/dl", label: "DL Lab" },
+      { href: "/labs/etl", label: "ETL Lab" },
+    ],
+  },
+  {
+    id: "workroom", label: "Workroom", desc: "Use & deploy your agents", icon: "◐", home: "/workroom",
+    items: [
+      { href: "/workroom", label: "Published agents" },
+      { href: "/workroom/channels", label: "Channels & deploy" },
+    ],
+  },
+  {
+    id: "control", label: "Control Room", desc: "Users, usage, monitoring", icon: "▤", home: "/admin", adminOnly: true,
+    items: [
+      { href: "/admin", label: "Overview" },
+      { href: "/admin/users", label: "Users" },
+      { href: "/admin/usage", label: "Usage & Monitoring" },
+      { href: "/admin/agents", label: "Agent analytics" },
+    ],
+  },
 ];
-const STUDIO = [
-  { href: "/compose", label: "Compose" },
-  { href: "/templates", label: "Templates" },
-];
+
+function zoneOf(path: string): string {
+  if (path === "/studio/mcp" || path === "/admin/providers") return "studio"; // build tools live in Studio
+  if (path.startsWith("/workroom")) return "workroom";
+  if (path.startsWith("/labs")) return "labs";
+  if (path.startsWith("/admin")) return "control";
+  return "studio";
+}
 
 export default function Shell({ user, title, children }: { user: ShellUser; title: string; children: React.ReactNode }) {
   const path = usePathname();
-  const on = (href: string) => path === href || (href !== "/dashboard" && path.startsWith(href));
+  const on = (href: string) => path === href || (href !== "/dashboard" && href !== "/admin" && href !== "/workroom" && path.startsWith(href));
   const initial = (user.name || user.email).charAt(0).toUpperCase();
+
+  const [focus, setFocus] = useState(false);
+  const [menu, setMenu] = useState(false);
+  useEffect(() => { setFocus(localStorage.getItem("awb_focus") === "1"); }, []);
+  const toggleFocus = () => setFocus((f) => { const n = !f; localStorage.setItem("awb_focus", n ? "1" : "0"); return n; });
+
+  const zones = ZONES.filter((z) => !z.adminOnly || user.role === "admin");
+  const zone = ZONES.find((z) => z.id === zoneOf(path)) || ZONES[0];
+
   return (
-    <div className="app">
+    <div className={`app${focus ? " focus" : ""}`}>
       <aside className="side">
         <div className="brand"><div className="logo">◆</div><div><b>AI Workbench</b><small>build · not read</small></div></div>
-        <div className="nav-label">Labs</div>
-        <nav className="nav">{LABS.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
-        <div className="nav-label">Studio</div>
-        <nav className="nav">{STUDIO.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
-        {user.role === "admin" && (<>
-          <div className="nav-label">Admin</div>
-          <nav className="nav"><Link href="/admin" className={on("/admin") ? "on" : ""}>Admin panel</Link></nav>
-        </>)}
-        <div className="foot">{user.role === "admin" ? "admin" : "student"} · {user.email}</div>
+
+        <div className="zone-switch">
+          <button className="zone-btn" onClick={() => setMenu((m) => !m)} aria-expanded={menu}>
+            <span className="zi">{zone.icon}</span>
+            <span className="zl"><b>{zone.label}</b><small>{zone.desc}</small></span>
+            <span className="chev">{menu ? "▲" : "▼"}</span>
+          </button>
+          {menu && (<>
+            <div className="zone-backdrop" onClick={() => setMenu(false)} />
+            <div className="zone-menu">
+              {zones.map((z) => (
+                <Link key={z.id} href={z.home} className={`zone-item${z.id === zone.id ? " on" : ""}`} onClick={() => setMenu(false)}>
+                  <span className="zi">{z.icon}</span>
+                  <span className="zl"><b>{z.label}</b><small>{z.desc}</small></span>
+                  {z.id === zone.id && <span className="ck">✓</span>}
+                </Link>
+              ))}
+            </div>
+          </>)}
+        </div>
+
+        <nav className="nav">{zone.items.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
+
+        <div className="side-account">
+          <div className="avatar">{initial}</div>
+          <div className="acct-info"><b>{user.name || user.email.split("@")[0]}</b><small>{user.role}</small></div>
+          <form action={logoutAction}><button className="iconbtn" type="submit" title="Sign out" aria-label="Sign out">⎋</button></form>
+        </div>
       </aside>
+
       <div className="main">
         <header className="top">
+          <button className="iconbtn" onClick={toggleFocus} title={focus ? "Show sidebar" : "Focus mode — full-screen view"} aria-label="Toggle focus mode">{focus ? "☰" : "⛶"}</button>
           <h1>{title}</h1>
           <div className="spacer" />
-          <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{user.role}</span>
-          <form action={logoutAction}><button className="btn ghost sm" type="submit">Sign out</button></form>
-          <div className="avatar">{initial}</div>
+          <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
+          <ThemeToggle />
         </header>
         <div className="work">{children}</div>
       </div>
+      <Toaster />
     </div>
   );
 }

@@ -12,6 +12,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const patch: Record<string, unknown> = {};
   if (b.status && ["pending", "active", "suspended"].includes(b.status)) patch.status = b.status;
   if (b.role && ["admin", "student"].includes(b.role)) patch.role = b.role;
+  // Per-user monthly token quota. null / "" resets to the platform default.
+  if (b.monthlyTokenLimit !== undefined)
+    patch.monthlyTokenLimit = (b.monthlyTokenLimit === null || b.monthlyTokenLimit === "") ? null : Math.max(0, Math.floor(Number(b.monthlyTokenLimit)) || 0);
   // Don't let an admin lock themselves out.
   if (id === me.id && (patch.role === "student" || patch.status === "suspended"))
     return NextResponse.json({ error: "You can't demote or suspend your own account." }, { status: 400 });
