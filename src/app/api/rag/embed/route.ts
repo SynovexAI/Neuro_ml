@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { getActiveProvider } from "@/lib/providers";
+import { getActiveProvider, getProviderById } from "@/lib/providers";
 import { rateLimitDb } from "@/lib/ratelimit";
 import { embedTexts, pickEmbModel } from "@/lib/kb";
 import { captureError } from "@/lib/monitor";
@@ -22,11 +22,14 @@ export async function POST(req: Request) {
   const texts: string[] = Array.isArray(b.texts) ? b.texts.filter((t: unknown) => typeof t === "string").slice(0, MAX_TEXTS).map((t: string) => t.slice(0, 8000)) : [];
   if (!texts.length) return NextResponse.json({ error: "No texts to embed." }, { status: 400 });
 
-  const prov = await getActiveProvider();
-  if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider configured — an admin must add one under Admin → Providers for neural embeddings." }, { status: 400 });
+  // Honor a provider chosen in the UI; otherwise use the first active provider.
+  const providerId = typeof b.providerId === "string" ? b.providerId : "";
+  const reqModel = typeof b.model === "string" && b.model.trim() ? b.model.trim() : "";
+  const prov = providerId ? await getProviderById(providerId) : await getActiveProvider();
+  if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider configured — add one under Admin → Providers for neural embeddings." }, { status: 400 });
 
   try {
-    const model = pickEmbModel(prov.baseUrl);
+    const model = reqModel || pickEmbModel(prov.baseUrl);
     const vectors = await embedTexts(prov.baseUrl, prov.apiKey, model, texts);
     return NextResponse.json({ ok: true, model, dim: vectors[0]?.length ?? 0, vectors });
   } catch (e) {
