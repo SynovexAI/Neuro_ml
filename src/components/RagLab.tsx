@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { chunkText, buildIndex, retrieve, retrieveDense, denseCos, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, type RagIndex, type Strategy, type Vec } from "@/lib/ragUtils";
+import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric } from "@/lib/ragUtils";
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
@@ -14,6 +14,16 @@ type Backend = "vector" | "kg" | "hybrid";
 const SAMPLE = `Returns policy. Damaged items may be returned within 30 days of delivery for a full refund, provided the original packaging is included. Refunds are issued to the original payment method within 5 business days of the returned item being received. To start a return, sign in and open the order, then select the item and a reason for return. Store hours are 9am to 6pm on weekdays, closed on public holidays. Shipping is free on orders over $50, otherwise a flat $6 fee applies. International orders may take 10 to 15 business days to arrive. Gift cards are non-refundable. Warranty claims for electronics are handled by the manufacturer for the first 12 months.`;
 
 const rid = () => Math.random().toString(36).slice(2, 10);
+
+// Suggested embedding models per provider family (typeable — these are just hints).
+// Gemini + Ollama are the free-friendly picks; Groq/Cerebras don't serve /embeddings.
+const EMB_SUGGEST: Record<string, string[]> = {
+  gemini: ["text-embedding-004", "gemini-embedding-001"],
+  ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
+  openai: ["text-embedding-3-small", "text-embedding-3-large"],
+  custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
+};
+const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
 
 function computeChunks(docs: Doc[], size: number, overlap: number): Chunk[] {
   const out: Chunk[] = [];
@@ -89,9 +99,11 @@ export default function RagLab() {
   const [kgPlayKey, setKgPlayKey] = useState(0);
 
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
+  const [metric, setMetric] = useState<Metric>("cosine");
   const [topK, setTopK] = useState(3);
   // neural embeddings (real, via provider) + re-ranking + retrieval metrics
   const [embedMode, setEmbedMode] = useState<"tfidf" | "neural">("tfidf");
+  const [embModel, setEmbModel] = useState("");
   const [denseVecs, setDenseVecs] = useState<number[][] | null>(null);
   const [embedInfo, setEmbedInfo] = useState<{ model: string; dim: number } | null>(null);
   const [qVec, setQVec] = useState<number[] | null>(null);
@@ -134,6 +146,7 @@ export default function RagLab() {
       if (c.size != null) setSize(c.size);
       if (c.overlap != null) setOverlap(c.overlap);
       if (c.strategy) setStrategy(c.strategy);
+      if (c.metric) setMetric(c.metric);
       if (c.topK != null) setTopK(c.topK);
       if (c.question) setQuestion(c.question);
     }).catch(() => {});
@@ -160,6 +173,17 @@ export default function RagLab() {
   const canQuery = backend === "vector" ? !!index : backend === "kg" ? !!graph : (!!index && !!graph);
   const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
   const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+  // Little pill + the "which vector / which similarity" badge pair (so it's obvious what's active).
+  const pill = (color: string, txt: React.ReactNode) => <span style={{ fontSize: 9.5, fontWeight: 600, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 8px", borderRadius: 20, background: `color-mix(in srgb, ${color} 15%, transparent)`, color, whiteSpace: "nowrap" }}>{txt}</span>;
+  // Embedding-model options: the provider's REAL fetched models (embedding-named first),
+  // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
+  const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
+  const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
+  const pickDefaultEmb = (id: string) => models.find((m) => /embed/i.test(m)) || embSuggestFor(provType(id))[0];
+  const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+    {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
+    {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
+  </div>;
   const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
@@ -330,7 +354,7 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, topK, question };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question };
     try {
       const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
@@ -340,7 +364,7 @@ export default function RagLab() {
   }
   // ── neural embeddings (real, via the provider's /embeddings endpoint) ──
   async function embedViaApi(texts: string[]): Promise<number[][]> {
-    const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts }) });
+    const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts, ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
     const j = await res.json();
     if (!res.ok) throw new Error(j.error || "embed failed");
     return j.vectors as number[][];
@@ -348,10 +372,10 @@ export default function RagLab() {
   async function runNeuralEmbed() {
     if (!chunks.length) return; setEmbedding(true); setMsg("");
     try {
-      const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text) }) });
+      const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
-      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]);
-    } catch (e) { setMsg((e as Error).message); setEmbedMode("tfidf"); setDenseVecs(null); }
+      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]); setMsg("");
+    } catch (e) { setMsg("Neural embedding failed: " + (e as Error).message + " — check the provider/model. Vector search stays on TF-IDF until this succeeds."); setDenseVecs(null); }
     setEmbedding(false);
   }
   // ── knowledge-graph construction ──
@@ -390,8 +414,8 @@ export default function RagLab() {
   }
   // Full ranking of every chunk for a strategy (dense when neural, else TF-IDF/BM25).
   function fullRank(strat: Strategy, qv: number[] | null): { i: number; score: number }[] {
-    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length);
-    return retrieve(index!, question, strat, chunks.length);
+    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length, metric);
+    return retrieve(index!, question, strat, chunks.length, metric);
   }
   // Apply MMR re-ranking (diversity) to a ranked candidate list, returning top-k indices.
   function applyRerank(ranked: { i: number; score: number }[], k: number): number[] {
@@ -399,7 +423,7 @@ export default function RagLab() {
     const cand = ranked.slice(0, Math.min(ranked.length, Math.max(k * 3, k))).map((h) => h.i);
     const relMap = new Map(ranked.map((h) => [h.i, h.score]));
     const rel = (i: number) => relMap.get(i) ?? 0;
-    const sim = (embedMode === "neural" && denseVecs) ? (i: number, j: number) => denseCos(denseVecs[i], denseVecs[j]) : (i: number, j: number) => cosine(index!.vectors[i], index!.vectors[j]);
+    const sim = (embedMode === "neural" && denseVecs) ? (i: number, j: number) => simDense(denseVecs[i], denseVecs[j], metric) : (i: number, j: number) => simSparse(index!.vectors[i], index!.vectors[j], metric);
     return mmrRerank(cand, rel, sim, mmrLambda, k);
   }
   async function evalRetrieval() {
@@ -699,7 +723,7 @@ export default function RagLab() {
 
             {backend !== "kg" && (<>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
-              {([[String(chunks.length), "chunks"], [String(index ? index.vectors.length : 0), "vectors stored"], [String(vocab), embedMode === "neural" && embedInfo ? "dimensions" : "vocabulary (dims)"], ["cosine", "similarity"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
+              {([[String(chunks.length), "chunks"], [String(index ? index.vectors.length : 0), "vectors stored"], [String(vocab), embedMode === "neural" && embedInfo ? "dimensions" : "vocabulary (dims)"], [METRIC_LABEL[metric], "similarity"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
             </div>
 
             <div style={{ ...pnl, marginBottom: 16 }}>
@@ -708,11 +732,42 @@ export default function RagLab() {
                 <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <div className="chips">
                     <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
-                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { if (denseVecs) setEmbedMode("neural"); else runNeuralEmbed(); }} disabled={provider === null && provKnown}>Neural · semantic</button>
+                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { setEmbedMode("neural"); if (!embModel) setEmbModel(pickDefaultEmb(providerId)); }}>Neural · semantic</button>
                   </div>
-                  {embedMode === "neural" && !denseVecs && <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || (provider === null && provKnown)}>{embedding ? "embedding…" : "▶ Embed with neural model"}</button>}
-                  <button className="btn sm" onClick={runEmbedding} disabled={embedding} style={{ marginLeft: "auto" }}>{embedding ? "…" : "▶ Run embedding"}</button>
+                  <label className="note" style={{ display: "inline-flex", gap: 6, alignItems: "center", marginLeft: "auto" }}>similarity
+                    <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)} style={{ width: 148 }} title="Distance metric used to score chunks">
+                      {(["cosine", "dot", "euclidean"] as Metric[]).map((m) => <option key={m} value={m}>{METRIC_LABEL[m]}</option>)}
+                    </select>
+                  </label>
+                  <button className="btn sm" onClick={runEmbedding} disabled={embedding}>{embedding ? "…" : "▶ Run embedding"}</button>
                 </div>
+                <div className="note" style={{ marginTop: 8 }}>Metric — <b>{METRIC_LABEL[metric]}</b>: {metric === "cosine" ? "angle between vectors (length-independent) — the usual default for text." : metric === "dot" ? "raw inner product (IP) — rewards magnitude, so longer/denser chunks can score higher." : "L2 distance mapped to 1/(1+d) — closeness in vector space. Maps to Milvus " + METRIC_MILVUS[metric] + "."} Applies to both TF-IDF and neural vectors; retrieval re-ranks on the next Ask.</div>
+
+                {/* Neural setup — pick a provider + embedding model, then embed. Shown until dense vectors exist. */}
+                {embedMode === "neural" && !denseVecs && (
+                  providers.length === 0 && provKnown ? (
+                    <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>Neural embeddings need a provider</div>
+                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>text-embedding-004</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
+                      <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+                        {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
+                          <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
+                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
+                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="text-embedding-004" style={{ width: 220 }} />
+                          <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
+                        </div>
+                        <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
+                        <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
+                      </div>
+                      {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
+                      {models.length > 0 && !models.some((m) => /embed/i.test(m)) && <div className="note" style={{ marginTop: 8, color: "var(--warn)" }}>⚠ This provider&apos;s model list has no embedding model (only chat models). A <code>404</code> means the name isn&apos;t served — for Gemini try <code>gemini-embedding-001</code>, or use a provider that offers embeddings.</div>}
+                      <div className="note" style={{ marginTop: 8 }}>Pick from the <b>{models.length} model(s) fetched</b> from {provType(providerId) || "the provider"} (embedding models listed first), or type one. Free key: <b>Gemini</b> — try <code>gemini-embedding-001</code>. On <code>404</code> the name isn&apos;t served; use ↻ Fetch models to see valid names.</div>
+                    </div>
+                  )
+                )}
                 {embedMode === "neural" && denseVecs && embedInfo && <div className="note" style={{ marginTop: 8 }}>real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</div>}
                 {embedMode === "tfidf" && <div className="note" style={{ marginTop: 8 }}>TF-IDF weights each term by rarity. Switch to Neural for real semantic embeddings{provider === null && provKnown ? " (needs a provider — TF-IDF works without one)" : ""} — the pipeline is identical.</div>}
                 {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
@@ -741,8 +796,9 @@ export default function RagLab() {
               return (
                 <>
                   <div style={{ ...pnl, marginBottom: 16 }}>
-                    {kgHead("var(--good)", "Watch one chunk become a vector", <span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span>)}
+                    {kgHead("var(--good)", "Watch one chunk become a vector", <div className="row" style={{ gap: 8, alignItems: "center" }}>{vecSimBadges()}<span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span></div>)}
                     <div style={{ padding: 15 }}>
+                  {embedMode === "neural" && denseVecs && <div className="note" style={{ marginBottom: 10 }}>Active retrieval uses your <b>{embedInfo?.dim}-d neural vectors</b> with <b>{METRIC_LABEL[metric]}</b> similarity. The term weights below are the TF-IDF view — kept because dense dimensions aren&apos;t human-readable.</div>}
                   <div className="chunk-inspect" style={{ border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 }}>
                     <div className="pp-player" style={{ margin: "0 0 8px" }}>
                       <button className="pp-ctrl" title="First" onClick={() => { setEmbPlaying(false); setEmbIdx(0); }}>⏮</button>
@@ -788,7 +844,7 @@ export default function RagLab() {
                       ...mTerms.map((t) => { const w = index.vectors[r][t] || 0; return <div key={`${r}-${t}`} className={`vs-cell ${r === ei ? "on" : ""}`} style={{ background: "var(--accent)", opacity: w ? 0.12 + 0.88 * (w / mMax) : 0 }} title={`c${r + 1} · ${t}: ${w.toFixed(3)}`} />; }),
                     ])}
                   </div>
-                  <div className="note" style={{ marginTop: 8 }}>Darker = that term matters more to that chunk. A question is embedded the exact same way; retrieval scores chunks whose strong terms <b>overlap</b> the question (cosine similarity).</div>
+                  <div className="note" style={{ marginTop: 8 }}>Darker = that term matters more to that chunk. A question is embedded the exact same way; retrieval scores chunks whose strong terms <b>overlap</b> the question ({METRIC_LABEL[metric]} similarity).</div>
                     </div>
                   </div>
 
@@ -799,7 +855,7 @@ export default function RagLab() {
                   <div className="milvus">
                     <div className="mv-schema">
                       <div className="mv-line"><b>Collection</b><span>rag_chunks</span></div>
-                      <div className="mv-badges"><span className="mv-b">metric: COSINE</span><span className="mv-b">index: IVF_FLAT</span><span className="mv-b">nlist: {nlist}</span><span className="mv-b">dim: {vocab}</span><span className="mv-b">entities: {chunks.length}</span></div>
+                      <div className="mv-badges"><span className="mv-b">metric: {METRIC_MILVUS[metric]}</span><span className="mv-b">index: IVF_FLAT</span><span className="mv-b">nlist: {nlist}</span><span className="mv-b">dim: {vocab}</span><span className="mv-b">entities: {chunks.length}</span></div>
                       <div className="mv-fields">
                         <div className="mv-f"><span className="mv-fn">id</span><span className="mv-ft">INT64</span><span className="mv-fk">primary key</span></div>
                         <div className="mv-f"><span className="mv-fn">embedding</span><span className="mv-ft">FLOAT_VECTOR</span><span className="mv-fk">dim = {vocab}</span></div>
@@ -903,7 +959,7 @@ export default function RagLab() {
                 const qTerms = Array.from(new Set(tokenize(question)));
                 const qv = queryVector(index, question);
                 let probed = 0, bs = -Infinity;
-                if (clusters) clusters.centroids.forEach((ct, c) => { const s = cosine(qv, ct); if (s > bs) { bs = s; probed = c; } });
+                if (clusters) clusters.centroids.forEach((ct, c) => { const s = simSparse(qv, ct, metric); if (s > bs) { bs = s; probed = c; } });
                 return (
                   <>
                     <label className="fld" style={{ marginTop: 16 }}>Query → tokens (matched against the {backend === "kg" ? "graph entities" : "chunk vectors"})</label>
@@ -920,7 +976,7 @@ export default function RagLab() {
                             </div>
                           ))}
                         </div>
-                        <div className="note" style={{ marginTop: 6 }}>Milvus compares the query only against vectors in the closest bucket(s) (nprobe), not all {chunks.length}, then ranks them by cosine — green chips are the chunks that were retrieved.</div>
+                        <div className="note" style={{ marginTop: 6 }}>Milvus compares the query only against vectors in the closest bucket(s) (nprobe), not all {chunks.length}, then ranks them by {METRIC_LABEL[metric]} — green chips are the chunks that were retrieved.</div>
                       </>
                     )}
 
