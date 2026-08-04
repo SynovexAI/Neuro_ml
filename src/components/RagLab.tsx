@@ -173,6 +173,12 @@ export default function RagLab() {
   const canQuery = backend === "vector" ? !!index : backend === "kg" ? !!graph : (!!index && !!graph);
   const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
   const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
+  // Little pill + the "which vector / which similarity" badge pair (so it's obvious what's active).
+  const pill = (color: string, txt: React.ReactNode) => <span style={{ fontSize: 9.5, fontWeight: 600, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 8px", borderRadius: 20, background: `color-mix(in srgb, ${color} 15%, transparent)`, color, whiteSpace: "nowrap" }}>{txt}</span>;
+  const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+    {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
+    {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
+  </div>;
   const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
@@ -363,8 +369,8 @@ export default function RagLab() {
     try {
       const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
-      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]);
-    } catch (e) { setMsg((e as Error).message); setEmbedMode("tfidf"); setDenseVecs(null); }
+      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]); setMsg("");
+    } catch (e) { setMsg("Neural embedding failed: " + (e as Error).message + " — check the provider/model. Vector search stays on TF-IDF until this succeeds."); setDenseVecs(null); }
     setEmbedding(false);
   }
   // ── knowledge-graph construction ──
@@ -750,6 +756,7 @@ export default function RagLab() {
                         </div>
                         <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
                       </div>
+                      {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
                       <div className="note" style={{ marginTop: 8 }}>Uses <b>{providers.find((p) => p.id === providerId)?.label || providers.find((p) => p.id === providerId)?.provider || "the provider"}</b>&apos;s <code>/embeddings</code> endpoint. Free key: <b>Gemini</b> <code>text-embedding-004</code>. If the model isn&apos;t served, it errors and vector search stays on TF-IDF.</div>
                     </div>
                   )
@@ -782,8 +789,9 @@ export default function RagLab() {
               return (
                 <>
                   <div style={{ ...pnl, marginBottom: 16 }}>
-                    {kgHead("var(--good)", "Watch one chunk become a vector", <span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span>)}
+                    {kgHead("var(--good)", "Watch one chunk become a vector", <div className="row" style={{ gap: 8, alignItems: "center" }}>{vecSimBadges()}<span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span></div>)}
                     <div style={{ padding: 15 }}>
+                  {embedMode === "neural" && denseVecs && <div className="note" style={{ marginBottom: 10 }}>Active retrieval uses your <b>{embedInfo?.dim}-d neural vectors</b> with <b>{METRIC_LABEL[metric]}</b> similarity. The term weights below are the TF-IDF view — kept because dense dimensions aren&apos;t human-readable.</div>}
                   <div className="chunk-inspect" style={{ border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 }}>
                     <div className="pp-player" style={{ margin: "0 0 8px" }}>
                       <button className="pp-ctrl" title="First" onClick={() => { setEmbPlaying(false); setEmbIdx(0); }}>⏮</button>
