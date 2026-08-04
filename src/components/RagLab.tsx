@@ -175,6 +175,11 @@ export default function RagLab() {
   const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
   // Little pill + the "which vector / which similarity" badge pair (so it's obvious what's active).
   const pill = (color: string, txt: React.ReactNode) => <span style={{ fontSize: 9.5, fontWeight: 600, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 8px", borderRadius: 20, background: `color-mix(in srgb, ${color} 15%, transparent)`, color, whiteSpace: "nowrap" }}>{txt}</span>;
+  // Embedding-model options: the provider's REAL fetched models (embedding-named first),
+  // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
+  const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
+  const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
+  const pickDefaultEmb = (id: string) => models.find((m) => /embed/i.test(m)) || embSuggestFor(provType(id))[0];
   const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
@@ -727,7 +732,7 @@ export default function RagLab() {
                 <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <div className="chips">
                     <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
-                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { setEmbedMode("neural"); if (!embModel) setEmbModel(embSuggestFor(providers.find((p) => p.id === providerId)?.provider)[0]); }}>Neural · semantic</button>
+                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { setEmbedMode("neural"); if (!embModel) setEmbModel(pickDefaultEmb(providerId)); }}>Neural · semantic</button>
                   </div>
                   <label className="note" style={{ display: "inline-flex", gap: 6, alignItems: "center", marginLeft: "auto" }}>similarity
                     <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)} style={{ width: 148 }} title="Distance metric used to score chunks">
@@ -749,15 +754,17 @@ export default function RagLab() {
                     <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
                       <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
                         {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
-                          <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(embSuggestFor(providers.find((p) => p.id === e.target.value)?.provider)[0]); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
-                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model</label>
+                          <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
+                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
                           <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="text-embedding-004" style={{ width: 220 }} />
-                          <datalist id="emb-models">{embSuggestFor(providers.find((p) => p.id === providerId)?.provider).map((m) => <option key={m} value={m} />)}</datalist>
+                          <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
                         </div>
+                        <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
                         <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
                       </div>
                       {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
-                      <div className="note" style={{ marginTop: 8 }}>Uses <b>{providers.find((p) => p.id === providerId)?.label || providers.find((p) => p.id === providerId)?.provider || "the provider"}</b>&apos;s <code>/embeddings</code> endpoint. Free key: <b>Gemini</b> <code>text-embedding-004</code>. If the model isn&apos;t served, it errors and vector search stays on TF-IDF.</div>
+                      {models.length > 0 && !models.some((m) => /embed/i.test(m)) && <div className="note" style={{ marginTop: 8, color: "var(--warn)" }}>⚠ This provider&apos;s model list has no embedding model (only chat models). A <code>404</code> means the name isn&apos;t served — for Gemini try <code>gemini-embedding-001</code>, or use a provider that offers embeddings.</div>}
+                      <div className="note" style={{ marginTop: 8 }}>Pick from the <b>{models.length} model(s) fetched</b> from {provType(providerId) || "the provider"} (embedding models listed first), or type one. Free key: <b>Gemini</b> — try <code>gemini-embedding-001</code>. On <code>404</code> the name isn&apos;t served; use ↻ Fetch models to see valid names.</div>
                     </div>
                   )
                 )}
