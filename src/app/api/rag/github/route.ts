@@ -27,7 +27,7 @@ async function ghFetch(url: string) {
 
 // Parse the many shapes a user may paste into {owner, repo, branch?, path?, kind}.
 function parseTarget(input: string): { owner: string; repo: string; branch?: string; path?: string; kind: "repo" | "blob" | "tree" } | null {
-  let s = (input || "").trim();
+  const s = (input || "").trim();
   if (!s) return null;
   // raw.githubusercontent.com/owner/repo/branch/path...
   const raw = s.match(/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/i);
