@@ -6,6 +6,7 @@ import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type Knowle
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
 import AgenticAnswer, { type AgentTool, type AgentHit } from "@/components/AgenticAnswer";
+import ModelPicker from "@/components/ModelPicker";
 
 type Doc = { id: string; name: string; kind: string; text: string };
 type Chunk = { text: string; docName: string; docKind: string };
@@ -22,6 +23,10 @@ const EMB_SUGGEST: Record<string, string[]> = {
   gemini: ["gemini-embedding-001", "text-embedding-004"],
   ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
   openai: ["text-embedding-3-small", "text-embedding-3-large"],
+  mistral: ["mistral-embed"],
+  cohere: ["embed-english-v3.0", "embed-multilingual-v3.0"],
+  github: ["text-embedding-3-small", "text-embedding-3-large", "cohere-embed-v3-english"],
+  nvidia: ["nvidia/nv-embedqa-e5-v5", "nvidia/nv-embed-v1"],
   custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
 };
 const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
@@ -85,6 +90,7 @@ export default function RagLab() {
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
   const [mvOpen, setMvOpen] = useState<number | null>(null); // entity row whose full text is expanded
+  const [embOpenKey, setEmbOpenKey] = useState(0); // bumped after "Fetch models" to auto-open the embed-model picker
 
   // ── knowledge-graph backend ──
   const [backend, setBackend] = useState<Backend>("vector");
@@ -191,7 +197,9 @@ export default function RagLab() {
   // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
   const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
   const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
-  const pickDefaultEmb = (id: string) => models.find((m) => /embed/i.test(m)) || embSuggestFor(provType(id))[0];
+  // Prefer the provider's own suggested embedding model (avoids carrying a stale embed model
+  // from a previously-selected provider); fall back to a fetched embedding-named model.
+  const pickDefaultEmb = (id: string) => embSuggestFor(provType(id))[0] || models.find((m) => /embed/i.test(m)) || "";
   const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
@@ -415,6 +423,9 @@ export default function RagLab() {
   }
   async function runNeuralEmbed() {
     if (!chunks.length) return; setEmbedding(true); setMsg("");
+    // Always build the sparse index too: retrieval (keyword/hybrid) and canQuery/the store views
+    // all key off `index`; the dense vectors add the semantic layer on top of it.
+    if (!index) setIndex(buildIndex(chunks.map((c) => c.text)));
     try {
       const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
@@ -906,11 +917,10 @@ export default function RagLab() {
                       <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
                         {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
                           <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
-                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
-                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="gemini-embedding-001" style={{ width: 220 }} />
-                          <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
+                        <div style={{ width: 240 }}><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched · type to search` : "· none fetched"}</label>
+                          <ModelPicker models={embModelOptions(providerId)} value={embModel} onChange={setEmbModel} placeholder="e.g. mistral-embed" openKey={embOpenKey} />
                         </div>
-                        <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
+                        <button className="btn ghost sm" onClick={async () => { await loadModels(providerId || undefined); setEmbOpenKey((k) => k + 1); }} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
                         <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
                       </div>
                       {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
