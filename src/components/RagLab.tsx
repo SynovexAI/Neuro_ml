@@ -83,6 +83,7 @@ export default function RagLab() {
   const [embIdx, setEmbIdx] = useState(0);
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
+  const [mvOpen, setMvOpen] = useState<number | null>(null); // entity row whose full text is expanded
 
   // ── knowledge-graph backend ──
   const [backend, setBackend] = useState<Backend>("vector");
@@ -113,6 +114,13 @@ export default function RagLab() {
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
+  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive">("file");
+  const [connectorOpen, setConnectorOpen] = useState(false);
+  const [ghUrl, setGhUrl] = useState("");
+  const [ghBusy, setGhBusy] = useState(false);
+  const [gdUrl, setGdUrl] = useState("");
+  const [gdBusy, setGdBusy] = useState(false);
+  function addSample() { setDocs((d) => (d.some((x) => x.name === "sample-returns-policy.txt") ? d : [...d, { id: rid(), name: "sample-returns-policy.txt", kind: "txt", text: SAMPLE }])); invalidate(); }
   const [fetching, setFetching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [openDocs, setOpenDocs] = useState<Set<string>>(new Set());
@@ -161,7 +169,9 @@ export default function RagLab() {
   // IVF-style clustering of the stored vectors, shared by the Embed & Retrieve steps.
   const clusters = useMemo(() => {
     if (!index) return null;
-    const k = Math.min(4, index.vectors.length);
+    // Milvus rule of thumb: nlist ≈ √N clusters — more chunks ⇒ more buckets (clamped 2..12).
+    const N = index.vectors.length;
+    const k = Math.max(1, Math.min(12, N < 4 ? N : Math.round(Math.sqrt(N))));
     const assign = ivfCluster(index.vectors, k);
     const buckets = Array.from({ length: k }, (_, c) => index.vectors.map((_, i) => i).filter((i) => assign[i] === c));
     const centroids: Vec[] = buckets.map((ids) => { const s: Vec = {}; ids.forEach((i) => { const v = index.vectors[i]; for (const t in v) s[t] = (s[t] || 0) + v[t]; }); const out: Vec = {}; const cnt = ids.length || 1; for (const t in s) out[t] = s[t] / cnt; return out; });
@@ -184,7 +194,7 @@ export default function RagLab() {
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
   </div>;
-  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
+  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
       <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
@@ -239,10 +249,9 @@ export default function RagLab() {
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, []);
 
-  // Auto-run chunking / embedding the first time you enter a step (explicit buttons re-run).
+  // Embedding is run explicitly via the "Run embedding" button (no auto-run on entering the Index step).
+  // Knowledge-graph backends still auto-extract on entry, since that step has its own build button too.
   useEffect(() => {
-    if (step === "chunk" && chunks.length === 0 && docs.length) runChunking();
-    if (step === "embed" && !index && chunks.length) runEmbedding();
     if (step === "embed" && backend !== "vector" && !graph && chunks.length) buildGraphHeuristic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
@@ -286,6 +295,39 @@ export default function RagLab() {
       setDocs((d) => [...d, { id: rid(), name: j.title || url, kind: "url", text: j.text }]);
       invalidate();
     } catch (e) { setMsg((e as Error).message); } finally { setFetching(false); }
+  }
+  async function fetchGithub() {
+    if (!ghUrl.trim()) { setMsg("Paste a GitHub repo/file URL or owner/repo."); return; }
+    setGhBusy(true); setMsg("");
+    try {
+      const r = await fetch("/api/rag/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: ghUrl.trim() }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const incoming: Doc[] = (j.docs || []).map((d: { name: string; text: string }) => ({ id: rid(), name: d.name, kind: "github", text: d.text }));
+      if (!incoming.length) throw new Error("Nothing to import from that repo.");
+      setDocs((d) => [...d, ...incoming]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setGhBusy(false); }
+  }
+  async function fetchGDrive() {
+    const s = gdUrl.trim();
+    if (!s) { setMsg("Paste a public Google Docs / Sheets share link."); return; }
+    // Turn a share link into a plain-text export URL (works for docs shared "anyone with the link").
+    const doc = s.match(/docs\.google\.com\/document\/d\/([\w-]+)/);
+    const sheet = s.match(/docs\.google\.com\/spreadsheets\/d\/([\w-]+)/);
+    const exportUrl = doc ? `https://docs.google.com/document/d/${doc[1]}/export?format=txt`
+      : sheet ? `https://docs.google.com/spreadsheets/d/${sheet[1]}/export?format=csv`
+      : /^https?:\/\//.test(s) ? s : "";
+    if (!exportUrl) { setMsg("Not a recognized Google Docs/Sheets link."); return; }
+    setGdBusy(true); setMsg("");
+    try {
+      const r = await fetch("/api/rag/fetch-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: exportUrl }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      if (!j.text || !j.text.trim() || /sign in|request access/i.test(j.text.slice(0, 400))) throw new Error("Couldn't read it — make sure the doc is shared as “Anyone with the link”.");
+      setDocs((d) => [...d, { id: rid(), name: (doc ? "Google Doc" : sheet ? "Google Sheet" : j.title) + ` · ${(doc || sheet || ["", "drive"])[1].slice(0, 8)}`, kind: "gdrive", text: j.text }]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setGdBusy(false); }
   }
   const removeDoc = (id: string) => { setDocs((d) => d.filter((x) => x.id !== id)); invalidate(); };
   function invalidate() { setChunks([]); setIndex(null); }
@@ -519,21 +561,94 @@ export default function RagLab() {
             </div>
 
             <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.log,.html,.tsv,.pdf,.docx,.doc,.xlsx,.xls,.xlsm,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onFiles} style={{ display: "none" }} />
-            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14, marginBottom: 20 }}>
-              <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
-                <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>
-                <b style={{ fontSize: 13.5 }}>{uploading ? "Parsing…" : "Drop files here or click to upload"}</b>
-                <div className="note" style={{ marginTop: 5 }}>multiple files · parsed in-browser or on the server</div>
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center", marginTop: 12 }}>
-                  {([["txt", false], ["md", false], ["csv", false], ["json", false], ["html", false], ["pdf", true], ["docx", true], ["xlsx", true]] as [string, boolean][]).map(([f, hot]) => <span key={f} style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 7px", borderRadius: 5, background: hot ? "rgba(91,124,255,.1)" : "var(--panel-2)", border: `1px solid ${hot ? "rgba(91,124,255,.4)" : "var(--border)"}`, color: hot ? "var(--accent)" : "var(--muted)" }}>{f}</span>)}
+            {/* one button → popup of connectors → the chosen connector's input appears */}
+            {(() => {
+              // [key, icon, title, subtitle, soon?] — enabled connectors are wired; `soon` ones need OAuth and are listed but disabled.
+              type Row = [typeof srcConn | string, string, string, string, boolean?];
+              const CONNECTORS: Row[] = [
+                ["file", "📄", "Upload file", "PDF · DOCX · TXT · CSV · XLSX"],
+                ["url", "🌐", "Web page", "scrape article text from a URL"],
+                ["github", "🐙", "GitHub", "README · file · folder from a public repo"],
+                ["gdrive", "📁", "Google Drive", "public Google Doc / Sheet link"],
+                ["sample", "📚", "Sample corpus", "built-in returns-policy demo"],
+                ["notion", "📝", "Notion", "needs OAuth — configure in Admin", true],
+                ["confluence", "🧩", "Confluence", "needs OAuth — configure in Admin", true],
+                ["slack", "💬", "Slack", "needs OAuth — configure in Admin", true],
+                ["s3", "🪣", "Amazon S3", "needs credentials — configure in Admin", true],
+                ["dropbox", "🗂️", "Dropbox", "needs OAuth — configure in Admin", true],
+              ];
+              const cur = CONNECTORS.find((c) => c[0] === srcConn) || CONNECTORS[0];
+              return (
+                <div style={{ marginBottom: 16, position: "relative", display: "inline-block" }}>
+                  <label className="fld">Source connector</label>
+                  <button className="btn ghost" onClick={() => setConnectorOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 260 }}>
+                    <span style={{ fontSize: 16 }}>{cur[1]}</span><b style={{ fontSize: 13 }}>{cur[2]}</b><span style={{ marginLeft: "auto", color: "var(--faint)" }}>▾</span>
+                  </button>
+                  {connectorOpen && <>
+                    <div onClick={() => setConnectorOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                    <div style={{ position: "absolute", top: "100%", left: 0, zIndex: 50, width: 340, marginTop: 6, background: "var(--surface)", border: "1px solid var(--border-strong)", borderRadius: 12, boxShadow: "0 16px 40px rgba(0,0,0,.45)", overflow: "hidden" }}>
+                      <div className="note" style={{ padding: "9px 12px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--border)" }}>Available connectors</div>
+                      <div style={{ maxHeight: 300, overflowY: "auto", padding: 6 }}>
+                        {CONNECTORS.map(([k, ic, title, sub, soon]) => (
+                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
+                            <span style={{ width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: srcConn === k ? "var(--accent)" : "var(--panel-2)", color: srcConn === k ? "#fff" : "var(--muted)" }}>{ic}</span>
+                            <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{title}</span><span className="note" style={{ fontSize: 10 }}>{sub}</span></span>
+                            {soon ? <span style={{ fontSize: 8.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em", padding: "2px 6px", borderRadius: 5, background: "var(--panel-2)", color: "var(--faint)", border: "1px solid var(--border)", flex: "0 0 auto" }}>soon</span>
+                              : srcConn === k ? <span style={{ color: "var(--accent)", fontSize: 14, flex: "0 0 auto" }}>✓</span> : null}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>}
                 </div>
-              </div>
-              <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
-                <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--sky)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Fetch a web page</span></div>
-                <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" style={{ marginBottom: 10 }} />
-                <button className="btn block" onClick={fetchUrl} disabled={fetching}>{fetching ? <><span className="busy-dot" />Fetching…</> : "Fetch & scrape URL"}</button>
-                <div className="note" style={{ marginTop: "auto", paddingTop: 10 }}>Extracts the readable article text and adds it as a document.</div>
-              </div>
+              );
+            })()}
+
+            <div style={{ marginBottom: 20 }}>
+              {srcConn === "file" && (
+                <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                  <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>
+                  <b style={{ fontSize: 13.5 }}>{uploading ? "Parsing…" : "Drop files here or click to upload"}</b>
+                  <div className="note" style={{ marginTop: 5 }}>multiple files · parsed in-browser or on the server</div>
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center", marginTop: 12 }}>
+                    {([["txt", false], ["md", false], ["csv", false], ["json", false], ["html", false], ["pdf", true], ["docx", true], ["xlsx", true]] as [string, boolean][]).map(([f, hot]) => <span key={f} style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 7px", borderRadius: 5, background: hot ? "rgba(91,124,255,.1)" : "var(--panel-2)", border: `1px solid ${hot ? "rgba(91,124,255,.4)" : "var(--border)"}`, color: hot ? "var(--accent)" : "var(--muted)" }}>{f}</span>)}
+                  </div>
+                </div>
+              )}
+              {srcConn === "url" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--sky)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Fetch a web page</span></div>
+                  <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" style={{ marginBottom: 10 }} />
+                  <button className="btn block" onClick={fetchUrl} disabled={fetching}>{fetching ? <><span className="busy-dot" />Fetching…</> : "Fetch & scrape URL"}</button>
+                  <div className="note" style={{ marginTop: 10 }}>Extracts the readable article text and adds it as a document.</div>
+                </div>
+              )}
+              {srcConn === "github" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Import from GitHub</span></div>
+                  <input type="text" value={ghUrl} onChange={(e) => setGhUrl(e.target.value)} placeholder="owner/repo · or a github.com file / folder URL" style={{ marginBottom: 10 }} onKeyDown={(e) => { if (e.key === "Enter") fetchGithub(); }} />
+                  <button className="btn block" onClick={fetchGithub} disabled={ghBusy}>{ghBusy ? <><span className="busy-dot" />Importing…</> : "🐙 Import from GitHub"}</button>
+                  <div className="note" style={{ marginTop: 10, lineHeight: 1.55 }}>Public repos only. <b>owner/repo</b> → imports the README; a <b>/blob/…</b> URL → that one file; a <b>/tree/…</b> folder URL → up to 12 text files in it. Uses the GitHub API (no key needed; a <code>GITHUB_TOKEN</code> env var lifts the rate limit).</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                    {["vercel/next.js", "facebook/react/tree/main/packages/react/src", "openai/openai-cookbook"].map((ex) => <button key={ex} onClick={() => setGhUrl(ex)} style={{ fontSize: 10, fontFamily: "var(--mono)", padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--muted)", cursor: "pointer" }}>{ex}</button>)}
+                  </div>
+                </div>
+              )}
+              {srcConn === "gdrive" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#f9ab00" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Google Drive — public link</span></div>
+                  <input type="text" value={gdUrl} onChange={(e) => setGdUrl(e.target.value)} placeholder="https://docs.google.com/document/d/…  or  /spreadsheets/d/…" style={{ marginBottom: 10 }} onKeyDown={(e) => { if (e.key === "Enter") fetchGDrive(); }} />
+                  <button className="btn block" onClick={fetchGDrive} disabled={gdBusy}>{gdBusy ? <><span className="busy-dot" />Importing…</> : "📁 Import from Google Drive"}</button>
+                  <div className="note" style={{ marginTop: 10, lineHeight: 1.55 }}>Paste a <b>Google Doc</b> or <b>Sheet</b> link that&apos;s shared as <b>“Anyone with the link”</b> — it&apos;s exported to text/CSV and added as a document. Private files (which need OAuth) aren&apos;t supported here.</div>
+                </div>
+              )}
+              {srcConn === "sample" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Sample corpus</span></div>
+                  <div className="note" style={{ marginBottom: 10 }}>A built-in returns-policy document — great for trying the pipeline with no upload.</div>
+                  <button className="btn sm" onClick={addSample}>📚 Load sample corpus</button>
+                </div>
+              )}
             </div>
 
             <label className="fld">Loaded documents — preview before chunking</label>
@@ -584,8 +699,8 @@ export default function RagLab() {
               {kgHead("var(--accent)", "Chunking controls")}
               <div style={{ padding: 15 }}>
                 <div className="row" style={{ flexWrap: "wrap", gap: 20, alignItems: "flex-end" }}>
-                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={120} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
-                  <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={40} step={2} value={overlap} onChange={(e) => setOverlap(+e.target.value)} /></div>
+                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={1000} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
+                  <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={500} step={2} value={Math.min(overlap, size - 1)} onChange={(e) => setOverlap(Math.min(+e.target.value, size - 1))} /></div>
                   <button className="btn" onClick={runChunking} disabled={chunking}>▶ Run chunking</button>
                 </div>
                 <div style={{ marginTop: 12, fontFamily: "var(--mono)", fontSize: 11, color: "var(--faint)", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 11px" }}>sliding window: <b style={{ color: "var(--accent)" }}>{size}</b>-word window · advances <b style={{ color: "var(--accent)" }}>{stepWords}</b> words each step · <b style={{ color: "var(--accent)" }}>{overlap}</b>w shared{chunks.length ? <> → {totalWords.toLocaleString()} words split into <b style={{ color: "var(--accent)" }}>{chunks.length}</b> chunks</> : null}</div>
@@ -598,16 +713,23 @@ export default function RagLab() {
                   {kgHead("var(--sky)", "How the text splits", <span className="note" style={{ fontSize: 10 }}>{totalWords.toLocaleString()} words → {chunks.length} chunks</span>)}
                   <div style={{ padding: 15 }}>
                     <div className="flow" key={`cf-${chunkPlayKey}`} style={{ ["--sweepdur"]: `${(chunks.length * 0.35 + 0.6).toFixed(1)}s`, border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 } as React.CSSProperties}>
-                      <div className="flow-label">extracted text · {totalWords} words</div>
-                      <div className="doc-track">
-                        <div className="readhead" />
-                        {chunks.map((c, i) => (
-                          <div key={i} className="cwin" style={{ left: `${Math.min(98, (i * stepWords / Math.max(1, totalWords)) * 100)}%`, width: `${Math.min(60, (size / Math.max(1, totalWords)) * 100)}%`, background: i % 2 ? "var(--sky)" : "var(--accent)", animationDelay: `${(i * 0.35).toFixed(2)}s` }}>c{i + 1}</div>
-                        ))}
-                      </div>
-                      <div className="flow-arrow">↓ splits into {chunks.length} chunks</div>
-                      <div className="flow-chunks">
-                        {chunks.map((c, i) => <div key={i} className="fchunk" style={{ animationDelay: `${(i * 0.35 + 0.2).toFixed(2)}s` }}>chunk {i + 1}</div>)}
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div className="flow-label">extracted text · {totalWords} words · 10 windows / row</div>
+                          <div style={{ maxHeight: 250, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 5 }}>
+                              {chunks.map((c, i) => <div key={i} title={`chunk ${i + 1}`} style={{ height: 30, borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--mono)", fontSize: 9, fontWeight: 700, color: "#fff", background: i % 2 ? "var(--sky)" : "var(--accent)", opacity: 0, animation: "popIn .4s ease forwards", animationDelay: `${(i * 0.02).toFixed(2)}s` }}>c{i + 1}</div>)}
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ minWidth: 0, borderLeft: "1px solid var(--border)", paddingLeft: 14 }}>
+                          <div className="flow-label">→ {chunks.length} chunks · 5 / row</div>
+                          <div style={{ maxHeight: 250, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 7 }}>
+                              {chunks.map((c, i) => <div key={i} className="fchunk" style={{ margin: 0, padding: "7px 8px", animationDelay: `${(i * 0.02 + 0.1).toFixed(2)}s` }}>chunk {i + 1}<span style={{ display: "block", color: "var(--faint)", fontSize: 9, marginTop: 2 }}>{c.text.split(/\s+/).filter(Boolean).length}w · {overlap}w ov</span></div>)}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                     <div className="row" style={{ marginTop: 12 }}><button className="btn ghost sm" onClick={() => setChunkPlayKey((k) => k + 1)}>↻ Replay animation</button></div>
@@ -739,7 +861,7 @@ export default function RagLab() {
                       {(["cosine", "dot", "euclidean"] as Metric[]).map((m) => <option key={m} value={m}>{METRIC_LABEL[m]}</option>)}
                     </select>
                   </label>
-                  <button className="btn sm" onClick={runEmbedding} disabled={embedding}>{embedding ? "…" : "▶ Run embedding"}</button>
+                  <button className="btn" onClick={runEmbedding} disabled={embedding}>{embedding ? "vectorizing…" : index ? "↻ Re-run embedding" : "▶ Run embedding"}</button>
                 </div>
                 <div className="note" style={{ marginTop: 8 }}>Metric — <b>{METRIC_LABEL[metric]}</b>: {metric === "cosine" ? "angle between vectors (length-independent) — the usual default for text." : metric === "dot" ? "raw inner product (IP) — rewards magnitude, so longer/denser chunks can score higher." : "L2 distance mapped to 1/(1+d) — closeness in vector space. Maps to Milvus " + METRIC_MILVUS[metric] + "."} Applies to both TF-IDF and neural vectors; retrieval re-ranks on the next Ask.</div>
 
@@ -778,6 +900,16 @@ export default function RagLab() {
               </div>
             </div>
 
+            {!index && !embedding && (
+              <div style={{ ...pnl, marginBottom: 16, borderStyle: "dashed", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: "34px 20px", textAlign: "center" }}>
+                <div style={{ fontSize: 26, opacity: .7 }}>◆</div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>Vectors not built yet</div>
+                <div className="note" style={{ maxWidth: 440, lineHeight: 1.55 }}>Nothing runs automatically. Click below to turn your <b>{chunks.length} chunk{chunks.length === 1 ? "" : "s"}</b> into <b>{METRIC_LABEL[metric]}</b>-searchable <b>{embedMode === "neural" ? "neural" : "TF-IDF"}</b> vectors, then the store, heatmap and Milvus view appear.</div>
+                <button className="btn" onClick={embedMode === "neural" ? runNeuralEmbed : runEmbedding} disabled={embedMode === "neural" && !embModel.trim()} style={{ marginTop: 2, padding: "11px 22px", fontSize: 14 }}>▶ Run embedding</button>
+                {embedMode === "neural" && !embModel.trim() && <div className="note">pick an embedding model above first</div>}
+              </div>
+            )}
+
             {index && (() => {
               const ei = Math.min(embIdx, chunks.length - 1);
               const toks = index.docs[ei];
@@ -791,7 +923,7 @@ export default function RagLab() {
               index.vectors.forEach((v) => Object.entries(v).forEach(([t, w]) => { totals[t] = (totals[t] || 0) + w; }));
               const mTerms = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 10).map((e) => e[0]);
               let mMax = 0; index.vectors.forEach((v) => mTerms.forEach((t) => { if ((v[t] || 0) > mMax) mMax = v[t] || 0; })); mMax = mMax || 1;
-              const nlist = clusters?.nlist ?? Math.min(4, chunks.length);
+              const nlist = clusters?.nlist ?? Math.max(1, Math.min(12, chunks.length < 4 ? chunks.length : Math.round(Math.sqrt(chunks.length))));
               const buckets = clusters?.buckets ?? [];
               return (
                 <>
@@ -867,8 +999,8 @@ export default function RagLab() {
                     <div className="chunk-scroll" style={{ maxHeight: 220, padding: 0 }}>
                       <table className="dtable"><tbody>
                         <tr><th>id</th><th>embedding (first dims)</th><th>text</th><th>source</th></tr>
-                        {chunks.map((c, i) => { const preview = mTerms.slice(0, 6).map((t) => (index.vectors[i][t] || 0).toFixed(2)).join(", "); return (
-                          <tr key={i} className={i === ei ? "mv-on" : ""}><td>{i}</td><td className="mv-vec">[{preview}, …]</td><td style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.text.slice(0, 64)}…</td><td>{c.docName.length > 18 ? c.docName.slice(0, 18) + "…" : c.docName}</td></tr>
+                        {chunks.map((c, i) => { const preview = mTerms.slice(0, 6).map((t) => (index.vectors[i][t] || 0).toFixed(2)).join(", "); const open = mvOpen === i; return (
+                          <tr key={i} className={i === ei ? "mv-on" : ""}><td>{i}</td><td className="mv-vec">[{preview}, …]</td><td onClick={() => setMvOpen(open ? null : i)} title={open ? "click to collapse" : "click to read full text"} style={{ cursor: "pointer", maxWidth: open ? undefined : 260, ...(open ? { whiteSpace: "normal", color: "var(--text)" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{open ? c.text : c.text.slice(0, 64) + "…"}<span style={{ color: "var(--accent)", marginLeft: 6, fontSize: 10 }}>{open ? "▲" : "▾"}</span></td><td>{c.docName.length > 18 ? c.docName.slice(0, 18) + "…" : c.docName}</td></tr>
                         ); })}
                       </tbody></table>
                     </div>
@@ -881,7 +1013,7 @@ export default function RagLab() {
                         </div>
                       ))}
                     </div>
-                    <div className="note" style={{ marginTop: 8 }}>Milvus stores each chunk as an <b>entity</b> (id + float vector + metadata) inside a <b>collection</b>, then builds an ANN index — IVF_FLAT clusters vectors into <b>nlist</b> buckets so a query only compares against the closest few (nprobe), staying fast at millions of vectors. Our in-browser store uses the same shape (TF-IDF vectors + cosine); swap in a neural embedder and it maps 1:1 to Milvus.</div>
+                    <div className="note" style={{ marginTop: 8 }}>Milvus stores each chunk as an <b>entity</b> (id + float vector + metadata) inside a <b>collection</b>, then builds an ANN index — IVF_FLAT clusters vectors into <b>nlist</b> buckets so a query only compares against the closest few (nprobe), staying fast at millions of vectors. <b>Why {nlist} buckets?</b> nlist scales with your data (≈ √N, so {chunks.length} chunks → {nlist}); more chunks would build more buckets. Our in-browser store uses the same shape (TF-IDF vectors + cosine); swap in a neural embedder and it maps 1:1 to Milvus.</div>
                   </div>
                     </div>
                   </div>

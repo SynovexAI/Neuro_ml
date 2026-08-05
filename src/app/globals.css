@@ -470,6 +470,12 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 @keyframes cwinIn{to{opacity:.8;transform:scaleX(1)}}
 .flow-arrow{text-align:center;color:var(--muted);font-size:11px;margin:10px 0;font-family:var(--mono)}
 .flow-chunks{display:flex;gap:8px;flex-wrap:wrap}
+/* vertical variant of the chunk-sweep — reading head moves top→down */
+.doc-track-v{position:relative;width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--rs);overflow:hidden}
+.readhead-v{position:absolute;left:0;right:0;height:2px;background:var(--accent);box-shadow:0 0 8px var(--accent);top:0;animation:sweepv var(--sweepdur,3s) linear forwards}
+@keyframes sweepv{from{top:0}to{top:100%}}
+.cwin-v{position:absolute;left:8px;right:8px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;color:#fff;font-weight:700;opacity:0;transform:scaleY(.15);transform-origin:top;animation:cwinvIn .45s ease forwards}
+@keyframes cwinvIn{to{opacity:.85;transform:scaleY(1)}}
 .fchunk{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--rs);padding:6px 10px;font-size:11px;font-family:var(--mono);opacity:0;transform:translateY(8px);animation:popIn .4s ease forwards}
 .fchunk:nth-child(even){border-left-color:var(--sky)}
 @keyframes popIn{to{opacity:1;transform:none}}
@@ -521,8 +527,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .emb-vecrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .emb-vec{display:flex;gap:3px;align-items:flex-end;height:48px;min-width:150px;background:var(--panel-2);border:1px solid var(--border);border-radius:var(--rs);padding:5px}
 .emb-vec i{width:12px;background:var(--accent);border-radius:2px 2px 0 0;min-height:3px}
-.vstore{display:grid;gap:3px;align-items:center;overflow-x:auto;padding:4px 0}
-.vs-col{font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 1px}
+.vstore{display:grid;gap:3px;align-items:center;overflow:auto;max-height:340px;padding:4px 0}
+.vs-col{font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 1px;position:sticky;top:0;background:var(--panel);z-index:2}
+.vs-corner{position:sticky;top:0;left:0;background:var(--panel);z-index:3}
 .vs-row{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;padding-right:6px}
 .vs-row.on{color:var(--accent-strong);font-weight:700}
 .vs-cell{height:22px;border-radius:3px;min-width:20px}
