@@ -3,7 +3,7 @@ import { chunkText, buildIndex, queryVector, cosine, type RagIndex, type Vec } f
 
 // Best-guess embedding model for an OpenAI-compatible provider base URL.
 export function pickEmbModel(baseUrl: string): string {
-  if (/generativelanguage|gemini/i.test(baseUrl)) return "text-embedding-004";
+  if (/generativelanguage|gemini/i.test(baseUrl)) return "gemini-embedding-001";
   return "text-embedding-3-small";
 }
 

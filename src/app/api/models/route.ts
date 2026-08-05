@@ -31,8 +31,10 @@ export async function GET(req: Request) {
   const { eq } = await import("drizzle-orm");
   const { decrypt } = await import("@/lib/crypto");
 
-  const targetId = requestedId ?? allProviders[0].id;
-  const rows = await db.select().from(provTable).where(eq(provTable.id, targetId)).limit(1);
+  // Requested id may be stale (provider deleted & re-added) — fall back to the first enabled one.
+  let targetId = requestedId ?? allProviders[0].id;
+  let rows = await db.select().from(provTable).where(eq(provTable.id, targetId)).limit(1);
+  if (!rows[0] && requestedId) { targetId = allProviders[0].id; rows = await db.select().from(provTable).where(eq(provTable.id, targetId)).limit(1); }
   const p = rows[0];
   if (!p) return NextResponse.json({ providers: allProviders, models: [], provider: null, default: "" });
 

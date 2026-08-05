@@ -4,14 +4,8 @@ import { db } from "./db";
 import { providers } from "./db/schema";
 import { decrypt } from "./crypto";
 
-// OpenAI-compatible endpoints for every provider (Gemini via its OpenAI-compat base).
-export const PROVIDER_CATALOG: Record<string, { label: string; baseUrl: string }> = {
-  groq: { label: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
-  cerebras: { label: "Cerebras", baseUrl: "https://api.cerebras.ai/v1" },
-  gemini: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
-  ollama: { label: "Ollama (local)", baseUrl: "http://localhost:11434/v1" },
-  custom: { label: "Custom (OpenAI-compatible)", baseUrl: "" },
-};
+// OpenAI-compatible endpoints for every provider — single source of truth in providerCatalog.
+export { PROVIDER_CATALOG } from "./providerCatalog";
 
 // List models straight from the provider's /models endpoint.
 export async function fetchModels(baseUrl: string, apiKey: string): Promise<string[]> {

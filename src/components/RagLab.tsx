@@ -19,7 +19,7 @@ const rid = () => Math.random().toString(36).slice(2, 10);
 // Suggested embedding models per provider family (typeable — these are just hints).
 // Gemini + Ollama are the free-friendly picks; Groq/Cerebras don't serve /embeddings.
 const EMB_SUGGEST: Record<string, string[]> = {
-  gemini: ["text-embedding-004", "gemini-embedding-001"],
+  gemini: ["gemini-embedding-001", "text-embedding-004"],
   ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
   openai: ["text-embedding-3-small", "text-embedding-3-large"],
   custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
@@ -899,7 +899,7 @@ export default function RagLab() {
                   providers.length === 0 && provKnown ? (
                     <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
                       <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>Neural embeddings need a provider</div>
-                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>text-embedding-004</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
+                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>gemini-embedding-001</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
                     </div>
                   ) : (
                     <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
@@ -907,7 +907,7 @@ export default function RagLab() {
                         {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
                           <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
                         <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
-                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="text-embedding-004" style={{ width: 220 }} />
+                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="gemini-embedding-001" style={{ width: 220 }} />
                           <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
                         </div>
                         <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
