@@ -5,6 +5,7 @@ import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mm
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
+import AgenticAnswer, { type AgentTool, type AgentHit } from "@/components/AgenticAnswer";
 
 type Doc = { id: string; name: string; kind: string; text: string };
 type Chunk = { text: string; docName: string; docKind: string };
@@ -132,6 +133,7 @@ export default function RagLab() {
   const [trace, setTrace] = useState<{ who: string; what: string; state: string }[]>([]);
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
+  const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
@@ -474,6 +476,33 @@ export default function RagLab() {
     const rows = strats.map((s) => { const ranked = fullRank(s, qv); const order = applyRerank(ranked, chunks.length); const m = retrievalMetrics(order, relevant, topK); return { name: rerank === "mmr" ? `${s}+mmr` : s, ...m }; });
     setMetricRows(rows);
   }
+  // ── Agentic mode plumbing — reuses the existing engine (retrieve/retrieveGraph + /api/chat), read-only ──
+  const agentTools: AgentTool[] = index ? (graph ? ["vector", "keyword", "hybrid", "kg", "web"] : ["vector", "keyword", "hybrid", "web"]) : [];
+  async function agentRetrieve(query: string, tool: AgentTool, k: number): Promise<AgentHit[]> {
+    if (!index) return [];
+    if (tool === "kg" && graph) {
+      const r = retrieveGraph(graph, query, Math.max(k, 4), kgHops);
+      return r.chunkIds.slice(0, k).map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+    }
+    const strat: Strategy = tool === "hybrid" ? "hybrid" : tool === "keyword" ? "keyword" : "vector";
+    let qv: number[] | null = null;
+    if (embedMode === "neural" && denseVecs) { try { qv = (await embedViaApi([query]))[0] || null; } catch { qv = null; } }
+    const ranked = (embedMode === "neural" && denseVecs && qv)
+      ? retrieveDense(index, query, qv, denseVecs, strat, chunks.length, metric)
+      : retrieve(index, query, strat, chunks.length, metric);
+    return ranked.slice(0, k).map((h) => ({ i: h.i, score: h.score }));
+  }
+  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[]): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+    return text;
+  }
+  async function agentFetchWeb(url: string): Promise<{ title: string; text: string } | null> {
+    try { const r = await fetch("/api/rag/fetch-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) }); const j = await r.json(); if (!r.ok) return null; return { title: j.title || url, text: j.text || "" }; } catch { return null; }
+  }
+
   async function ask() {
     if (chunks.length === 0 || !canQuery) { setAnswer("Build the index first (step 3)."); return; }
     setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
@@ -1043,6 +1072,47 @@ export default function RagLab() {
 
       {/* STEP 4 — QUERY */}
       {step === "query" && (
+        <>
+        <div className="row" style={{ alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span className="note" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>Answering mode</span>
+          <div style={{ display: "inline-flex", border: "1px solid var(--border-strong)", borderRadius: 9, overflow: "hidden" }}>
+            <button onClick={() => setAnswerMode("direct")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", background: answerMode === "direct" ? "var(--accent)" : "var(--surface)", color: answerMode === "direct" ? "#fff" : "var(--muted)", fontWeight: answerMode === "direct" ? 600 : 400 }}>Direct</button>
+            <button onClick={() => setAnswerMode("agentic")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", display: "inline-flex", alignItems: "center", gap: 5, background: answerMode === "agentic" ? "#a855f7" : "var(--surface)", color: answerMode === "agentic" ? "#fff" : "var(--muted)", fontWeight: answerMode === "agentic" ? 600 : 400 }}>🤖 Agentic</button>
+          </div>
+          <span className="note" style={{ fontSize: 11 }}>{answerMode === "direct" ? "single-shot retrieve → answer" : "the agent plans, retrieves, self-checks, and re-retrieves until it can answer"}</span>
+        </div>
+
+        {answerMode === "agentic" && (
+          <div className="card">
+            <div className="card-h"><span className="t">🤖 Agentic answer</span><span className="mono r">{agentTools.length} tools</span></div>
+            <div className="card-b">
+              {!canQuery && <div className="warnbar">Build the index first (step 3).</div>}
+              <AgenticAnswer
+                chunks={chunks.map((c) => ({ text: c.text, docName: c.docName, docKind: c.docKind }))}
+                tools={agentTools}
+                retrieve={agentRetrieve}
+                chat={agentChat}
+                fetchWeb={agentFetchWeb}
+                defaultQuestion={question}
+                disabled={!canQuery}
+                note={!graph ? <div className="note" style={{ fontSize: 10.5, lineHeight: 1.5 }}>🕸 <b>Knowledge graph</b> appears here once you build one — go to the <b>Index</b> step and pick the <b>Knowledge graph</b> or <b>Hybrid</b> backend, then Build graph.</div> : undefined}
+                modelPicker={
+                  <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    {providers.length > 1 && <select value={providerId} onChange={(e) => { setProviderId(e.target.value); loadModels(e.target.value); }} style={{ width: 176 }} title="Provider">{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>}
+                    <select value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 244 }} disabled={modelsLoading || !models.length} title="Model">
+                      {modelsLoading ? <option>loading…</option> : models.length ? models.map((m) => <option key={m} value={m}>{m}</option>) : <option value="">no models available</option>}
+                    </select>
+                    <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Refresh model list">↻ Fetch models</button>
+                    {provider && <span className="note">{providers.length > 1 ? provider + " · " : ""}{models.length} model{models.length === 1 ? "" : "s"}</span>}
+                    {provKnown && !provider && <span className="note" style={{ color: "var(--warn)" }}>no provider configured — add one under Admin → Providers</span>}
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        {answerMode === "direct" && (
         <div className="split col-2">
           <div className="card">
             <div className="card-h"><span className="t">Retrieve &amp; ask</span></div>
@@ -1161,9 +1231,11 @@ export default function RagLab() {
             </div>
           </div>
         </div>
+        )}
+        </>
       )}
 
-      {step === "query" && index && (
+      {step === "query" && index && answerMode === "direct" && (
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-h"><span className="t">Compare chunking</span><span className="mono r">{strategy} · top-{topK}</span></div>
           <div className="card-b">
