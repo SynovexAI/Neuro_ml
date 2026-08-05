@@ -9,7 +9,10 @@ export { PROVIDER_CATALOG } from "./providerCatalog";
 
 // List models straight from the provider's /models endpoint.
 export async function fetchModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  const url = baseUrl.replace(/\/$/, "") + "/models";
+  // GitHub Models: models.github.ai paths return 410 — the working OpenAI-compatible host is the
+  // Azure inference endpoint, whose /models catalog uses the friendly `name` (the `id` is an azureml:// path).
+  const gh = /models\.github\.ai|models\.inference\.ai\.azure\.com/i.test(baseUrl);
+  const url = gh ? "https://models.inference.ai.azure.com/models" : baseUrl.replace(/\/$/, "") + "/models";
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
   try {
@@ -19,10 +22,17 @@ export async function fetchModels(baseUrl: string, apiKey: string): Promise<stri
     });
     if (!res.ok) throw new Error(`Provider returned HTTP ${res.status}`);
     const j: unknown = await res.json();
-    const arr = (j as { data?: unknown[]; models?: unknown[] }).data
-      ?? (j as { models?: unknown[] }).models ?? [];
+    // Handle the common shapes: {data:[…]}, {models:[…]}, or a bare top-level array.
+    const arr: unknown[] = Array.isArray(j)
+      ? j
+      : (j as { data?: unknown[]; models?: unknown[] }).data ?? (j as { models?: unknown[] }).models ?? [];
     const ids = (arr as Array<{ id?: string; name?: string }>)
-      .map((m) => (m.id || m.name || "").replace(/^models\//, ""))
+      .map((m) => {
+        const id = m.id || "";
+        // Prefer a clean id; fall back to `name` when the id is an azureml:// registry path.
+        const usable = id && !id.startsWith("azureml://") ? id : (m.name || "");
+        return usable.replace(/^models\//, "");
+      })
       .filter(Boolean);
     return Array.from(new Set(ids)).sort();
   } finally {

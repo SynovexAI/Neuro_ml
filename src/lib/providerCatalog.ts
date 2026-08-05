@@ -17,7 +17,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderPreset> = {
   openrouter: { label: "OpenRouter",              baseUrl: "https://openrouter.ai/api/v1",                      free: true,  embeddings: false, keyHint: "openrouter.ai/keys · has free models" },
   mistral:    { label: "Mistral",                 baseUrl: "https://api.mistral.ai/v1",                         free: true,  embeddings: true,  keyHint: "console.mistral.ai · free tier" },
   nvidia:     { label: "NVIDIA NIM",              baseUrl: "https://integrate.api.nvidia.com/v1",               free: true,  embeddings: true,  keyHint: "build.nvidia.com · free credits" },
-  github:     { label: "GitHub Models",           baseUrl: "https://models.github.ai/inference",                free: true,  embeddings: true,  keyHint: "github.com/settings/tokens (PAT) · alt base: models.inference.ai.azure.com" },
+  github:     { label: "GitHub Models",           baseUrl: "https://models.inference.ai.azure.com",            free: true,  embeddings: true,  keyHint: "github.com/settings/tokens · classic PAT with models:read" },
   sambanova:  { label: "SambaNova",               baseUrl: "https://api.sambanova.ai/v1",                       free: true,  embeddings: true,  keyHint: "cloud.sambanova.ai · fast, free tier" },
   huggingface:{ label: "Hugging Face",            baseUrl: "https://router.huggingface.co/v1",                  free: true,  embeddings: true,  keyHint: "huggingface.co/settings/tokens · monthly free credits" },
   cohere:     { label: "Cohere",                  baseUrl: "https://api.cohere.ai/compatibility/v1",            free: true,  embeddings: true,  keyHint: "dashboard.cohere.com · free trial keys" },
