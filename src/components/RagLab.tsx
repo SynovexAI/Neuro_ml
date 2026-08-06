@@ -5,7 +5,8 @@ import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mm
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
-import AgenticAnswer, { type AgentTool, type AgentHit } from "@/components/AgenticAnswer";
+import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
+import ModelPicker from "@/components/ModelPicker";
 
 type Doc = { id: string; name: string; kind: string; text: string };
 type Chunk = { text: string; docName: string; docKind: string };
@@ -22,6 +23,10 @@ const EMB_SUGGEST: Record<string, string[]> = {
   gemini: ["gemini-embedding-001", "text-embedding-004"],
   ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
   openai: ["text-embedding-3-small", "text-embedding-3-large"],
+  mistral: ["mistral-embed"],
+  cohere: ["embed-english-v3.0", "embed-multilingual-v3.0"],
+  github: ["text-embedding-3-small", "text-embedding-3-large", "cohere-embed-v3-english"],
+  nvidia: ["nvidia/nv-embedqa-e5-v5", "nvidia/nv-embed-v1"],
   custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
 };
 const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
@@ -85,6 +90,7 @@ export default function RagLab() {
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
   const [mvOpen, setMvOpen] = useState<number | null>(null); // entity row whose full text is expanded
+  const [embOpenKey, setEmbOpenKey] = useState(0); // bumped after "Fetch models" to auto-open the embed-model picker
 
   // ── knowledge-graph backend ──
   const [backend, setBackend] = useState<Backend>("vector");
@@ -134,6 +140,7 @@ export default function RagLab() {
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
   const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
+  const [agentCfg, setAgentCfg] = useState<AgentConfig>({ enabled: ["vector", "keyword", "hybrid"], maxSteps: 5, topK: 4, selfCheck: true, maxTokens: 1024 });
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
@@ -159,6 +166,8 @@ export default function RagLab() {
       if (c.metric) setMetric(c.metric);
       if (c.topK != null) setTopK(c.topK);
       if (c.question) setQuestion(c.question);
+      if (c.answerMode === "agentic" || c.answerMode === "direct") setAnswerMode(c.answerMode);
+      if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
     }).catch(() => {});
   }, []);
 
@@ -191,7 +200,9 @@ export default function RagLab() {
   // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
   const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
   const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
-  const pickDefaultEmb = (id: string) => models.find((m) => /embed/i.test(m)) || embSuggestFor(provType(id))[0];
+  // Prefer the provider's own suggested embedding model (avoids carrying a stale embed model
+  // from a previously-selected provider); fall back to a fetched embedding-named model.
+  const pickDefaultEmb = (id: string) => embSuggestFor(provType(id))[0] || models.find((m) => /embed/i.test(m)) || "";
   const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
@@ -398,7 +409,7 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg };
     try {
       const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
@@ -415,6 +426,9 @@ export default function RagLab() {
   }
   async function runNeuralEmbed() {
     if (!chunks.length) return; setEmbedding(true); setMsg("");
+    // Always build the sparse index too: retrieval (keyword/hybrid) and canQuery/the store views
+    // all key off `index`; the dense vectors add the semantic layer on top of it.
+    if (!index) setIndex(buildIndex(chunks.map((c) => c.text)));
     try {
       const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
@@ -492,11 +506,19 @@ export default function RagLab() {
       : retrieve(index, query, strat, chunks.length, metric);
     return ranked.slice(0, k).map((h) => ({ i: h.i, score: h.score }));
   }
-  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[]): Promise<string> {
-    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[], opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
     if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
     const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
     for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+    return text;
+  }
+  // Streaming variant for the agent's final answer — emits tokens as they arrive.
+  async function agentChatStream(messages: { role: "system" | "user" | "assistant"; content: string }[], onToken: (t: string) => void, opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; const chunk = dec.decode(value, { stream: true }); text += chunk; onToken(chunk); }
     return text;
   }
   async function agentFetchWeb(url: string): Promise<{ title: string; text: string } | null> {
@@ -906,11 +928,10 @@ export default function RagLab() {
                       <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
                         {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
                           <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
-                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
-                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="gemini-embedding-001" style={{ width: 220 }} />
-                          <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
+                        <div style={{ width: 240 }}><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched · type to search` : "· none fetched"}</label>
+                          <ModelPicker models={embModelOptions(providerId)} value={embModel} onChange={setEmbModel} placeholder="e.g. mistral-embed" openKey={embOpenKey} />
                         </div>
-                        <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
+                        <button className="btn ghost sm" onClick={async () => { await loadModels(providerId || undefined); setEmbOpenKey((k) => k + 1); }} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
                         <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
                       </div>
                       {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
@@ -1092,9 +1113,12 @@ export default function RagLab() {
                 tools={agentTools}
                 retrieve={agentRetrieve}
                 chat={agentChat}
+                chatStream={agentChatStream}
                 fetchWeb={agentFetchWeb}
                 defaultQuestion={question}
                 disabled={!canQuery}
+                config={agentCfg}
+                onConfigChange={setAgentCfg}
                 note={!graph ? <div className="note" style={{ fontSize: 10.5, lineHeight: 1.5 }}>🕸 <b>Knowledge graph</b> appears here once you build one — go to the <b>Index</b> step and pick the <b>Knowledge graph</b> or <b>Hybrid</b> backend, then Build graph.</div> : undefined}
                 modelPicker={
                   <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>

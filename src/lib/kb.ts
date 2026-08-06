@@ -3,7 +3,12 @@ import { chunkText, buildIndex, queryVector, cosine, type RagIndex, type Vec } f
 
 // Best-guess embedding model for an OpenAI-compatible provider base URL.
 export function pickEmbModel(baseUrl: string): string {
-  if (/generativelanguage|gemini/i.test(baseUrl)) return "gemini-embedding-001";
+  const b = (baseUrl || "").toLowerCase();
+  if (/generativelanguage|gemini/.test(b)) return "gemini-embedding-001";
+  if (/mistral/.test(b)) return "mistral-embed";
+  if (/cohere/.test(b)) return "embed-english-v3.0";
+  if (/localhost|127\.0\.0\.1|ollama/.test(b)) return "nomic-embed-text";
+  // OpenAI, GitHub Models (Azure), Together, Fireworks, NVIDIA all serve this family.
   return "text-embedding-3-small";
 }
 
