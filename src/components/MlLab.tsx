@@ -242,6 +242,25 @@ export default function MlLab() {
   }, [prepStage]);
   const [modelStage, setModelStage] = useState(0);
   const modelTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [modelStagePlaying, setModelStagePlaying] = useState(false);
+  // Single-counter staged model view (Logistic Regression): auto-scroll the row walk inside its box.
+  const modelScrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const box = modelScrollRef.current; if (!box) return;
+    const el = box.querySelector(".prep-cur") as HTMLElement | null; if (!el) return;
+    const boxRect = box.getBoundingClientRect(); const elRect = el.getBoundingClientRect();
+    const delta = (elRect.top - boxRect.top) - (box.clientHeight / 2 - el.clientHeight / 2);
+    box.scrollTo({ top: Math.max(0, box.scrollTop + delta), behavior: "smooth" });
+  }, [modelStage]);
+  // Click-to-open "how b / a weight is computed" popup (data + formula, step by step).
+  const [wMath, setWMath] = useState<{ kind: "bias" | "weight"; col: number } | null>(null);
+  const [wMathStage, setWMathStage] = useState(0);
+  const [wMathPlaying, setWMathPlaying] = useState(false);
+  const wMathTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wMathStop = () => { if (wMathTimer.current) { clearInterval(wMathTimer.current); wMathTimer.current = null; } setWMathPlaying(false); };
+  const openWMath = (kind: "bias" | "weight", col: number) => { wMathStop(); setWMathStage(0); setWMath({ kind, col }); };
+  const closeWMath = () => { wMathStop(); setWMath(null); };
+  const wMathPlay = (maxStage: number) => { if (wMathTimer.current) { wMathStop(); return; } setWMathPlaying(true); wMathTimer.current = setInterval(() => { setWMathStage((s) => { if (s >= maxStage) { wMathStop(); return s; } return s + 1; }); }, 1100); };
   const [modelApplied, setModelApplied] = useState(0);
   const [modelApplying, setModelApplying] = useState(false);
   const [modelSpeed, setModelSpeed] = useState(260); // ms per row when applying (bigger = slower)
@@ -707,6 +726,26 @@ ${evalBlock}`;
       <span className="note mono" style={{ marginLeft: "auto" }}>step {Math.min(modelStage, maxStage)} / {maxStage}</span>
     </div>
   );
+  // Single-counter controls for the staged model walkthrough (data → ingredients → formula → apply each row).
+  const modelStagePlay = (maxStage: number) => {
+    if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; setModelStagePlaying(false); return; }
+    setModelStagePlaying(true);
+    modelTimer.current = setInterval(() => { setModelStage((s) => { if (s >= maxStage) { if (modelTimer.current) { clearInterval(modelTimer.current); modelTimer.current = null; } setModelStagePlaying(false); return s; } return s + 1; }); }, modelSpeedRef.current);
+  };
+  const modelStagedControls = (maxStage: number) => (
+    <div className="prep-ctl" style={{ flexWrap: "wrap" }}>
+      <button className="btn ghost sm" disabled={modelStage <= 0} onClick={() => { modelStageStop(); setModelStagePlaying(false); setModelStage((s) => Math.max(0, s - 1)); }}>← back</button>
+      <button className="btn sm" disabled={modelStage >= maxStage} onClick={() => { modelStageStop(); setModelStagePlaying(false); setModelStage((s) => Math.min(maxStage, s + 1)); }}>step →</button>
+      <button className="btn ghost sm" onClick={() => modelStagePlay(maxStage)}>{modelStagePlaying ? "⏸ pause" : "▶ auto"}</button>
+      <button className="btn ghost sm" onClick={() => { modelStageStop(); setModelStagePlaying(false); setModelStage(0); }}>↺ reset</button>
+      <span className="note mono" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>speed
+        <select className="mini-sel" value={modelSpeed} onChange={(e) => { setModelSpeed(+e.target.value); modelSpeedRef.current = +e.target.value; }}>
+          <option value={520}>0.5×</option><option value={260}>1×</option><option value={120}>2×</option><option value={45}>4×</option>
+        </select>
+      </span>
+      <span className="note mono" style={{ marginLeft: "auto" }}>stage {Math.min(modelStage, maxStage) + 1} / {maxStage + 1}</span>
+    </div>
+  );
   // Train-step controls: fit the model (fills the table + animation), then check the metric.
   const trainStop = () => { if (trainTimer.current) { clearInterval(trainTimer.current); trainTimer.current = null; } setTrainRunning(false); };
   function trainRun(kind: "train" | "check", total: number) {
@@ -1152,40 +1191,151 @@ ${evalBlock}`;
     // b + w₁(x₁) + w₂(x₂) + … for one row, as a KaTeX string with the real numbers.
     const linSub = (w: number[], x: number[]) => `${fv(w[0])} ${x.slice(0, 2).map((xi, j) => `${(w[j + 1] ?? 0) < 0 ? "-" : "+"}\\,${fv(Math.abs(w[j + 1] ?? 0))}\\!\\times\\!${fv(xi)}`).join(" ")}${x.length > 2 ? " + \\dots" : ""}`;
 
-    if (kind === "gd" && !isReg) { // Logistic Regression
-      let gw: number[] | null = null;
-      try { const gt = gdTrace(cfgNow(), X, Y, K); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
+    if (kind === "gd" && !isReg) { // Logistic Regression — staged 4-step walkthrough
+      let gw: number[] | null = null; let snaps: { ep: number; loss: number; gnorm: number; w: number[] }[] = []; let lr = 0;
+      try { const gt = gdTrace(cfgNow(), X, Y, K); snaps = gt?.snaps ?? []; lr = gt?.lr ?? 0; gw = snaps.length ? snaps[snaps.length - 1].w : null; } catch { /* ignore */ }
       const z = (r: number[]) => gw ? gw[0] + r.reduce((a, v, j) => a + (gw![j + 1] || 0) * v, 0) : 0;
       const sig = (v: number) => 1 / (1 + Math.exp(-v));
-      const f0 = nrm(colj(idxF)); const pz = X.map((r) => sig(z(r)));
-      const z0 = z(X[0]), p0 = sig(z0);
-      const order = [...idx].sort((a, c) => f0.z[a] - f0.z[c]);
-      intro = "A weighted sum of your features becomes a score z; the sigmoid squashes it to a probability, and 0.5 is the cut between the two classes.";
-      legend = [
-        { sym: "x", desc: "a feature", how: `the ${names[idxF]} cell of row 0`, val: fv(X[0]?.[idxF]) },
-        { sym: "\\mathbf w, b", desc: "weights & bias", how: `gradient descent over your ${n} rows`, val: gw ? `b=${fv(gw[0])}, w₁=${fv(gw[1])}` : "—" },
-        { sym: "z", desc: "linear score", how: "z = b + Σⱼ wⱼ·xⱼ over the row", val: fv(z0) },
-        { sym: "\\hat y", desc: `P(${classes?.[1] ?? "class 1"})`, how: "ŷ = 1 / (1 + e⁻ᶻ)", val: fv(p0) },
-      ];
-      const cls1 = (classes?.[1] ?? "class 1").toString().replace(/[^a-zA-Z0-9 ]/g, " "), cls0 = (classes?.[0] ?? "class 0").toString().replace(/[^a-zA-Z0-9 ]/g, " ");
-      exampleRow = idx[0] ?? 0; orderList = order;
-      chainFor = (r) => { const zr = z(X[r]), pr = sig(zr); return [
-        { sym: "z = b + \\sum_j w_j x_j", sub: gw ? `z = ${linSub(gw, X[r])}` : "z = \\dots", res: `z = ${fv(zr)}` },
-        { sym: "\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", sub: `\\hat y = \\tfrac{1}{1+e^{-(${fv(zr)})}}`, res: `\\hat y = ${fv(pr)}` },
-        { sym: "\\text{class} = 1 \\text{ if } \\hat y \\ge 0.5", sub: `${fv(pr)} \\ge 0.5`, res: `\\Rightarrow \\text{${pr >= 0.5 ? cls1 : cls0}}` },
-      ]; };
-      applyNote = "each row's score becomes a probability on the curve";
-      viz = (applied, curRow, stage) => {
-        const shown = order.slice(0, applied);
-        const c0 = shown.filter((i) => Y[i] === 0), c1 = shown.filter((i) => Y[i] === 1);
-        const data: Record<string, unknown>[] = [
-          { type: "scatter", mode: "lines", name: `P(${cls1}) curve`, x: order.map(xa), y: order.map((i) => pz[i]), line: { color: "#3ecf7f", width: 2.5 } },
-          { type: "scatter", mode: "markers", name: cls0, x: c0.map(xa), y: c0.map((i) => pz[i]), marker: { size: 7, color: PAL_ML[0], line: { width: 1, color: th.paper } } },
-          { type: "scatter", mode: "markers", name: cls1, x: c1.map(xa), y: c1.map((i) => pz[i]), marker: { size: 7, color: PAL_ML[1], line: { width: 1, color: th.paper } } },
-        ];
-        if (applied === 0) data.push({ type: "scatter", mode: "markers", name: "this row", x: [xa(curRow)], y: [stage >= 2 ? pz[curRow] : (Y[curRow] ? 0.86 : 0.14)], marker: { size: 14, color: PAL_ML[Y[curRow] % PAL_ML.length], line: { width: 2, color: th.text } } });
-        return mPlot(data, "each row → its probability; the 0.5 line splits the class", names[idxF], `P(${cls1})`, { shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 0.5, y1: 0.5, line: { color: "#f59e0b", dash: "dash", width: 1.5 } }] });
-      };
+      const clsName = (c: number) => String(classes?.[c] ?? c);
+      const featShow = [...Array(nf).keys()]; // show ALL features (the box scrolls horizontally)
+      const walk = idx.length <= 24 ? idx : idx.filter((_, k) => k % Math.ceil(idx.length / 24) === 0).slice(0, 24);
+      const S_FX = 3, S_APPLY = 6; // 0 = data, 1-2 = weights, 3-5 = formula, 6+ = each row
+      const maxStage = S_APPLY + walk.length - 1;
+      const st2 = modelStage;
+      const phase = st2 === 0 ? 1 : st2 < S_FX ? 2 : st2 < S_APPLY ? 3 : 4;
+      const dimM = (a: boolean): React.CSSProperties => ({ opacity: a ? 1 : 0.55, transition: "opacity .2s" });
+      const PH: [string, string][] = [["1", "your data"], ["2", "learned weights"], ["3", "the formula"], ["4", "predict each row"]];
+      const acc = walk.length ? walk.filter((i) => (sig(z(X[i])) >= 0.5 ? 1 : 0) === Y[i]).length / walk.length : 0;
+      return mCard(`${label} — how it learns`, <>
+        <div className="note" style={{ marginBottom: 10, lineHeight: 1.6 }}>A weighted sum of your features becomes a score z; the sigmoid squashes it to a probability, and 0.5 is the cut between the two classes.</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          {PH.map(([nn, lab], i) => <span key={i} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 20, fontFamily: "var(--mono)", background: phase === i + 1 ? "var(--accent)" : "var(--panel-2)", color: phase === i + 1 ? "#fff" : "var(--muted)", border: `1px solid ${phase === i + 1 ? "var(--accent)" : "var(--border)"}` }}>{nn} · {lab}</span>)}
+        </div>
+
+        {/* ① data — PINNED on top */}
+        <div className="prep-col" style={{ marginBottom: 10, ...dimM(phase === 1) }}>
+          <div className="prep-col-h">① your data · {n} rows × {nf} features → target “{target}”</div>
+          <div style={{ maxHeight: 168, overflow: "auto", border: `1px solid ${phase === 1 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: "var(--surface)", padding: 8 }}>
+            <div style={{ minWidth: "max-content" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--faint)", paddingBottom: 5, borderBottom: "1px solid var(--border)", marginBottom: 5 }}>
+                <span style={{ width: 52, flex: "0 0 auto" }}>row</span>{featShow.map((j) => <span key={j} title={names[j]} style={{ width: 80, flex: "0 0 auto", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{names[j]}</span>)}<span style={{ width: 74, flex: "0 0 auto", textAlign: "right", color: "var(--muted)" }}>{target} (true)</span>
+              </div>
+              {walk.map((i) => <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "var(--mono)", fontSize: 11 }}>
+                <span style={{ width: 52, flex: "0 0 auto", color: "var(--faint)" }}>{i}</span>
+                {featShow.map((j) => <span key={j} style={{ width: 80, flex: "0 0 auto", textAlign: "right" }}>{fv(X[i]?.[j])}</span>)}
+                <span style={{ width: 74, flex: "0 0 auto", textAlign: "right", fontWeight: 600, color: PAL_ML[Y[i] % PAL_ML.length] }}>{clsName(Y[i])}</span>
+              </div>)}
+            </div>
+          </div>
+          <div className="note" style={{ marginTop: 6, fontSize: 10.5, lineHeight: 1.5 }}>These are the model’s <b>inputs after preprocessing</b> — numeric features are scaled (so <code>age</code> shows z-scores, not years) and categorical ones are one-hot encoded (e.g. <code>contract=Month-to-month</code>). The last column is the true <b>{target}</b> label each prediction is checked against. Scroll right to see all {nf} features.</div>
+        </div>
+        <div className="note" style={{ marginBottom: 6, fontSize: 11 }}>steps ②③④ — scroll inside the box below; your data stays pinned above</div>
+
+        {/* ②③④ in ONE scroll container — auto-scrolls to the row being scored */}
+        <div ref={modelScrollRef} style={{ maxHeight: 340, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel-2)", padding: 12, display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ ...dimM(phase === 2) }}>
+            <div className="prep-col-h">② the weights gradient descent learned over your {n} rows · <span style={{ color: "var(--accent)" }}>click b or a weight to see how it&apos;s computed</span></div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
+              <div onClick={() => openWMath("bias", 0)} title="click to see how b is computed" style={{ border: `1px solid ${st2 >= 1 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: st2 >= 1 ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "var(--surface)", padding: "10px 12px", opacity: st2 >= 1 ? 1 : 0.45, transition: "all .25s", cursor: "pointer" }}>
+                <div className="note" style={{ marginBottom: 4, display: "flex", justifyContent: "space-between" }}>bias (intercept) <span style={{ color: "var(--accent)" }}>🔍</span></div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}><Katex tex="b" /><span style={{ color: "var(--faint)" }}>=</span><b style={{ fontFamily: "var(--mono)", fontSize: 18 }}>{st2 >= 1 ? fv(gw?.[0]) : "…"}</b></div>
+              </div>
+              <div style={{ border: `1px solid ${st2 >= 2 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: st2 >= 2 ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "var(--surface)", padding: "10px 12px", opacity: st2 >= 2 ? 1 : 0.45, transition: "all .25s" }}>
+                <div className="note" style={{ marginBottom: 4 }}>feature weights <span style={{ color: "var(--faint)" }}>(click one)</span></div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 10px", fontFamily: "var(--mono)", fontSize: 12 }}>{featShow.map((j) => <span key={j} onClick={() => openWMath("weight", j)} title={`click to see how w${j + 1} (${names[j]}) is computed`} style={{ cursor: "pointer", borderBottom: "1px dashed var(--accent)", color: "var(--accent)" }}>w<sub>{j + 1}</sub>({names[j].slice(0, 6)})={st2 >= 2 ? fv(gw?.[j + 1]) : "…"}</span>)}</div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ ...dimM(phase === 3) }}>
+            <div className="prep-col-h">③ the formula</div>
+            {["z = b + \\sum_j w_j x_j", "\\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}}", "\\text{class} = 1 \\text{ if } \\hat y \\ge 0.5"].map((tex, i) => <div key={i} className={`fx-line ${st2 >= S_FX + i ? "on" : ""}`}><Katex block tex={tex} /></div>)}
+          </div>
+
+          <div style={{ ...dimM(phase === 4) }}>
+            <div className="prep-col-h">④ predict each row — z → ŷ → class, check vs the true label</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {walk.map((i, k) => { const zr = z(X[i]), pr = sig(zr); const pred = pr >= 0.5 ? 1 : 0; const resolved = st2 >= S_APPLY + k; const cur = st2 === S_APPLY + k; const correct = pred === Y[i];
+                return <div key={i} className={cur ? "prep-cur" : ""} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "var(--mono)", fontSize: 12, animation: cur ? "prepPop .45s ease" : undefined, opacity: resolved || cur ? 1 : 0.5, transition: "opacity .2s" }}>
+                  <span style={{ color: "var(--faint)", width: 46, flex: "0 0 auto" }}>row {i}</span>
+                  <span style={{ width: 78, flex: "0 0 auto", color: "var(--muted)" }}>z={resolved ? fv(zr) : "…"}</span>
+                  <span style={{ width: 86, flex: "0 0 auto", color: "var(--muted)" }}>ŷ={resolved ? fv(pr) : "…"}</span>
+                  <span style={{ flex: 1, padding: "3px 9px", borderRadius: 6, background: resolved ? (correct ? "color-mix(in srgb, var(--good) 15%, transparent)" : "color-mix(in srgb, var(--crit) 12%, transparent)") : "var(--surface)", border: `1px solid ${cur ? "var(--accent)" : resolved ? (correct ? "var(--good)" : "var(--crit)") : "var(--border)"}`, boxShadow: cur ? "0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent)" : undefined, color: resolved ? (correct ? "var(--good)" : "var(--crit)") : "var(--faint)", fontWeight: resolved ? 700 : 400 }}>{resolved ? clsName(pred) : "…"}</span>
+                  <span style={{ width: 96, flex: "0 0 auto", fontFamily: "var(--font-sans, sans-serif)", fontSize: 11, color: cur ? "var(--accent)" : !resolved ? "var(--faint)" : correct ? "var(--good)" : "var(--crit)" }}>{cur ? "checking…" : !resolved ? "pending" : correct ? `✓ ${clsName(Y[i])}` : `✗ true ${clsName(Y[i])}`}</span>
+                </div>; })}
+            </div>
+            {st2 >= maxStage && <div className="note" style={{ marginTop: 8 }}>accuracy on these {walk.length} rows = <b style={{ color: "var(--good)" }}>{(acc * 100).toFixed(0)}%</b></div>}
+          </div>
+        </div>
+
+        {modelStagedControls(maxStage)}
+
+        {wMath && (() => {
+          const isBias = wMath.kind === "bias"; const j = wMath.col; const eta = lr;
+          const mRows = [...Array(Math.min(n, 14)).keys()]; // exact, contiguous rows 0,1,2,…
+          const g = (() => { let s = 0; for (let t = 0; t < n; t++) s += (0.5 - Y[t]) * (isBias ? 1 : (X[t]?.[j] ?? 0)); return s / (n || 1); })();
+          const step1 = 0 - eta * g;
+          const final = isBias ? (gw?.[0] ?? 0) : (gw?.[j + 1] ?? 0);
+          const lastEp = snaps.length ? snaps[snaps.length - 1].ep : 0;
+          const symK = isBias ? "b" : `w_{${j + 1}}`;
+          const titleName = isBias ? "the bias b" : `weight w${j + 1} · ${names[j]}`;
+          const mMax = 5; const stg = Math.min(wMathStage, mMax);
+          const lines: { tex: string; note: string }[] = [
+            { tex: "\\text{start: all weights} = 0", note: "so the score z = 0 for every row" },
+            { tex: "\\hat y = \\sigma(0) = 0.5", note: "with weights at 0, every prediction is exactly 0.5" },
+            { tex: "e = \\hat y - y = 0.5 - y", note: "how far each prediction is from the true label (y is 0 or 1)" },
+            { tex: isBias ? `g = \\tfrac1n\\!\\sum e = ${fv(g, 3)}` : `g = \\tfrac1n\\!\\sum e\\,x = ${fv(g, 3)}`, note: isBias ? "average of the errors" : `average of the errors, each weighted by that row's “${names[j]}” value` },
+            { tex: `${symK} \\leftarrow 0 - \\eta\\,g = -${fv(eta, 3)}\\times ${fv(g, 3)} = ${fv(step1, 3)}`, note: `η = ${fv(eta, 3)} is the learning rate — this is the first nudge away from 0` },
+            { tex: `\\text{repeat} \\Rightarrow ${symK} = ${fv(final, 3)}`, note: `re-predict → re-error → nudge, ${lastEp} times, until it settles here` },
+          ];
+          return <div onClick={closeWMath} style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ width: "min(1120px, 97vw)", maxHeight: "92vh", overflow: "auto", background: "var(--panel)", border: "1px solid var(--border-strong)", borderRadius: 14, boxShadow: "0 20px 60px rgba(0,0,0,.5)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+                <b style={{ fontSize: 14 }}>🔍 How {titleName} is computed</b>
+                {!isBias && <select value={j} onChange={(e) => openWMath("weight", +e.target.value)} style={{ maxWidth: 220 }}>{names.map((nm, jj) => <option key={jj} value={jj}>{nm}</option>)}</select>}
+                <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={closeWMath}>✕ close</button>
+              </div>
+              <div style={{ margin: "14px 16px 0", border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "10px 14px" }}>
+                <div className="note" style={{ marginBottom: 6 }}>reference — the full formula ({isBias ? "for the bias" : `for weight w${j + 1}`}):</div>
+                <div className="mathrow" style={{ marginBottom: 2 }}><Katex tex={"z = b + \\textstyle\\sum_j w_j x_j \\qquad \\hat y = \\sigma(z) = \\tfrac{1}{1+e^{-z}} \\qquad e = \\hat y - y"} /></div>
+                <div className="mathrow"><Katex tex={isBias ? "g_b = \\tfrac1n\\textstyle\\sum_i e_i \\qquad b \\leftarrow b - \\eta\\,g_b" : `g_{${j + 1}} = \\tfrac1n\\textstyle\\sum_i e_i\\,x_{i,${j + 1}} \\qquad w_{${j + 1}} \\leftarrow w_{${j + 1}} - \\eta\\,g_{${j + 1}}`} /></div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, padding: 16 }}>
+                <div>
+                  <div className="prep-col-h">your data {isBias ? "" : `· “${names[j]}” = x`} — exact rows</div>
+                  <div style={{ maxHeight: 380, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 8 }}>
+                    <div style={{ display: "flex", gap: 8, fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--faint)", paddingBottom: 5, borderBottom: "1px solid var(--border)", marginBottom: 5 }}>
+                      <span style={{ width: 40, flex: "0 0 auto" }}>row</span>{!isBias && <span style={{ width: 104, flex: "0 0 auto", textAlign: "right", color: "var(--accent)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={names[j]}>x = {names[j]}</span>}<span style={{ width: 116, flex: "0 0 auto", textAlign: "right" }}>y = {target}</span><span style={{ width: 54, flex: "0 0 auto", textAlign: "right" }}>ŷ</span><span style={{ width: 66, flex: "0 0 auto", textAlign: "right" }}>e = ŷ−y</span>
+                    </div>
+                    {mRows.map((i) => { const e = 0.5 - Y[i]; return <div key={i} style={{ display: "flex", gap: 8, fontFamily: "var(--mono)", fontSize: 11 }}>
+                      <span style={{ width: 40, flex: "0 0 auto", color: "var(--faint)" }}>{i}</span>
+                      {!isBias && <span style={{ width: 104, flex: "0 0 auto", textAlign: "right" }}>{fv(X[i]?.[j])}</span>}
+                      <span style={{ width: 116, flex: "0 0 auto", textAlign: "right", color: PAL_ML[Y[i] % PAL_ML.length] }}>{Y[i]} · {clsName(Y[i])}</span>
+                      <span style={{ width: 54, flex: "0 0 auto", textAlign: "right", color: stg >= 1 ? "var(--text)" : "var(--faint)" }}>{stg >= 1 ? "0.50" : "…"}</span>
+                      <span style={{ width: 66, flex: "0 0 auto", textAlign: "right", fontWeight: 700, color: stg >= 2 ? (e >= 0 ? "var(--crit)" : "var(--good)") : "var(--faint)" }}>{stg >= 2 ? fv(e) : "…"}</span>
+                    </div>; })}
+                    <div className="note" style={{ marginTop: 6, lineHeight: 1.5 }}>y = the true <b>{target}</b> label ({clsName(0)}→0, {clsName(1)}→1){isBias ? "" : `; x = the “${names[j]}” feature`}. ŷ = predicted probability of {clsName(1)}; e = ŷ−y is the error. … {n} rows total.</div>
+                  </div>
+                </div>
+                <div>
+                  <div className="prep-col-h">the same formula, filled in with your numbers · step by step</div>
+                  {lines.map((l, i) => <div key={i} className={`fx-chain ${stg >= i ? "on" : ""}`} style={{ opacity: stg >= i ? 1 : 0.32, marginBottom: 8 }}>
+                    <div className="fx-cl"><span className="fx-tag">step {i}</span><Katex tex={l.tex} /></div>
+                    {stg >= i ? <div className="note" style={{ marginTop: 2 }}>{l.note}</div> : null}
+                  </div>)}
+                </div>
+              </div>
+              <div className="prep-ctl" style={{ flexWrap: "wrap", padding: "0 16px 16px" }}>
+                <button className="btn ghost sm" disabled={wMathStage <= 0} onClick={() => { wMathStop(); setWMathStage((s) => Math.max(0, s - 1)); }}>← back</button>
+                <button className="btn sm" disabled={wMathStage >= mMax} onClick={() => { wMathStop(); setWMathStage((s) => Math.min(mMax, s + 1)); }}>step →</button>
+                <button className="btn ghost sm" onClick={() => wMathPlay(mMax)}>{wMathPlaying ? "⏸ pause" : "▶ play"}</button>
+                <button className="btn ghost sm" onClick={() => { wMathStop(); setWMathStage(0); }}>↺ reset</button>
+                <span className="note mono" style={{ marginLeft: "auto" }}>step {stg} / {mMax}</span>
+              </div>
+            </div>
+          </div>;
+        })()}
+      </>);
     } else if (kind === "gd" && isReg) { // Linear / Ridge Regression
       let gw: number[] | null = null;
       try { const gt = gdTrace(cfgNow(), X, Y, 0); const last = gt?.snaps?.[(gt?.snaps?.length ?? 0) - 1]; gw = last?.w || null; } catch { /* ignore */ }
