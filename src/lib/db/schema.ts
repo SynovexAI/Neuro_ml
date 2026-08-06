@@ -38,6 +38,22 @@ export const providers = mysqlTable("providers", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
 
+// Per-user LLM providers (each user brings their OWN key). Separate from the admin
+// `providers` table so the shared/global flow is untouched. Resolution prefers a user's
+// own enabled provider, then falls back to the global ones. Keys are AES-256-GCM encrypted.
+export const userProviders = mysqlTable("user_providers", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  provider: varchar("provider", { length: 40 }).notNull(),
+  label: varchar("label", { length: 120 }),
+  baseUrl: varchar("base_url", { length: 255 }).notNull(),
+  apiKeyEnc: text("api_key_enc"),
+  defaultModel: varchar("default_model", { length: 120 }),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
+}, (t) => [index("user_providers_user_idx").on(t.userId)]);
+
 // Saved student/admin builds across labs (prompt, rag, agent, ml, dl, etl, compose).
 export const projects = mysqlTable("projects", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -156,6 +172,15 @@ export const knowledgeBases = mysqlTable("knowledge_bases", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 }, (t) => [index("kb_user_idx").on(t.userId)]);
 
+// Exact original document text per KB (so KB → RAG/agent uses the real text, not a
+// chunk-reconstruction). Populated on sync alongside kb_chunks.
+export const kbDocs = mysqlTable("kb_docs", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  kbId: varchar("kb_id", { length: 36 }).notNull(),
+  name: varchar("name", { length: 200 }),
+  text: text("text"),
+}, (t) => [index("kb_docs_kb_idx").on(t.kbId)]);
+
 export const kbChunks = mysqlTable("kb_chunks", {
   id: varchar("id", { length: 36 }).primaryKey(),
   kbId: varchar("kb_id", { length: 36 }).notNull(),
@@ -167,6 +192,7 @@ export const kbChunks = mysqlTable("kb_chunks", {
 
 export type User = typeof users.$inferSelect;
 export type Provider = typeof providers.$inferSelect;
+export type UserProvider = typeof userProviders.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Usage = typeof usage.$inferSelect;
 export type McpServer = typeof mcpServers.$inferSelect;

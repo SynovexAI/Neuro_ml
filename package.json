@@ -16,8 +16,12 @@
   },
   "dependencies": {
     "@dsnp/parquetjs": "^1.8.8",
+    "@tidbcloud/serverless": "^0.3.0",
+    "@vercel/analytics": "^1.6.1",
+    "@vercel/blob": "^2.7.0",
     "@xyflow/react": "^12.11.2",
     "alasql": "^4.17.3",
+    "aws4fetch": "^1.0.20",
     "drizzle-orm": "^0.45.2",
     "katex": "^0.18.1",
     "mammoth": "^1.12.0",

@@ -22,8 +22,10 @@ function Badges({ p }: { p: { free: boolean; embeddings: boolean } }) {
   );
 }
 
-export default function ProvidersManager({ initial }: { initial: Row[] }) {
+// basePath defaults to the admin (global) endpoints; pass "/api/me/providers" for a user's own keys.
+export default function ProvidersManager({ initial, basePath = "/api/admin/providers", modelsPath }: { initial: Row[]; basePath?: string; modelsPath?: string }) {
   const router = useRouter();
+  const MODELS_PATH = modelsPath || `${basePath}/models`;
   const [provider, setProvider] = useState("groq");
   const [baseUrl, setBaseUrl] = useState(CATALOG.groq.baseUrl);
   const [apiKey, setApiKey] = useState("");
@@ -44,7 +46,7 @@ export default function ProvidersManager({ initial }: { initial: Row[] }) {
   async function loadModels() {
     setBusy(true); setMsg(null);
     try {
-      const r = await fetch("/api/admin/providers/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ baseUrl, apiKey, provider }) });
+      const r = await fetch(MODELS_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ baseUrl, apiKey, provider }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed to load models");
       setModels(j.models); setDefaultModel(j.models[0] || "");
@@ -58,10 +60,10 @@ export default function ProvidersManager({ initial }: { initial: Row[] }) {
     if (!defaultModel) { setMsg({ type: "err", text: "Pick or type a default model first." }); return; }
     setBusy(true); setMsg(null);
     try {
-      const r = await fetch("/api/admin/providers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider, baseUrl, apiKey, defaultModel, label: meta(provider).label }) });
+      const r = await fetch(basePath, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider, baseUrl, apiKey, defaultModel, label: meta(provider).label }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed to save");
-      setApiKey(""); setModels([]); setDefaultModel(""); setMsg({ type: "ok", text: "Provider saved and available platform-wide." });
+      setApiKey(""); setModels([]); setDefaultModel(""); setMsg({ type: "ok", text: "Provider saved." });
       router.refresh();
     } catch (e) { setMsg({ type: "err", text: (e as Error).message }); }
     finally { setBusy(false); }
@@ -69,11 +71,11 @@ export default function ProvidersManager({ initial }: { initial: Row[] }) {
 
   async function del(id: string) {
     if (!confirm("Delete this provider? Any lab using it will fall back to another enabled provider (or TF-IDF).")) return;
-    await fetch(`/api/admin/providers/${id}`, { method: "DELETE" });
+    await fetch(`${basePath}/${id}`, { method: "DELETE" });
     if (editId === id) { setEditId(null); setEdit(null); }
     router.refresh();
   }
-  async function toggleEnabled(p: Row) { await fetch(`/api/admin/providers/${p.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: !p.enabled }) }); router.refresh(); }
+  async function toggleEnabled(p: Row) { await fetch(`${basePath}/${p.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: !p.enabled }) }); router.refresh(); }
 
   function openEdit(p: Row) {
     if (editId === p.id) { setEditId(null); setEdit(null); return; }
@@ -88,7 +90,7 @@ export default function ProvidersManager({ initial }: { initial: Row[] }) {
     try {
       // use the typed key/url if provided, else the stored key via id
       const body = edit.apiKey.trim() ? { baseUrl: edit.baseUrl, apiKey: edit.apiKey.trim(), provider: p.provider } : { id: p.id, baseUrl: edit.baseUrl };
-      const r = await fetch("/api/admin/providers/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const r = await fetch(MODELS_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed to load models");
       patchEdit({ models: j.models, msg: { type: "ok", text: `Loaded ${j.models.length} models` }, defaultModel: edit.defaultModel && j.models.includes(edit.defaultModel) ? edit.defaultModel : (j.models[0] || edit.defaultModel) });
@@ -103,7 +105,7 @@ export default function ProvidersManager({ initial }: { initial: Row[] }) {
     try {
       const body: Record<string, unknown> = { baseUrl: edit.baseUrl, defaultModel: edit.defaultModel };
       if (edit.apiKey.trim()) body.apiKey = edit.apiKey.trim();
-      const r = await fetch(`/api/admin/providers/${p.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const r = await fetch(`${basePath}/${p.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed to save");
       setEditId(null); setEdit(null);
