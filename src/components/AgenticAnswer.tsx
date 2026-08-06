@@ -58,6 +58,35 @@ function parseAction(raw: string): { thought?: string; action?: string; tool?: s
 
 const snippet = (s: string, n = 260) => (s.length > n ? s.slice(0, n).trimEnd() + "…" : s);
 
+const CopySvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const CheckSvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button className="out-copy-btn" onClick={onCopy} title={copied ? "Copied!" : "Copy to clipboard"}>
+      {copied ? <CheckSvg /> : <CopySvg />}
+    </button>
+  );
+}
+
 export default function AgenticAnswer({ chunks, tools, retrieve, chat, fetchWeb, modelLabel, modelPicker, note, defaultQuestion, disabled, compact }: Props) {
   const [question, setQuestion] = useState(defaultQuestion || "What is the refund policy for damaged items?");
   const [enabled, setEnabled] = useState<Set<AgentTool>>(new Set(tools.filter((t) => t !== "web")));
@@ -280,9 +309,10 @@ export default function AgenticAnswer({ chunks, tools, retrieve, chat, fetchWeb,
 
       {/* final answer */}
       {final && (
-        <div style={{ border: "1px solid color-mix(in srgb, var(--good) 45%, var(--border))", borderRadius: 12, background: "color-mix(in srgb, var(--good) 8%, transparent)", padding: "14px 16px" }}>
+        <div style={{ border: "1px solid color-mix(in srgb, var(--good) 45%, var(--border))", borderRadius: 12, background: "color-mix(in srgb, var(--good) 8%, transparent)", padding: "14px 16px", position: "relative" }}>
+          <CopyBtn text={final.answer} />
           <div style={{ fontSize: 10.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em", color: "var(--good)", marginBottom: 8 }}>◆ answer</div>
-          <div style={{ fontSize: 14, lineHeight: 1.65, color: "var(--text)", whiteSpace: "pre-wrap" }}>{final.answer}</div>
+          <div style={{ fontSize: 14, lineHeight: 1.65, color: "var(--text)", whiteSpace: "pre-wrap", paddingRight: 40 }}>{final.answer}</div>
           {final.citations.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12, paddingTop: 11, borderTop: "1px solid color-mix(in srgb, var(--good) 30%, var(--border))" }}>
               <span className="note">sources:</span>

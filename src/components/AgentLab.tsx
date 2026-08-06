@@ -57,8 +57,35 @@ type TraceItem = { kind: "thought" | "action" | "observation" | "final" | "error
 type ANode = { id: string; type: "trigger" | "agent" | "output" | "model" | "tool"; toolId?: string; icon: string; title: string; sub: string; w: number; h: number; bottom?: string[] };
 
 const CANVAS_W = 980, CANVAS_H = 400;
-const DEFAULT_POS: Record<string, { x: number; y: number }> = { trigger: { x: 24, y: 150 }, agent: { x: 306, y: 108 }, output: { x: 772, y: 150 }, model: { x: 150, y: 300 } };
-const toolDefault = (i: number) => ({ x: 344 + i * 158, y: 300 });
+const DEFAULT_POS: Record<string, { x: number; y: number }> = { trigger: { x: 24, y: 130 }, agent: { x: 306, y: 130 }, output: { x: 772, y: 130 } };
+const CopySvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const CheckSvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button className="out-copy-btn" onClick={onCopy} title={copied ? "Copied!" : "Copy to clipboard"}>
+      {copied ? <CheckSvg /> : <CopySvg />}
+    </button>
+  );
+}
 
 export default function AgentLab() {
   const [step, setStep] = useState<Step>("type");
@@ -156,10 +183,10 @@ export default function AgentLab() {
 
   const hasProvider = providers.length > 0;
   const toolList = AGENT_TOOLS.filter((t) => enabledTools.has(t.id));
-  const togglePlaced = (id: string) => setPlacedTools((s) => { const n = new Set(s); if (n.has(id)) { n.delete(id); setEnabledTools((e) => { const m = new Set(e); m.delete(id); return m; }); } else n.add(id); return n; });
-  const connectTool = (id: string) => { setPlacedTools((s) => new Set(s).add(id)); setEnabledTools((s) => new Set(s).add(id)); };
-  const disconnectTool = (id: string) => setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; });
-  const removeToolNode = (id: string) => { setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; }); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
+  const togglePlaced = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); if (n.has(id)) { n.delete(id); setEnabledTools((e) => { const m = new Set(e); m.delete(id); return m; }); } else { n.add(id); setEnabledTools((e) => new Set(e).add(id)); } return n; }); };
+  const connectTool = (id: string) => { setNodePos({}); setPlacedTools((s) => new Set(s).add(id)); setEnabledTools((s) => new Set(s).add(id)); };
+  const disconnectTool = (id: string) => { setNodePos({}); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
+  const removeToolNode = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; }); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
   const toggleManual = (id: string) => (enabledTools.has(id) ? disconnectTool(id) : connectTool(id));
   function loadModels(pid: string) {
     setProviderId(pid);
@@ -185,40 +212,72 @@ export default function AgentLab() {
 
   // ── node canvas model ──
   const placedOrder = [...placedTools];
+  const subNodes = ["model", ...placedOrder.map((tid) => "tool:" + tid)];
+
+  const getSubDefaultPos = (subId: string) => {
+    const idx = subNodes.indexOf(subId);
+    if (idx === -1) return { x: 150, y: 300 };
+    const total = subNodes.length;
+    const nodeW = 160;
+    const gap = 24;
+    const totalW = total * nodeW + (total - 1) * gap;
+    const startX = Math.max(20, 406 - totalW / 2);
+    return { x: Math.round(startX + idx * (nodeW + gap)), y: 300 };
+  };
+
+  const getPos = (id: string) => nodePos[id] || DEFAULT_POS[id] || getSubDefaultPos(id);
+
   const nodes: ANode[] = [
-    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 150, h: 56 },
-    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 200, h: 88, bottom: ["model", "tools"] },
-    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 150, h: 56 },
-    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 172, h: 54 },
-    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 150, h: 54 })),
+    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 150, h: 54 },
+    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 200, h: 54 },
+    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 150, h: 54 },
+    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 160, h: 54 },
+    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 160, h: 54 })),
   ];
-  const getPos = (id: string) => nodePos[id] || DEFAULT_POS[id] || toolDefault(Math.max(0, placedOrder.indexOf(id.replace("tool:", ""))));
-  function portPos(n: ANode, which: "in" | "out" | "top" | number): [number, number] {
+
+  const agentNode = nodes.find((n) => n.id === "agent")!;
+
+  function portPos(n: ANode, which: "in" | "out" | "top" | string | number): [number, number] {
     const p = getPos(n.id);
     if (which === "in") return [p.x, p.y + n.h / 2];
     if (which === "out") return [p.x + n.w, p.y + n.h / 2];
     if (which === "top") return [p.x + n.w / 2, p.y];
-    const cnt = n.bottom!.length; return [p.x + (n.w * ((which as number) + 1)) / (cnt + 1), p.y + n.h];
+    const idx = typeof which === "number" ? which : subNodes.indexOf(String(which));
+    const total = Math.max(1, subNodes.length);
+    const safeIdx = idx >= 0 ? idx : 0;
+    const portX = p.x + (n.w * (safeIdx + 1)) / (total + 1);
+    return [portX, p.y + n.h];
   }
-  const agentNode = nodes.find((n) => n.id === "agent")!;
+
   const wires = [
-    { from: "trigger", to: "agent", kind: "main", port: 0 },
-    { from: "agent", to: "output", kind: "main", port: 0 },
-    { from: "model", to: "agent", kind: "sub", port: 0 },
-    ...[...enabledTools].filter((tid) => placedTools.has(tid)).map((tid) => ({ from: "tool:" + tid, to: "agent", kind: "sub", port: 1 })),
+    { from: "trigger", to: "agent", kind: "main" },
+    { from: "agent", to: "output", kind: "main" },
+    { from: "model", to: "agent", kind: "sub" },
+    ...[...enabledTools].filter((tid) => placedTools.has(tid)).map((tid) => ({ from: "tool:" + tid, to: "agent", kind: "sub" })),
   ];
-  function wirePath(w: { from: string; to: string; kind: string; port: number }): string {
+
+  function wirePath(w: { from: string; to: string; kind: string }): string {
     const a = nodes.find((n) => n.id === w.from), b = nodes.find((n) => n.id === w.to);
     if (!a || !b) return "";
-    if (w.kind === "main") { const [x1, y1] = portPos(a, "out"); const [x2, y2] = portPos(b, "in"); const dx = Math.max(40, (x2 - x1) / 2); return `M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`; }
-    const [sx, sy] = portPos(a, "top"); const [bx, by] = portPos(agentNode, w.port); return `M${bx} ${by} C${bx} ${by + 38}, ${sx} ${sy - 38}, ${sx} ${sy}`;
+    if (w.kind === "main") {
+      const [x1, y1] = portPos(a, "out");
+      const [x2, y2] = portPos(b, "in");
+      const dx = Math.max(40, (x2 - x1) / 2);
+      return `M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+    }
+    const [sx, sy] = portPos(a, "top");
+    const [bx, by] = portPos(agentNode, w.from);
+    const dy = Math.max(30, Math.abs(sy - by) / 2);
+    return `M${bx} ${by} C${bx} ${by + dy}, ${sx} ${sy - dy}, ${sx} ${sy}`;
   }
+
   function onNodeDown(e: React.PointerEvent, id: string) {
     const start = getPos(id); const sx = e.clientX, sy = e.clientY; let moved = false;
     const mv = (ev: PointerEvent) => { const dx = ev.clientX - sx, dy = ev.clientY - sy; if (Math.abs(dx) + Math.abs(dy) > 4) moved = true; setNodePos((p) => ({ ...p, [id]: { x: Math.max(0, start.x + dx), y: Math.max(0, start.y + dy) } })); };
     const up = () => { document.removeEventListener("pointermove", mv); document.removeEventListener("pointerup", up); if (!moved) setASel(id); };
     document.addEventListener("pointermove", mv); document.addEventListener("pointerup", up); e.preventDefault();
   }
+
   // Drag a port to another node to wire it up (n8n-style start→end connection).
   function portDown(e: React.PointerEvent, id: string, kind: "tool" | "agent") {
     e.stopPropagation(); e.preventDefault();
@@ -238,16 +297,18 @@ export default function AgentLab() {
     };
     document.addEventListener("pointermove", mv); document.addEventListener("pointerup", up);
   }
+
   function tempWirePath(): string {
     if (!connectFrom) return "";
     let src: [number, number];
-    if (connectFrom.kind === "agent") src = portPos(agentNode, 1);
+    if (connectFrom.kind === "agent") src = portPos(agentNode, 0);
     else { const tn = nodes.find((n) => n.id === connectFrom.id); if (!tn) return ""; src = portPos(tn, "top"); }
     return `M${src[0]} ${src[1]} C${src[0]} ${src[1] + 40}, ${connectXY.x} ${connectXY.y - 40}, ${connectXY.x} ${connectXY.y}`;
   }
+
   const flowCanvas = () => (
     <div className="acanvas" ref={canvasRef} onClick={() => setAddOpen(false)}>
-      <svg className="wires2" width={CANVAS_W} height={CANVAS_H}>
+      <svg className="wires2" width="100%" height={CANVAS_H}>
         {wires.map((w, i) => { const act = ["running", "done"].includes(nodeStatus[w.from] || "") || ["running", "done"].includes(nodeStatus[w.to] || ""); const sel = w.kind === "sub" && aSel === w.from; return <path key={i} className={`${w.kind === "sub" ? "sub" : ""} ${act ? "active" : ""} ${sel ? "selw" : ""}`} d={wirePath(w)} />; })}
         {wires.filter((w) => w.kind === "sub").map((w, i) => <path key={"hit" + i} className="wire-hit" d={wirePath(w)} onClick={(e) => { e.stopPropagation(); setASel(w.from); }} />)}
         {connectFrom && <path className="sub selw" d={tempWirePath()} />}
@@ -256,7 +317,18 @@ export default function AgentLab() {
         <div key={n.id} className={`anode type-${n.type} ${aSel === n.id ? "sel" : ""} ${st} ${unwired ? "unwired" : ""}`} style={{ left: pos.x, top: pos.y, width: n.w }} onPointerDown={(e) => onNodeDown(e, n.id)}>
           <div className="ah"><span className="aic">{n.icon}</span><div><div className="atitle">{n.title}</div><div className="asub">{unwired ? "drag ↑ to connect" : n.sub}</div></div><span className="abadge" /></div>
           {n.type === "tool" && <span className="aport ap-top" title="drag to the Agent to connect" onPointerDown={(e) => portDown(e, n.id, "tool")} />}
-          {n.type === "agent" && <span className="aport ap-agent" title="drag to a tool to connect" onPointerDown={(e) => portDown(e, "agent", "agent")} />}
+          {n.type === "agent" && subNodes.map((subId, idx) => {
+            const px = (n.w * (idx + 1)) / (subNodes.length + 1);
+            return (
+              <span
+                key={subId}
+                className="aport ap-agent-bottom"
+                style={{ left: px, bottom: -5 }}
+                title="drag to a tool to connect"
+                onPointerDown={(e) => portDown(e, "agent", "agent")}
+              />
+            );
+          })}
           {n.type === "tool" && <button className="anode-x" title="Remove node" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeToolNode(n.toolId!); if (aSel === n.id) setASel("agent"); }}>×</button>}
         </div>
       ); })}
@@ -638,9 +710,21 @@ if __name__ == "__main__":
           <div className="card-h"><span className="t">When do you actually need an agent?</span></div>
           <div className="card-b">
             <div className="whenuse">
-              <div className="wu"><b>Single prompt</b><span>One question, one answer, no tools or steps. Cheapest & fastest — use the Prompting Lab.</span></div>
-              <div className="wu"><b>Workflow</b><span>A fixed sequence you always run in the same order (plan → draft → review). Predictable & debuggable.</span></div>
-              <div className="wu on"><b>Tool agent (ReAct)</b><span>The task needs live facts, math, APIs, or decisions the model must make itself. Powerful, but slower & pricier — you trade control for autonomy.</span></div>
+              <div className="wu step-1">
+                <div className="wu-head"><span className="wu-step">Step 1 · Direct</span></div>
+                <b>Single prompt</b>
+                <span>One question, one answer, no tools or steps. Cheapest &amp; fastest — use the Prompting Lab.</span>
+              </div>
+              <div className="wu step-2">
+                <div className="wu-head"><span className="wu-step">Step 2 · Pipeline</span></div>
+                <b>Workflow</b>
+                <span>A fixed sequence you always run in the same order (plan → draft → review). Predictable &amp; debuggable.</span>
+              </div>
+              <div className="wu step-3">
+                <div className="wu-head"><span className="wu-step">Step 3 · Autonomous</span></div>
+                <b>Tool agent (ReAct)</b>
+                <span>The task needs live facts, math, APIs, or decisions the model must make itself. Powerful, but slower &amp; pricier — you trade control for autonomy.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -827,7 +911,7 @@ if __name__ == "__main__":
               <div className="card-b">
                 <label className="fld">What should {name} do?</label><textarea rows={3} value={task} onChange={(e) => setTask(e.target.value)} />
                 <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={runReact} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run agent"}</button><span className="note">{toolList.length} tools · {model || providerLabel} · max {maxIters} steps</span></div>
-                {finalOut && <><label className="fld" style={{ marginTop: 16 }}>Final answer</label><div className="out">{finalOut}</div></>}
+                {finalOut && <><label className="fld" style={{ marginTop: 16 }}>Final answer</label><div className="out" style={{ position: "relative" }}><CopyBtn text={finalOut} /><div style={{ paddingRight: 36 }}>{finalOut}</div></div></>}
               </div>
             </div>
             <div className="card"><div className="card-h"><span className="t">Reasoning trace</span><span className="mono r">{trace.length} steps</span></div>
@@ -847,7 +931,7 @@ if __name__ == "__main__":
             <div className="card-b" ref={scrollRef} style={{ maxHeight: 560, overflow: "auto" }}>
               <label className="fld">Input</label><textarea rows={2} value={task} onChange={(e) => setTask(e.target.value)} />
               <div className="row" style={{ margin: "12px 0" }}><button className="btn" onClick={runWorkflow} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run workflow"}</button></div>
-              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8 }}>{o.text}</div>}</div>))}
+              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8, position: "relative" }}><CopyBtn text={o.text} /><div style={{ paddingRight: 36 }}>{o.text}</div></div>}</div>))}
             </div>
           </div>
         </>)}
