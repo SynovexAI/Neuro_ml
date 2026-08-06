@@ -25,15 +25,26 @@ export async function POST(req: Request) {
   // Honor a provider chosen in the UI; otherwise use the first active provider.
   const providerId = typeof b.providerId === "string" ? b.providerId : "";
   const reqModel = typeof b.model === "string" && b.model.trim() ? b.model.trim() : "";
-  const prov = providerId ? await getProviderById(providerId) : await getActiveProvider();
+  // If a specific provider was requested but no longer exists (e.g. deleted & re-added with a new id),
+  // fall back to the first active provider instead of failing.
+  let prov = providerId ? await getProviderById(providerId) : await getActiveProvider();
+  if (!prov && providerId) prov = await getActiveProvider();
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider configured — add one under Admin → Providers for neural embeddings." }, { status: 400 });
 
+  const model = reqModel || pickEmbModel(prov.baseUrl);
+  let host = prov.baseUrl;
+  try { host = new URL(prov.baseUrl).host; } catch { /* keep raw */ }
   try {
-    const model = reqModel || pickEmbModel(prov.baseUrl);
     const vectors = await embedTexts(prov.baseUrl, prov.apiKey, model, texts);
     return NextResponse.json({ ok: true, model, dim: vectors[0]?.length ?? 0, vectors });
   } catch (e) {
-    captureError(e, { where: "rag.embed" });
-    return NextResponse.json({ error: `Embedding failed: ${(e as Error).message}. Vector retrieval will fall back to TF-IDF.` }, { status: 502 });
+    captureError(e, { where: "rag.embed", model, host });
+    const msg = (e as Error).message;
+    const is404 = /\b404\b/.test(msg);
+    return NextResponse.json({
+      error: is404
+        ? `Model "${model}" isn't served by ${host} (404). Pick a valid embedding model for this provider — e.g. mistral-embed (Mistral), gemini-embedding-001 (Gemini), text-embedding-3-small (OpenAI/GitHub).`
+        : `Embedding failed on ${host} with "${model}": ${msg}. Vector retrieval will fall back to TF-IDF.`,
+    }, { status: 502 });
   }
 }

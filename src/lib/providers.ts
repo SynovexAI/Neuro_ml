@@ -4,18 +4,15 @@ import { db } from "./db";
 import { providers } from "./db/schema";
 import { decrypt } from "./crypto";
 
-// OpenAI-compatible endpoints for every provider (Gemini via its OpenAI-compat base).
-export const PROVIDER_CATALOG: Record<string, { label: string; baseUrl: string }> = {
-  groq: { label: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
-  cerebras: { label: "Cerebras", baseUrl: "https://api.cerebras.ai/v1" },
-  gemini: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
-  ollama: { label: "Ollama (local)", baseUrl: "http://localhost:11434/v1" },
-  custom: { label: "Custom (OpenAI-compatible)", baseUrl: "" },
-};
+// OpenAI-compatible endpoints for every provider — single source of truth in providerCatalog.
+export { PROVIDER_CATALOG } from "./providerCatalog";
 
 // List models straight from the provider's /models endpoint.
 export async function fetchModels(baseUrl: string, apiKey: string): Promise<string[]> {
-  const url = baseUrl.replace(/\/$/, "") + "/models";
+  // GitHub Models: models.github.ai paths return 410 — the working OpenAI-compatible host is the
+  // Azure inference endpoint, whose /models catalog uses the friendly `name` (the `id` is an azureml:// path).
+  const gh = /models\.github\.ai|models\.inference\.ai\.azure\.com/i.test(baseUrl);
+  const url = gh ? "https://models.inference.ai.azure.com/models" : baseUrl.replace(/\/$/, "") + "/models";
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
   try {
@@ -25,10 +22,17 @@ export async function fetchModels(baseUrl: string, apiKey: string): Promise<stri
     });
     if (!res.ok) throw new Error(`Provider returned HTTP ${res.status}`);
     const j: unknown = await res.json();
-    const arr = (j as { data?: unknown[]; models?: unknown[] }).data
-      ?? (j as { models?: unknown[] }).models ?? [];
+    // Handle the common shapes: {data:[…]}, {models:[…]}, or a bare top-level array.
+    const arr: unknown[] = Array.isArray(j)
+      ? j
+      : (j as { data?: unknown[]; models?: unknown[] }).data ?? (j as { models?: unknown[] }).models ?? [];
     const ids = (arr as Array<{ id?: string; name?: string }>)
-      .map((m) => (m.id || m.name || "").replace(/^models\//, ""))
+      .map((m) => {
+        const id = m.id || "";
+        // Prefer a clean id; fall back to `name` when the id is an azureml:// registry path.
+        const usable = id && !id.startsWith("azureml://") ? id : (m.name || "");
+        return usable.replace(/^models\//, "");
+      })
       .filter(Boolean);
     return Array.from(new Set(ids)).sort();
   } finally {
