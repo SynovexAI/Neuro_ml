@@ -5,6 +5,7 @@ import { runAgent } from "@/lib/agentRunner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // Proxies an agent run to the NAT sidecar (Python service). The provider key is
 // decrypted server-side and passed server-to-server only — never to the client.

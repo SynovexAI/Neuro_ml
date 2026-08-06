@@ -7,6 +7,7 @@ import { rateLimitDb } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const toCsv = (rows: Record<string, unknown>[]): string => {
   const cols = Object.keys(rows[0]);

@@ -8,7 +8,19 @@ import { plotlyTheme } from "@/lib/edaCharts";
 import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
 import ModelPicker from "@/components/ModelPicker";
 
-type Doc = { id: string; name: string; kind: string; text: string };
+type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
+
+// Best-effort: also store the original file in R2 (returns its URL). No-ops (returns null) if
+// storage isn't configured — the RAG flow works either way since we already keep the parsed text.
+async function uploadToR2(f: File): Promise<string | null> {
+  try {
+    const fd = new FormData(); fd.append("file", f);
+    const r = await fetch("/api/storage/upload", { method: "POST", body: fd });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return typeof j.url === "string" ? j.url : null;
+  } catch { return null; }
+}
 type Chunk = { text: string; docName: string; docKind: string };
 type Step = "source" | "chunk" | "embed" | "query";
 type Backend = "vector" | "kg" | "hybrid";
@@ -121,8 +133,11 @@ export default function RagLab() {
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
-  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive">("file");
+  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive" | "kb">("file");
   const [connectorOpen, setConnectorOpen] = useState(false);
+  const [kbList, setKbList] = useState<{ id: string; name: string; docCount: number; chunkCount: number }[]>([]);
+  const [kbLoading, setKbLoading] = useState(false);
+  const [kbBusy, setKbBusy] = useState("");
   const [ghUrl, setGhUrl] = useState("");
   const [ghBusy, setGhBusy] = useState(false);
   const [gdUrl, setGdUrl] = useState("");
@@ -207,7 +222,7 @@ export default function RagLab() {
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
   </div>;
-  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; return { ic: "📄", color: "#5b7cff" }; };
+  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; if (k === "kb") return { ic: "🧠", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
       <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
@@ -282,15 +297,19 @@ export default function RagLab() {
       const ext = (f.name.split(".").pop() || "txt").toLowerCase();
       const binary = ["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext);
       try {
+        // Parse text + (best-effort) archive the original file to R2 in parallel.
+        const r2p = uploadToR2(f);
         if (binary) {
           const fd = new FormData(); fd.append("file", f);
           const r = await fetch("/api/rag/extract", { method: "POST", body: fd });
           const j = await r.json();
           if (!r.ok) throw new Error(j.error || "parse failed");
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text }]);
+          const r2Url = await r2p;
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text, r2Url: r2Url || undefined }]);
         } else {
           const text = await f.text();
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text }]);
+          const r2Url = await r2p;
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text, r2Url: r2Url || undefined }]);
         }
       } catch (err) { setMsg(`Could not read ${f.name}: ${(err as Error).message}`); }
     }
@@ -341,6 +360,22 @@ export default function RagLab() {
       setDocs((d) => [...d, { id: rid(), name: (doc ? "Google Doc" : sheet ? "Google Sheet" : j.title) + ` · ${(doc || sheet || ["", "drive"])[1].slice(0, 8)}`, kind: "gdrive", text: j.text }]);
       invalidate();
     } catch (e) { setMsg((e as Error).message); } finally { setGdBusy(false); }
+  }
+  async function loadKbList() {
+    setKbLoading(true);
+    try { const r = await fetch("/api/kb"); const j = await r.json(); if (r.ok) setKbList(j.kbs || []); } catch { /* ignore */ } finally { setKbLoading(false); }
+  }
+  async function pullKb(kb: { id: string; name: string }) {
+    setKbBusy(kb.id); setMsg("");
+    try {
+      const r = await fetch(`/api/kb/${kb.id}/docs`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const incoming: Doc[] = (j.docs || []).filter((d: { text?: string }) => d.text && d.text.trim()).map((d: { name: string; text: string }) => ({ id: rid(), name: `${kb.name} · ${d.name}`, kind: "kb", text: d.text }));
+      if (!incoming.length) throw new Error("This knowledge base has no text yet.");
+      setDocs((d) => [...d, ...incoming]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setKbBusy(""); }
   }
   const removeDoc = (id: string) => { setDocs((d) => d.filter((x) => x.id !== id)); invalidate(); };
   function invalidate() { setChunks([]); setIndex(null); }
@@ -592,7 +627,7 @@ export default function RagLab() {
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button></div>
       </div>
 
-      {provKnown && provider === null && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before the answer step (source/chunk/embed still work).</div>}
+      {provKnown && provider === null && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin for a shared one) before the answer step (source/chunk/embed still work).</div>}
 
       <div className="stepper">
         {stepBtn("source", 1, "Source", true)}
@@ -618,6 +653,7 @@ export default function RagLab() {
               type Row = [typeof srcConn | string, string, string, string, boolean?];
               const CONNECTORS: Row[] = [
                 ["file", "📄", "Upload file", "PDF · DOCX · TXT · CSV · XLSX"],
+                ["kb", "🧠", "Knowledge base", "use a saved KB from Studio"],
                 ["url", "🌐", "Web page", "scrape article text from a URL"],
                 ["github", "🐙", "GitHub", "README · file · folder from a public repo"],
                 ["gdrive", "📁", "Google Drive", "public Google Doc / Sheet link"],
@@ -641,7 +677,7 @@ export default function RagLab() {
                       <div className="note" style={{ padding: "9px 12px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--border)" }}>Available connectors</div>
                       <div style={{ maxHeight: 300, overflowY: "auto", padding: 6 }}>
                         {CONNECTORS.map(([k, ic, title, sub, soon]) => (
-                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
+                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); if (k === "kb") loadKbList(); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
                             <span style={{ width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: srcConn === k ? "var(--accent)" : "var(--panel-2)", color: srcConn === k ? "#fff" : "var(--muted)" }}>{ic}</span>
                             <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{title}</span><span className="note" style={{ fontSize: 10 }}>{sub}</span></span>
                             {soon ? <span style={{ fontSize: 8.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em", padding: "2px 6px", borderRadius: 5, background: "var(--panel-2)", color: "var(--faint)", border: "1px solid var(--border)", flex: "0 0 auto" }}>soon</span>
@@ -700,6 +736,23 @@ export default function RagLab() {
                   <button className="btn sm" onClick={addSample}>📚 Load sample corpus</button>
                 </div>
               )}
+              {srcConn === "kb" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Your knowledge bases</span><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadKbList} disabled={kbLoading}>↻ Refresh</button></div>
+                  <div className="note" style={{ marginBottom: 10 }}>Pull the documents from a KB you built in <b>Studio → Knowledge bases</b> into this pipeline.</div>
+                  {kbLoading ? <div className="note"><span className="busy-dot" /> loading…</div>
+                    : kbList.length === 0 ? <div className="note">No knowledge bases yet — create one under <b>Studio → Knowledge bases</b>, then refresh.</div>
+                    : <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 240, overflowY: "auto" }}>
+                        {kbList.map((kb) => (
+                          <div key={kb.id} className="row" style={{ gap: 10, alignItems: "center", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", background: "var(--surface)" }}>
+                            <span style={{ fontSize: 16 }}>🧠</span>
+                            <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontWeight: 600, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kb.name}</span><span className="note" style={{ fontSize: 10 }}>{kb.docCount} docs · {kb.chunkCount} chunks</span></span>
+                            <button className="btn sm" onClick={() => pullKb(kb)} disabled={kbBusy === kb.id}>{kbBusy === kb.id ? "loading…" : "Use →"}</button>
+                          </div>
+                        ))}
+                      </div>}
+                </div>
+              )}
             </div>
 
             <label className="fld">Loaded documents — preview before chunking</label>
@@ -716,6 +769,7 @@ export default function RagLab() {
                       <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
                       <div className="note" style={{ marginTop: 2 }}>{words.toLocaleString()} words · {d.text.length.toLocaleString()} chars</div>
                     </div>
+                    {d.r2Url && <a href={d.r2Url} target="_blank" rel="noreferrer" title="original file stored in R2" style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color: "var(--good)", background: "color-mix(in srgb, var(--good) 12%, transparent)", flex: "0 0 auto", textDecoration: "none" }}>☁ stored</a>}
                     <span style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color, background: `color-mix(in srgb, ${color} 12%, transparent)`, flex: "0 0 auto" }}>{d.kind}</span>
                     <button className="btn ghost sm" onClick={toggle}>{open ? "Hide" : "Preview"}</button>
                     <button onClick={() => removeDoc(d.id)} title="Remove" style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 17, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import AddKeyBanner from "@/components/AddKeyBanner";
 import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
 import Toaster from "./Toaster";
@@ -21,6 +22,7 @@ const ZONES: Zone[] = [
       { href: "/kb", label: "Knowledge bases" },
       { href: "/studio/mcp", label: "MCP servers" },
       { href: "/admin/providers", label: "Providers & models" },
+      { href: "/settings/keys", label: "My API keys" },
       { href: "/projects", label: "My Projects" },
       { href: "/templates", label: "Templates" },
     ],
@@ -50,6 +52,8 @@ const ZONES: Zone[] = [
       { href: "/admin/users", label: "Users" },
       { href: "/admin/usage", label: "Usage & Monitoring" },
       { href: "/admin/agents", label: "Agent analytics" },
+      { href: "/admin/analytics", label: "Analytics" },
+      { href: "/admin/storage", label: "Storage" },
     ],
   },
 ];
@@ -117,7 +121,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
           <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
           <ThemeToggle />
         </header>
-        <div className="work">{children}</div>
+        <div className="work"><AddKeyBanner />{children}</div>
       </div>
       <Toaster />
     </div>
