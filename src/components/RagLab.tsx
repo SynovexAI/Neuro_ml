@@ -5,7 +5,7 @@ import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mm
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
-import AgenticAnswer, { type AgentTool, type AgentHit } from "@/components/AgenticAnswer";
+import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
 import ModelPicker from "@/components/ModelPicker";
 
 type Doc = { id: string; name: string; kind: string; text: string };
@@ -140,6 +140,7 @@ export default function RagLab() {
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
   const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
+  const [agentCfg, setAgentCfg] = useState<AgentConfig>({ enabled: ["vector", "keyword", "hybrid"], maxSteps: 5, topK: 4, selfCheck: true, maxTokens: 1024 });
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
@@ -165,6 +166,8 @@ export default function RagLab() {
       if (c.metric) setMetric(c.metric);
       if (c.topK != null) setTopK(c.topK);
       if (c.question) setQuestion(c.question);
+      if (c.answerMode === "agentic" || c.answerMode === "direct") setAnswerMode(c.answerMode);
+      if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
     }).catch(() => {});
   }, []);
 
@@ -406,7 +409,7 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg };
     try {
       const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
@@ -503,11 +506,19 @@ export default function RagLab() {
       : retrieve(index, query, strat, chunks.length, metric);
     return ranked.slice(0, k).map((h) => ({ i: h.i, score: h.score }));
   }
-  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[]): Promise<string> {
-    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[], opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
     if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
     const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
     for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+    return text;
+  }
+  // Streaming variant for the agent's final answer — emits tokens as they arrive.
+  async function agentChatStream(messages: { role: "system" | "user" | "assistant"; content: string }[], onToken: (t: string) => void, opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; const chunk = dec.decode(value, { stream: true }); text += chunk; onToken(chunk); }
     return text;
   }
   async function agentFetchWeb(url: string): Promise<{ title: string; text: string } | null> {
@@ -1102,9 +1113,12 @@ export default function RagLab() {
                 tools={agentTools}
                 retrieve={agentRetrieve}
                 chat={agentChat}
+                chatStream={agentChatStream}
                 fetchWeb={agentFetchWeb}
                 defaultQuestion={question}
                 disabled={!canQuery}
+                config={agentCfg}
+                onConfigChange={setAgentCfg}
                 note={!graph ? <div className="note" style={{ fontSize: 10.5, lineHeight: 1.5 }}>🕸 <b>Knowledge graph</b> appears here once you build one — go to the <b>Index</b> step and pick the <b>Knowledge graph</b> or <b>Hybrid</b> backend, then Build graph.</div> : undefined}
                 modelPicker={
                   <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>

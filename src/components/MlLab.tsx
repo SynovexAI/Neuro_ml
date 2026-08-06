@@ -229,6 +229,17 @@ export default function MlLab() {
   const [prepStage, setPrepStage] = useState(0);
   const [prepStagePlaying, setPrepStagePlaying] = useState(false);
   const stageTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Shared scroll box for the "apply to each row" stage — auto-scrolls to the row currently
+  // being transformed so the one-by-one animation stays in view (impute/scale/encode all use it).
+  const prepScrollRef = useRef<HTMLDivElement>(null);
+  // Scroll ONLY inside the box to keep the current row centred — never scroll the page (that read as "jumping").
+  useEffect(() => {
+    const box = prepScrollRef.current; if (!box) return;
+    const el = box.querySelector(".prep-cur") as HTMLElement | null; if (!el) return;
+    const boxRect = box.getBoundingClientRect(); const elRect = el.getBoundingClientRect();
+    const delta = (elRect.top - boxRect.top) - (box.clientHeight / 2 - el.clientHeight / 2);
+    box.scrollTo({ top: Math.max(0, box.scrollTop + delta), behavior: "smooth" });
+  }, [prepStage]);
   const [modelStage, setModelStage] = useState(0);
   const modelTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [modelApplied, setModelApplied] = useState(0);
@@ -747,12 +758,6 @@ ${evalBlock}`;
     if (s.op === "Bin / discretize") return [{ tex: `x\\to\\left\\lfloor\\frac{x-\\min}{\\max-\\min}\\times k\\right\\rfloor`, at: 0 }];
     return [];
   }
-  function subsamplePairs(before: (number | string | null)[], after: (number | string | null)[], max = 36): [number, number][] {
-    const all: [number, number][] = [];
-    for (let i = 0; i < before.length; i++) { if (typeof before[i] === "number" && typeof after[i] === "number") all.push([before[i] as number, after[i] as number]); }
-    if (all.length <= max) return all;
-    const out: [number, number][] = []; const stp = all.length / max; for (let k = 0; k < max; k++) out.push(all[Math.floor(k * stp)]); return out;
-  }
   // Numeric transform (scale / transform / bin / outliers): staged formula + points sliding raw → transformed.
   function numTransformView(colName: string, before: (number | string | null)[], after: (number | string | null)[], s: PrepStep): React.ReactNode {
     const isScale = s.op === "Scale / normalize";
@@ -760,18 +765,8 @@ ${evalBlock}`;
     const method = isScale ? (scaleMethods.includes(prepScaleMethod) ? prepScaleMethod : (scaleMethods.includes(s.method) ? s.method : "StandardScaler")) : s.method;
     const bn = before.filter((v) => typeof v === "number") as number[];
     const eff: (number | string | null)[] = isScale ? scaleNumCol(before as (number | null)[], method) : after;
-    const pairs = subsamplePairs(before, eff);
-    if (!pairs.length) return <div className="note">Nothing numeric to animate here.</div>;
-    const rb = pairs.map((p) => p[0]), ra = pairs.map((p) => p[1]);
-    // Shared absolute axis over BOTH raw and scaled values, so the shift/squeeze is visible
-    // (affine scalers preserve relative order, so per-range normalisation would show no motion).
-    const lo = Math.min(...rb, ...ra), hi = Math.max(...rb, ...ra), span = (hi - lo) || 1;
-    const pos = (x: number) => 4 + 92 * (x - lo) / span;
-    const rpx = rb.map(pos), apx = ra.map(pos);
-    const zeroPct = lo <= 0 && hi >= 0 ? pos(0) : null;
+    if (!bn.length) return <div className="note">Nothing numeric to animate here.</div>;
     const stages = scaleStages({ ...s, method }, bn);
-    const nFormula = stages.length; const applySteps = 4; const maxStage = nFormula - 1 + applySteps;
-    const tt = Math.max(0, Math.min(1, (prepStage - (nFormula - 1)) / applySteps));
     const items: { sym: string; desc: string; how?: string; val?: string }[] = [{ sym: "x", desc: "each raw value" }];
     if (bn.length) {
       const mu = mean(bn), sd = std(bn) || 1, mn = Math.min(...bn), mx = Math.max(...bn); const { med, q1, q3 } = quart(bn); const iqr = (q3 - q1) || 1, maxabs = Math.max(...bn.map(Math.abs)) || 1;
@@ -784,81 +779,176 @@ ${evalBlock}`;
       } else if (s.op === "Handle outliers") items.push({ sym: "Q_1,\\ Q_3", desc: "quartiles", val: `${q1.toFixed(1)}, ${q3.toFixed(1)}` }, { sym: "\\text{IQR}", desc: "Q3 − Q1", val: iqr.toFixed(2) });
       else if (s.op === "Bin / discretize") items.push({ sym: "\\min,\\max", desc: "column range", val: `${mn.toFixed(1)}, ${mx.toFixed(1)}` }, { sym: "k", desc: "number of bins" });
     }
+    // ── 4-stage rebuild: data → compute ingredients → formula → apply to each row (one-by-one) ──
+    const ingredients = items.filter((it) => it.val != null).map((it) => ({ sym: it.sym, label: it.desc, expr: it.how || "", val: it.val as string }));
+    const numIdx = before.map((v, i) => (typeof v === "number" ? i : -1)).filter((i) => i >= 0);
+    const sampleIdx = numIdx.length <= 24 ? numIdx : [...Array(24).keys()].map((k) => numIdx[Math.floor(k * numIdx.length / 24)]);
+    const nIng = ingredients.length, nFx = stages.length;
+    const fxStart = 1 + nIng, applyStart = fxStart + nFx;
+    const maxStage2 = applyStart + sampleIdx.length - 1;
+    const phase = prepStage === 0 ? 1 : prepStage < fxStart ? 2 : prepStage < applyStart ? 3 : 4;
+    const dim = (active: boolean): React.CSSProperties => ({ opacity: active ? 1 : 0.55, transition: "opacity .2s" });
+    const PHASES: [string, string][] = [["1", "your data"], ["2", "compute ingredients"], ["3", "run the formula"], ["4", "apply to each row"]];
     return <>
       {isScale && <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
         <label className="fld" style={{ margin: 0 }}>Method</label>
-        <select value={method} onChange={(e) => setPrepScaleMethod(e.target.value)} style={{ maxWidth: 190 }}>{scaleMethods.map((m) => <option key={m}>{m}</option>)}</select>
+        <select value={method} onChange={(e) => { setPrepScaleMethod(e.target.value); resetStage(); }} style={{ maxWidth: 190 }}>{scaleMethods.map((m) => <option key={m}>{m}</option>)}</select>
       </div>}
-      {varLegend(items)}
-      <div className="prep-2col">
-        <div className="prep-col">
-          <div className="prep-col-h">the formula, step by step</div>
-          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
-        </div>
-        <div className="prep-col">
-          <div className="prep-col-h">values slide raw → transformed (same axis)</div>
-          <div className="num-line">
-            {zeroPct != null && <span className="num-zero" style={{ left: `${zeroPct}%` }} data-lab="0" />}
-            {pairs.map((_, i) => <span key={i} className="num-dot" style={{ left: `${rpx[i] + (apx[i] - rpx[i]) * tt}%` }} />)}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {PHASES.map(([nn, lab], i) => <span key={i} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 20, fontFamily: "var(--mono)", background: phase === i + 1 ? "var(--accent)" : "var(--panel-2)", color: phase === i + 1 ? "#fff" : "var(--muted)", border: `1px solid ${phase === i + 1 ? "var(--accent)" : "var(--border)"}` }}>{nn} · {lab}</span>)}
+      </div>
+
+      {/* ① data — PINNED on top */}
+      <div className="prep-col" style={{ marginBottom: 10, ...dim(phase === 1) }}>
+        <div className="prep-col-h">① the “{colName}” column · {numIdx.length} numeric values</div>
+        <div style={{ maxHeight: 76, overflowY: "auto", border: `1px solid ${phase === 1 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: "var(--surface)", padding: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {before.map((v, i) => { const num = typeof v === "number"; return <span key={i} title={`row ${i}`} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "3px 7px", borderRadius: 5, background: "var(--panel-2)", border: "1px solid var(--border)", color: num ? "var(--text)" : "var(--faint)" }}>{num ? (v as number).toFixed(1) : "∅"}</span>; })}
           </div>
-          <div className="num-axis"><span>{lo.toFixed(1)}</span><span>{hi.toFixed(1)}</span></div>
-          <div className="note" style={{ marginTop: 8 }}>{tt < 1 ? `raw dots slide toward their ${isScale ? "scaled" : "transformed"} positions on one shared axis — step to move them` : "every point is now at its transformed value"}</div>
         </div>
       </div>
-      {stageControls(maxStage)}
-      <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(eff)}</div>
+      <div className="note" style={{ marginBottom: 6, fontSize: 11 }}>steps ②③④ — scroll inside the box below; your data stays pinned above</div>
+
+      {/* ②③④ in ONE scroll container — auto-scrolls to the row being transformed */}
+      <div ref={prepScrollRef} style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel-2)", padding: 12, display: "flex", flexDirection: "column", gap: 16 }}>
+        {nIng > 0 && <div style={{ ...dim(phase === 2) }}>
+          <div className="prep-col-h">② compute the ingredients from the {bn.length} values</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 10 }}>
+            {ingredients.map((ing, k) => { const on = prepStage >= 1 + k; return <div key={k} style={{ border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: on ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "var(--surface)", padding: "10px 12px", opacity: on ? 1 : 0.45, transition: "all .25s" }}>
+              <div className="note" style={{ marginBottom: 4 }}>{ing.label}{ing.expr ? ` · ${ing.expr}` : ""}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}><Katex tex={ing.sym} /><span style={{ color: "var(--faint)" }}>=</span><b style={{ fontFamily: "var(--mono)", fontSize: 18 }}>{on ? ing.val : "…"}</b></div>
+            </div>; })}
+          </div>
+        </div>}
+
+        <div style={{ ...dim(phase === 3) }}>
+          <div className="prep-col-h">③ the formula, step by step</div>
+          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= fxStart + i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
+        </div>
+
+        <div style={{ ...dim(phase === 4) }}>
+          <div className="prep-col-h">④ apply the formula to each row — raw → transformed</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {sampleIdx.map((i, k) => { const raw = before[i] as number; const sc = eff[i]; const done = prepStage >= applyStart + k; const cur = prepStage === applyStart + k;
+              return <div key={i} className={cur ? "prep-cur" : ""} style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: "var(--mono)", fontSize: 12, animation: cur ? "prepPop .45s ease" : undefined }}>
+                <span style={{ color: "var(--faint)", width: 56, flex: "0 0 auto" }}>row {i}</span>
+                <span style={{ width: 70, flex: "0 0 auto", textAlign: "right" }}>{raw.toFixed(2)}</span>
+                <span style={{ color: "var(--faint)", flex: "0 0 auto" }}>→</span>
+                <span style={{ flex: 1, padding: "4px 10px", borderRadius: 6, background: done ? "color-mix(in srgb, var(--good) 16%, transparent)" : "var(--surface)", border: `1px solid ${cur ? "var(--good)" : done ? "var(--good)" : "var(--border)"}`, boxShadow: cur ? "0 0 0 2px color-mix(in srgb, var(--good) 45%, transparent)" : undefined, color: done ? "var(--good)" : "var(--faint)", fontWeight: done ? 700 : 400 }}>{done ? (typeof sc === "number" ? sc.toFixed(3) : String(sc)) : "…"}</span>
+              </div>; })}
+          </div>
+          <div className="note" style={{ marginTop: 8, lineHeight: 1.7 }}>before → {prepStat(before)}<br />after&nbsp;&nbsp;→ {prepStat(eff)}</div>
+        </div>
+      </div>
+
+      {stageControls(maxStage2)}
     </>;
   }
   const prepStat = (vs: (number | string | null)[]) => { const a = vs.filter((v) => typeof v === "number") as number[]; return a.length ? `μ=${mean(a).toFixed(2)}, σ=${std(a).toFixed(2)}, min=${Math.min(...a).toFixed(1)}, max=${Math.max(...a).toFixed(1)}` : "—"; };
 
-  // Imputation: pick a method → its formula computes, then every ∅ fills with it.
+  // Imputation as a 4-stage walkthrough: ① show the data → ② compute the ingredients from it
+  // (animated) → ③ run the formula → ④ walk the column filling each ∅ (green) and keeping the rest.
   function imputeView(colName: string, before: (number | string | null)[], s: PrepStep, numeric: boolean): React.ReactNode {
     const methods = numeric ? ["Mean", "Median", "Most frequent", "Constant"] : ["Most frequent", "Constant"];
     const method = methods.includes(prepImputeMethod) ? prepImputeMethod : (methods.includes(s.method) ? s.method : methods[0]);
     const present = before.filter((v) => v != null);
-    let fill = "0"; let stages: { tex: string; at: number }[] = []; let impItems: { sym: string; desc: string; how?: string; val?: string }[] = [];
+    let fill = "0"; let stages: { tex: string }[] = [];
+    let ingredients: { sym: string; label: string; expr: string; val: string }[] = [];
     if (numeric) {
       const nums = present as number[]; const sum = nums.reduce((a, b) => a + b, 0); const { med } = quart(nums.length ? nums : [0]);
       const cnt = new Map<number, number>(); nums.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (method === "Mean") { fill = (sum / (nums.length || 1)).toFixed(2); stages = [{ tex: `\\mu=\\frac{\\sum x}{n}`, at: 0 }, { tex: `\\mu=\\frac{${sum.toFixed(1)}}{${nums.length}}`, at: 0.2 }, { tex: `\\mu=${fill}`, at: 0.45 }]; impItems = [{ sym: "x", desc: "each present value" }, { sym: "n", desc: "count of present values", val: String(nums.length) }, { sym: "\\textstyle\\sum x", desc: "sum of them", val: sum.toFixed(1) }, { sym: "\\mu", desc: "mean = the fill value", how: "sum ÷ n", val: fill }]; }
-      else if (method === "Median") { fill = String(Math.round(med * 100) / 100); stages = [{ tex: `\\text{sort the values, take the middle}`, at: 0 }, { tex: `\\text{median}=${fill}`, at: 0.4 }]; impItems = [{ sym: "\\text{median}", desc: "middle value when sorted", how: "robust to outliers", val: fill }]; }
-      else if (method === "Most frequent") { fill = String(mode ? mode[0] : 0); stages = [{ tex: `\\text{mode}=${fill}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; impItems = [{ sym: "\\text{mode}", desc: "most common value", how: `appears ${mode ? mode[1] : 0} times`, val: fill }]; }
-      else { fill = "0"; stages = [{ tex: `\\text{fill}=0\\ (\\text{constant})`, at: 0 }]; impItems = [{ sym: "0", desc: "a fixed constant you choose" }]; }
+      if (method === "Mean") {
+        fill = (sum / (nums.length || 1)).toFixed(2);
+        ingredients = [
+          { sym: "n", label: "count the present values", expr: `${nums.length} non-∅ rows`, val: String(nums.length) },
+          { sym: "\\textstyle\\sum x", label: "add them all up", expr: `${nums.slice(0, 4).join(" + ")}${nums.length > 4 ? " + …" : ""}`, val: sum.toFixed(1) },
+        ];
+        stages = [{ tex: `\\mu=\\frac{\\sum x}{n}` }, { tex: `\\mu=\\frac{${sum.toFixed(1)}}{${nums.length}}` }, { tex: `\\mu=${fill}` }];
+      } else if (method === "Median") {
+        fill = String(Math.round(med * 100) / 100);
+        const sorted = [...nums].sort((a, b) => a - b);
+        ingredients = [{ sym: "\\text{sorted}", label: "sort the present values ascending", expr: `${sorted.slice(0, 5).join(", ")}${sorted.length > 5 ? ", …" : ""}`, val: `${nums.length} vals` }];
+        stages = [{ tex: `\\text{take the middle value}` }, { tex: `\\text{median}=${fill}` }];
+      } else if (method === "Most frequent") {
+        fill = String(mode ? mode[0] : 0);
+        ingredients = [{ sym: "\\text{tally}", label: "count how often each value appears", expr: `${fill} appears ${mode ? mode[1] : 0}×`, val: fill }];
+        stages = [{ tex: `\\text{mode}=${fill}` }];
+      } else { fill = "0"; ingredients = []; stages = [{ tex: `\\text{fill}=0\\ (\\text{constant})` }]; }
     } else {
       const strs = present as string[]; const cnt = new Map<string, number>(); strs.forEach((x) => cnt.set(x, (cnt.get(x) || 0) + 1)); const mode = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
-      if (method === "Most frequent") { fill = mode ? mode[0] : "missing"; stages = [{ tex: `\\text{mode}=\\text{${String(fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}\\ (\\text{appears}\\ ${mode ? mode[1] : 0}\\times)`, at: 0 }]; impItems = [{ sym: "\\text{mode}", desc: "most common category", how: `appears ${mode ? mode[1] : 0} times`, val: fill }]; }
-      else { fill = "missing"; stages = [{ tex: `\\text{fill}=\\text{missing (constant)}`, at: 0 }]; impItems = [{ sym: "\\text{\"missing\"}", desc: "a new placeholder category" }]; }
+      if (method === "Most frequent") { fill = mode ? mode[0] : "missing"; ingredients = [{ sym: "\\text{tally}", label: "count each category", expr: `“${fill}” appears ${mode ? mode[1] : 0}×`, val: fill }]; stages = [{ tex: `\\text{mode}=\\text{${String(fill).replace(/[^a-zA-Z0-9 ]/g, " ")}}` }]; }
+      else { fill = "missing"; ingredients = []; stages = [{ tex: `\\text{fill}=\\text{“missing” (constant)}` }]; }
     }
-    const missIdx = before.map((v, i) => (v == null ? i : -1)).filter((i) => i >= 0);
-    const showIdx = Array.from(new Set([0, 1, 2, 3, ...missIdx.slice(0, 4)])).filter((i) => i < before.length).sort((a, b) => a - b).slice(0, 8);
-    const nFormula = stages.length;
-    const missVisible = showIdx.filter((i) => before[i] == null);
-    const maxStage = nFormula - 1 + missVisible.length;
+    const missAll = before.map((v, i) => (v == null ? i : -1)).filter((i) => i >= 0);
+    // The row walk visits EVERY row and checks it (∅ → fill, present → keep). For long columns
+    // we cap the walked set but always include every missing row so each ∅ is seen filling.
+    const walkRows = before.length <= 28 ? before.map((_, i) => i)
+      : Array.from(new Set([...missAll, ...[...Array(28).keys()].map((k) => Math.floor(k * before.length / 28))])).sort((a, b) => a - b);
+    const nIng = ingredients.length, nFormula = stages.length;
+    const formulaStart = 1 + nIng, fillStart = formulaStart + nFormula;
+    const maxStage = Math.max(fillStart - 1, fillStart + walkRows.length - 1);
+    const phase = prepStage === 0 ? 1 : prepStage < formulaStart ? 2 : prepStage < fillStart ? 3 : 4;
+    const dim = (active: boolean): React.CSSProperties => ({ opacity: active ? 1 : 0.55, transition: "opacity .2s" });
+    const PHASES: [string, string][] = [["1", "your data"], ["2", "compute ingredients"], ["3", "run the formula"], ["4", "fill the column"]];
     return <>
-      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <label className="fld" style={{ margin: 0 }}>Method</label>
-        <select value={method} onChange={(e) => setPrepImputeMethod(e.target.value)} style={{ maxWidth: 170 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
-        <span className="note">{missIdx.length} missing in “{colName}” → fill each with the {method.toLowerCase()} = <b>{fill}</b></span>
+        <select value={method} onChange={(e) => { setPrepImputeMethod(e.target.value); resetStage(); }} style={{ maxWidth: 170 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
+        <span className="note">{missAll.length} missing in “{colName}” → fill each with the {method.toLowerCase()} = <b>{fill}</b></span>
       </div>
-      {varLegend(impItems)}
-      <div className="prep-2col">
-        <div className="prep-col">
-          <div className="prep-col-h">the formula, step by step</div>
-          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
-          {prepStage >= nFormula - 1 && <div className="note" style={{ marginTop: 8 }}>→ fill value = <b style={{ color: "var(--good)" }}>{fill}</b></div>}
-        </div>
-        <div className="prep-col">
-          <div className="prep-col-h">{missIdx.length ? `then fill each ∅ (${missVisible.length} shown)` : "no missing values"}</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-            {showIdx.map((i) => { const miss = before[i] == null; const filled = miss && prepStage >= nFormula + missVisible.indexOf(i);
-              return <div key={i} className="icell"><span className="irow-lab">row {i}</span><span className={`ibox ${miss ? "miss" : ""} ${filled ? "filled" : ""}`}>{miss ? (filled ? <b style={{ color: "var(--good)" }}>{fill}</b> : <span style={{ color: "var(--crit)" }}>∅</span>) : String(before[i])}</span></div>; })}
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {PHASES.map(([nn, lab], i) => <span key={i} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 20, fontFamily: "var(--mono)", background: phase === i + 1 ? "var(--accent)" : "var(--panel-2)", color: phase === i + 1 ? "#fff" : "var(--muted)", border: `1px solid ${phase === i + 1 ? "var(--accent)" : "var(--border)"}` }}>{nn} · {lab}</span>)}
+      </div>
+
+      {/* ① data — PINNED on top, always visible */}
+      <div className="prep-col" style={{ marginBottom: 10, ...dim(phase === 1) }}>
+        <div className="prep-col-h">① the “{colName}” column · {before.length} rows · <span style={{ color: "var(--crit)" }}>{missAll.length} missing</span></div>
+        <div style={{ maxHeight: 76, overflowY: "auto", border: `1px solid ${phase === 1 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: "var(--surface)", padding: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {before.map((v, i) => { const miss = v == null; return <span key={i} title={`row ${i}`} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "3px 7px", borderRadius: 5, background: miss ? "color-mix(in srgb, var(--crit) 14%, transparent)" : "var(--panel-2)", border: `1px solid ${miss ? "var(--crit)" : "var(--border)"}`, color: miss ? "var(--crit)" : "var(--text)" }}>{miss ? "∅" : String(v)}</span>; })}
           </div>
         </div>
       </div>
+      <div className="note" style={{ marginBottom: 6, fontSize: 11 }}>steps ②③④ — scroll inside the box below; your data stays pinned above</div>
+
+      {/* ②③④ in ONE scroll container — auto-scrolls to the ∅ being filled */}
+      <div ref={prepScrollRef} style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel-2)", padding: 12, display: "flex", flexDirection: "column", gap: 16 }}>
+        {nIng > 0 && <div style={{ ...dim(phase === 2) }}>
+          <div className="prep-col-h">② compute the ingredients from those {present.length} present values</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 10 }}>
+            {ingredients.map((ing, k) => { const on = prepStage >= 1 + k; return <div key={k} style={{ border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: on ? "color-mix(in srgb, var(--accent) 8%, transparent)" : "var(--surface)", padding: "10px 12px", opacity: on ? 1 : 0.45, transition: "all .25s" }}>
+              <div className="note" style={{ marginBottom: 4 }}>{ing.label}</div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ing.expr}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}><Katex tex={ing.sym} /><span style={{ color: "var(--faint)" }}>=</span><b style={{ fontFamily: "var(--mono)", fontSize: 18 }}>{on ? ing.val : "…"}</b></div>
+            </div>; })}
+          </div>
+        </div>}
+
+        <div style={{ ...dim(phase === 3) }}>
+          <div className="prep-col-h">③ plug the ingredients into the formula</div>
+          {stages.map((l, i) => <div key={i} className={`fx-line ${prepStage >= formulaStart + i ? "on" : ""}`}><Katex block tex={l.tex} /></div>)}
+          {prepStage >= fillStart - 1 && <div className="note" style={{ marginTop: 8 }}>→ fill value = <b style={{ color: "var(--good)" }}>{fill}</b></div>}
+        </div>
+
+        <div style={{ ...dim(phase === 4) }}>
+          <div className="prep-col-h">④ walk the column — check each row: ∅ → fill with {fill}, present → keep{walkRows.length < before.length ? ` · ${walkRows.length} of ${before.length} shown` : ""}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {walkRows.map((i, k) => { const v = before[i]; const miss = v == null; const resolved = prepStage >= fillStart + k; const cur = prepStage === fillStart + k; const filled = miss && resolved;
+              return <div key={i} className={cur ? "prep-cur" : ""} style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: "var(--mono)", fontSize: 12, animation: cur ? "prepPop .45s ease" : undefined, opacity: resolved || cur ? 1 : 0.5, transition: "opacity .2s" }}>
+                <span style={{ color: "var(--faint)", width: 56, flex: "0 0 auto" }}>row {i}</span>
+                <span style={{ flex: 1, padding: "4px 10px", borderRadius: 6, background: miss ? (filled ? "color-mix(in srgb, var(--good) 16%, transparent)" : "color-mix(in srgb, var(--crit) 12%, transparent)") : "var(--surface)", border: `1px solid ${cur ? "var(--accent)" : miss ? (filled ? "var(--good)" : "var(--crit)") : "var(--border)"}`, boxShadow: cur ? "0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent)" : undefined, color: miss ? (filled ? "var(--good)" : "var(--crit)") : "var(--text)", fontWeight: filled ? 700 : 400 }}>{miss ? (filled ? `${fill} ✓` : "∅") : String(v)}</span>
+                <span style={{ width: 130, flex: "0 0 auto", fontFamily: "var(--font-sans, sans-serif)", fontSize: 11, color: cur ? "var(--accent)" : !resolved ? "var(--faint)" : miss ? "var(--good)" : "var(--muted)" }}>{cur ? "checking…" : !resolved ? "pending" : miss ? "was ∅ → filled" : "present → keep ✓"}</span>
+              </div>; })}
+          </div>
+        </div>
+      </div>
+
       {stageControls(maxStage)}
     </>;
   }
-  // One-hot: the indicator matrix builds row by row as the animation advances.
+  // Encode categorical as a 4-stage walkthrough: data → find the categories → the encoding rule →
+  // encode each row one-by-one (single scroll box, auto-scrolls to the current row).
   function catOneHotView(colName: string): React.ReactNode {
     if (!ds) return null;
     const col = ds.columns.find((c) => c.name === colName)!;
@@ -868,29 +958,76 @@ ${evalBlock}`;
     const catsShown = cats.slice(0, 6);
     const idxMap = new Map(cats.map((c, i) => [c, i]));
     const counts = new Map<string, number>(); let n = 0; col.values.forEach((v) => { if (v != null) { const k = String(v); counts.set(k, (counts.get(k) || 0) + 1); n++; } });
-    const rowIdx = col.values.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0).slice(0, 5);
+    const allRows = col.values.map((v, i) => (v != null ? i : -1)).filter((i) => i >= 0);
+    const rowIdx = allRows.length <= 20 ? allRows : [...Array(20).keys()].map((k) => allRows[Math.floor(k * allRows.length / 20)]);
     let headers: string[]; let valsOf: (v: string) => string[]; let note: React.ReactNode; let oneHot = false;
     if (method === "Ordinal") { headers = [`${colName}_idx`]; valsOf = (v) => [String(idxMap.get(v) ?? 0)]; note = <>Each category → an integer <b>index</b> (compact — but implies a fake order).</>; }
     else if (method === "Frequency") { headers = [`${colName}_freq`]; valsOf = (v) => [((counts.get(v) || 0) / (n || 1)).toFixed(2)]; note = <>Each category → how often it appears: <b>count ÷ n</b>.</>; }
     else if (method === "Count") { headers = [`${colName}_count`]; valsOf = (v) => [String(counts.get(v) || 0)]; note = <>Each category → its raw <b>count</b> in the data.</>; }
     else if (method === "Binary") { const bits = Math.max(1, Math.ceil(Math.log2(cats.length || 1))); headers = Array.from({ length: bits }, (_, b) => `b${b}`); valsOf = (v) => { const i = idxMap.get(v) ?? 0; return Array.from({ length: bits }, (_, b) => String((i >> b) & 1)); }; note = <>Each category’s index written in <b>binary bits</b> — fewer columns than one-hot.</>; }
     else { headers = catsShown; valsOf = (v) => catsShown.map((c) => (c === v ? "1" : "0")); note = <>A column per category; each row puts a <b>1</b> in its own column, 0 elsewhere.</>; oneHot = true; }
-    const maxStage = Math.max(0, rowIdx.length - 1);
-    const cells: React.ReactNode[] = [<div key="corner" className="oh-lab" style={{ color: "var(--faint)" }}>{colName}</div>, ...headers.map((h) => <div key={`h${h}`} className="oh-h">{h}</div>)];
-    rowIdx.forEach((ri, r) => {
-      const val = String(col.values[ri]); const on = prepStage >= r; const vals = valsOf(val);
-      cells.push(<div key={`l${ri}`} className="oh-lab" style={{ opacity: on ? 1 : 0.4 }}>“{val}”</div>);
-      vals.forEach((vv, ci) => { const hit = oneHot && vv === "1"; cells.push(<div key={`${ri}-${ci}`} className={`oh-c ${hit && on ? "on" : ""}`} style={{ opacity: on ? 1 : 0.4, color: on && !oneHot ? "var(--text)" : undefined, fontWeight: on && !oneHot ? 600 : undefined }}>{on ? vv : (oneHot ? "0" : "·")}</div>); });
-    });
+
+    const fxStart = 2, applyStart = 3; // stage 1 = categories, stage 2 = rule, stage 3+ = rows
+    const maxStage = applyStart + rowIdx.length - 1;
+    const phase = prepStage === 0 ? 1 : prepStage < fxStart ? 2 : prepStage < applyStart ? 3 : 4;
+    const dim = (active: boolean): React.CSSProperties => ({ opacity: active ? 1 : 0.55, transition: "opacity .2s" });
+    const PHASES: [string, string][] = [["1", "your data"], ["2", "find the categories"], ["3", "the encoding rule"], ["4", "encode each row"]];
     return <>
-      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+      <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <label className="fld" style={{ margin: 0 }}>Method</label>
-        <select value={method} onChange={(e) => setPrepEncodeMethod(e.target.value)} style={{ maxWidth: 150 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
-        <span className="note">{cats.length} categories</span>
+        <select value={method} onChange={(e) => { setPrepEncodeMethod(e.target.value); resetStage(); }} style={{ maxWidth: 150 }}>{methods.map((m) => <option key={m}>{m}</option>)}</select>
+        <span className="note">{cats.length} categories · {allRows.length} rows</span>
       </div>
-      <div className="note" style={{ marginBottom: 10 }}>{note}</div>
-      <div className="prep-col-h">the encoded output, one row at a time</div>
-      <div className="oh-grid" style={{ gridTemplateColumns: `auto repeat(${headers.length}, minmax(58px, 1fr))` }}>{cells}</div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {PHASES.map(([nn, lab], i) => <span key={i} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 20, fontFamily: "var(--mono)", background: phase === i + 1 ? "var(--accent)" : "var(--panel-2)", color: phase === i + 1 ? "#fff" : "var(--muted)", border: `1px solid ${phase === i + 1 ? "var(--accent)" : "var(--border)"}` }}>{nn} · {lab}</span>)}
+      </div>
+
+      {/* ① data — PINNED on top */}
+      <div className="prep-col" style={{ marginBottom: 10, ...dim(phase === 1) }}>
+        <div className="prep-col-h">① the “{colName}” column · {allRows.length} rows · {cats.length} categories</div>
+        <div style={{ maxHeight: 76, overflowY: "auto", border: `1px solid ${phase === 1 ? "var(--accent)" : "var(--border)"}`, borderRadius: 10, background: "var(--surface)", padding: 8 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {col.values.map((v, i) => { const miss = v == null; return <span key={i} title={`row ${i}`} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "3px 7px", borderRadius: 5, background: "var(--panel-2)", border: `1px solid ${miss ? "var(--crit)" : "var(--border)"}`, color: miss ? "var(--crit)" : "var(--text)" }}>{miss ? "∅" : `“${String(v)}”`}</span>; })}
+          </div>
+        </div>
+      </div>
+      <div className="note" style={{ marginBottom: 6, fontSize: 11 }}>steps ②③④ — scroll inside the box below; your data stays pinned above</div>
+
+      {/* ②③④ in ONE scroll container — auto-scrolls to the row being encoded */}
+      <div ref={prepScrollRef} style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel-2)", padding: 12, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ ...dim(phase === 2) }}>
+          <div className="prep-col-h">② scan the column → find the {cats.length} distinct categories</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, opacity: prepStage >= 1 ? 1 : 0.4, transition: "opacity .25s" }}>
+            {cats.map((c) => <span key={c} style={{ fontFamily: "var(--mono)", fontSize: 11.5, padding: "4px 9px", borderRadius: 6, background: "color-mix(in srgb, var(--accent) 10%, transparent)", border: "1px solid var(--accent)" }}>“{c}” <span style={{ color: "var(--faint)" }}>×{counts.get(c) || 0}</span></span>)}
+          </div>
+        </div>
+
+        <div style={{ ...dim(phase === 3) }}>
+          <div className="prep-col-h">③ the {method} rule</div>
+          <div className="note" style={{ marginBottom: 8, opacity: prepStage >= fxStart ? 1 : 0.4 }}>{note}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, opacity: prepStage >= fxStart ? 1 : 0.4, transition: "opacity .25s" }}>
+            {catsShown.map((c) => <span key={c} style={{ fontFamily: "var(--mono)", fontSize: 11, padding: "3px 8px", borderRadius: 6, background: "var(--surface)", border: "1px solid var(--border)" }}>“{c}” → [{valsOf(c).join(", ")}]</span>)}
+          </div>
+        </div>
+
+        <div style={{ ...dim(phase === 4) }}>
+          <div className="prep-col-h">④ encode each row → {headers.join(", ")}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--faint)", padding: "0 2px 6px", borderBottom: "1px solid var(--border)", marginBottom: 6 }}>
+            <span style={{ width: 56, flex: "0 0 auto" }}>row</span><span style={{ width: 96, flex: "0 0 auto" }}>{colName}</span><span>→ {headers.join("  ")}</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {rowIdx.map((ri, k) => { const val = String(col.values[ri]); const done = prepStage >= applyStart + k; const cur = prepStage === applyStart + k; const vals = valsOf(val);
+              return <div key={ri} className={cur ? "prep-cur" : ""} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "var(--mono)", fontSize: 12, animation: cur ? "prepPop .45s ease" : undefined }}>
+                <span style={{ color: "var(--faint)", width: 56, flex: "0 0 auto" }}>row {ri}</span>
+                <span style={{ width: 96, flex: "0 0 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>“{val}”</span>
+                <span style={{ color: "var(--faint)", flex: "0 0 auto" }}>→</span>
+                <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>{vals.map((vv, ci) => { const hit = oneHot && vv === "1"; return <span key={ci} style={{ minWidth: 22, textAlign: "center", padding: "3px 7px", borderRadius: 5, background: done ? (hit ? "color-mix(in srgb, var(--good) 20%, transparent)" : "var(--surface)") : "var(--surface)", border: `1px solid ${cur ? "var(--good)" : done && hit ? "var(--good)" : "var(--border)"}`, color: done ? (hit ? "var(--good)" : "var(--text)") : "var(--faint)", fontWeight: done && hit ? 700 : 400 }}>{done ? vv : (oneHot ? "0" : "·")}</span>; })}</span>
+              </div>; })}
+          </div>
+        </div>
+      </div>
+
       {stageControls(maxStage)}
     </>;
   }
