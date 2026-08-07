@@ -28,8 +28,9 @@ export async function POST(req: Request) {
   const reqModel = typeof b.model === "string" && b.model.trim() ? b.model.trim() : "";
   // If a specific provider was requested but no longer exists (e.g. deleted & re-added with a new id),
   // fall back to the first active provider instead of failing.
-  let prov = providerId ? await getProviderById(providerId, user.id) : await getActiveProvider(user.id);
-  if (!prov && providerId) prov = await getActiveProvider(user.id);
+  const inclGlobal = user.role === "admin";
+  let prov = providerId ? await getProviderById(providerId, user.id, inclGlobal) : await getActiveProvider(user.id, inclGlobal);
+  if (!prov && providerId) prov = await getActiveProvider(user.id, inclGlobal);
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider configured — add one under Admin → Providers for neural embeddings." }, { status: 400 });
 
   const model = reqModel || pickEmbModel(prov.baseUrl);

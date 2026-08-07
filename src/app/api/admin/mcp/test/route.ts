@@ -11,7 +11,21 @@ export async function POST(req: Request) {
   if (!u) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const b = await req.json().catch(() => ({}));
   const conn = String(b.secret || "").trim();
-  if (!/^postgres(ql)?:\/\//i.test(conn)) return NextResponse.json({ ok: false, error: "Enter a postgresql:// connection string." }, { status: 400 });
+  const isLibsql = /^libsql:|\.turso\.io/i.test(conn);
+  if (!isLibsql && !/^postgres(ql)?:\/\//i.test(conn)) return NextResponse.json({ ok: false, error: "Enter a postgresql:// or a libsql:// (Turso) connection string." }, { status: 400 });
+
+  // Turso / libSQL (SQLite-compatible over HTTP)
+  if (isLibsql) {
+    const t0b = Date.now();
+    const m = conn.match(/[?&]authToken=([^&]+)/i);
+    const authToken = m ? decodeURIComponent(m[1]) : undefined;
+    const url = conn.replace(/([?&])authToken=[^&]+/i, "$1").replace(/[?&]+$/, "");
+    const { createClient } = await import("@libsql/client");
+    const client = createClient({ url, authToken });
+    try { await client.execute("select 1"); return NextResponse.json({ ok: true, latencyMs: Date.now() - t0b, version: "Turso / libSQL" }); }
+    catch (e) { return NextResponse.json({ ok: false, error: (e as Error).message.replace(/\s+/g, " ").slice(0, 200) }); }
+    finally { client.close(); }
+  }
 
   const { Client } = await import("pg");
   const t0 = Date.now();

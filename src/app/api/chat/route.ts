@@ -27,8 +27,8 @@ export async function POST(req: Request) {
   let prov: Awaited<ReturnType<typeof getActiveProvider>>;
   try {
     prov = body.providerId
-      ? await getProviderById(String(body.providerId), user.id)
-      : await getActiveProvider(user.id);
+      ? await getProviderById(String(body.providerId), user.id, user.role === "admin")
+      : await getActiveProvider(user.id, user.role === "admin");
   } catch {
     return NextResponse.json({ error: "Database error while loading provider config. Please retry." }, { status: 503 });
   }

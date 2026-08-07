@@ -61,22 +61,24 @@ export async function fetchModels(baseUrl: string, apiKey: string): Promise<stri
 
 // The provider used to serve LLM calls. Prefers the user's OWN enabled provider (their key),
 // then falls back to the first enabled global/admin provider. Returns a decrypted key.
-export async function getActiveProvider(userId?: string): Promise<ResolvedProvider | null> {
+export async function getActiveProvider(userId?: string, includeGlobal = true): Promise<ResolvedProvider | null> {
   if (userId) {
     const mine = await myProviders(userId);
     if (mine[0]) return shape(mine[0], true);
   }
+  if (!includeGlobal) return null;
   const rows = await db.select().from(providers).where(eq(providers.enabled, true)).limit(1);
   return rows[0] ? shape(rows[0], false) : null;
 }
 
 // Fetch one provider by id (used when the user picks a specific provider in the UI).
 // Checks the user's own providers first (ownership-scoped), then global providers.
-export async function getProviderById(id: string, userId?: string): Promise<ResolvedProvider | null> {
+export async function getProviderById(id: string, userId?: string, includeGlobal = true): Promise<ResolvedProvider | null> {
   if (userId) {
     const mine = await myProviderById(userId, id);
     if (mine && mine.enabled) return shape(mine, true);
   }
+  if (!includeGlobal) return null;
   const rows = await db.select().from(providers).where(eq(providers.id, id)).limit(1);
   const p = rows[0];
   if (!p || !p.enabled) return null;
@@ -84,13 +86,15 @@ export async function getProviderById(id: string, userId?: string): Promise<Reso
 }
 
 // All enabled providers for the UI selector (no keys): the user's own first, then global.
-export async function getEnabledProviders(userId?: string): Promise<{ id: string; provider: string; label: string | null; defaultModel: string; own: boolean }[]> {
+export async function getEnabledProviders(userId?: string, includeGlobal = true): Promise<{ id: string; provider: string; label: string | null; defaultModel: string; own: boolean }[]> {
   const out: { id: string; provider: string; label: string | null; defaultModel: string; own: boolean }[] = [];
   if (userId) {
     const mine = await myProviders(userId);
     for (const p of mine) out.push({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "", own: true });
   }
-  const rows = await db.select().from(providers).where(eq(providers.enabled, true));
-  for (const p of rows) out.push({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "", own: false });
+  if (includeGlobal) {
+    const rows = await db.select().from(providers).where(eq(providers.enabled, true));
+    for (const p of rows) out.push({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "", own: false });
+  }
   return out;
 }

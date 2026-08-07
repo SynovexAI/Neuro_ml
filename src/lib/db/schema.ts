@@ -105,6 +105,15 @@ export const rateLimits = mysqlTable("rate_limits", {
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
 
+// In-app traffic analytics: one row per page view (server-side, works on any host —
+// unlike Vercel Web Analytics which only collects when hosted on Vercel).
+export const pageViews = mysqlTable("page_views", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }),
+  path: varchar("path", { length: 255 }).notNull(),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("pv_ts_idx").on(t.ts)]);
+
 // Lightweight audit / event log for monitoring (logins, quota hits, admin actions).
 export const auditLog = mysqlTable("audit_log", {
   id: varchar("id", { length: 36 }).primaryKey(),
