@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@dsnp/parquetjs": "^1.8.8",
+    "@libsql/client": "^0.17.4",
     "@tidbcloud/serverless": "^0.3.0",
     "@vercel/analytics": "^1.6.1",
     "@vercel/blob": "^2.7.0",

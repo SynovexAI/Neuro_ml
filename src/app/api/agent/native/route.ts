@@ -60,9 +60,28 @@ async function getDb(userId: string): Promise<{ conn: string; write: boolean } |
   return { conn: decrypt(r.secretEnc), write: (r.command || "").includes("unrestricted") };
 }
 
-async function runSql(conn: string, sql: string): Promise<{ cols: string[]; rows: unknown[][]; rowCount: number }> {
-  const host = new URL(conn).hostname;
-  if (await resolvesToPrivate(host)) throw new Error("Blocked host (internal/private address).");
+type SqlResult = { cols: string[]; rows: unknown[][]; rowCount: number };
+
+// Which driver a connection string needs: libSQL/Turso (SQLite-compatible over HTTP) vs Postgres.
+function dbKind(conn: string): "libsql" | "pg" { return /^libsql:|\.turso\.io/i.test(conn) ? "libsql" : "pg"; }
+function hostOf(conn: string): string { return (conn.match(/\/\/(?:[^/?@]+@)?([^/?:]+)/) || [])[1] || ""; }
+
+// Turso / libSQL: conn is `libsql://<db>.turso.io?authToken=<token>` (token also accepted separately in the URL).
+async function libsqlRun(conn: string, sql: string): Promise<SqlResult> {
+  const m = conn.match(/[?&]authToken=([^&]+)/i);
+  const authToken = m ? decodeURIComponent(m[1]) : undefined;
+  const url = conn.replace(/([?&])authToken=[^&]+/i, "$1").replace(/[?&]+$/, "");
+  const { createClient } = await import("@libsql/client");
+  const client = createClient({ url, authToken });
+  try {
+    const res = await client.execute(sql);
+    const cols = res.columns ?? [];
+    const rows = res.rows.slice(0, 50).map((r) => cols.map((c) => (r as unknown as Record<string, unknown>)[c]));
+    return { cols, rows, rowCount: res.rowsAffected || res.rows.length };
+  } finally { client.close(); }
+}
+
+async function pgRun(conn: string, sql: string): Promise<SqlResult> {
   const { Client } = await import("pg");
   const attempt = async (ssl: false | { rejectUnauthorized: boolean }) => {
     const c = new Client({ connectionString: conn, connectionTimeoutMillis: 8000, query_timeout: 12000, statement_timeout: 12000, ...(ssl ? { ssl } : {}) });
@@ -72,6 +91,12 @@ async function runSql(conn: string, sql: string): Promise<{ cols: string[]; rows
   };
   try { return await attempt(false); }
   catch (e) { if (/ssl|certificate|self.signed|no encryption/i.test((e as Error).message)) return attempt({ rejectUnauthorized: false }); throw e; }
+}
+
+async function runSql(conn: string, sql: string): Promise<SqlResult> {
+  const host = hostOf(conn);
+  if (host && await resolvesToPrivate(host)) throw new Error("Blocked host (internal/private address).");
+  return dbKind(conn) === "libsql" ? libsqlRun(conn, sql) : pgRun(conn, sql);
 }
 
 export async function POST(req: Request) {
@@ -90,7 +115,10 @@ export async function POST(req: Request) {
       const d = await getDb(user.id);
       if (!d) return NextResponse.json({ text: "No database connected. Connect one on the MCP servers page ('Connect your database')." });
       if (tool === "db_schema") {
-        const r = await runSql(d.conn, "select table_name, column_name, data_type from information_schema.columns where table_schema = 'public' order by table_name, ordinal_position limit 400");
+        const schemaSql = dbKind(d.conn) === "libsql"
+          ? "SELECT m.name AS table_name, p.name AS column_name, p.type AS data_type FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid LIMIT 400"
+          : "select table_name, column_name, data_type from information_schema.columns where table_schema = 'public' order by table_name, ordinal_position limit 400";
+        const r = await runSql(d.conn, schemaSql);
         const byTable = new Map<string, string[]>();
         r.rows.forEach((row) => { const t = String(row[0]); if (!byTable.has(t)) byTable.set(t, []); byTable.get(t)!.push(`${row[1]} ${row[2]}`); });
         if (!byTable.size) return NextResponse.json({ text: "No tables found in the public schema." });
