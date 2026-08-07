@@ -12,14 +12,15 @@ type Doc = { id: string; name: string; kind: string; text: string; r2Url?: strin
 
 // Best-effort: also store the original file in R2 (returns its URL). No-ops (returns null) if
 // storage isn't configured — the RAG flow works either way since we already keep the parsed text.
-async function uploadToR2(f: File): Promise<string | null> {
+async function uploadToR2(f: File): Promise<{ url: string | null; error?: string }> {
   try {
     const fd = new FormData(); fd.append("file", f);
     const r = await fetch("/api/storage/upload", { method: "POST", body: fd });
-    if (!r.ok) return null;
-    const j = await r.json();
-    return typeof j.url === "string" ? j.url : null;
-  } catch { return null; }
+    if (r.status === 501) return { url: null }; // storage off — expected, not an error
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { url: null, error: j.error || `archive failed (HTTP ${r.status})` };
+    return { url: typeof j.url === "string" ? j.url : null };
+  } catch (e) { return { url: null, error: (e as Error).message }; }
 }
 type Chunk = { text: string; docName: string; docKind: string };
 type Step = "source" | "chunk" | "embed" | "query";
@@ -138,6 +139,8 @@ export default function RagLab() {
   const [kbList, setKbList] = useState<{ id: string; name: string; docCount: number; chunkCount: number }[]>([]);
   const [kbLoading, setKbLoading] = useState(false);
   const [kbBusy, setKbBusy] = useState("");
+  const [storageOn, setStorageOn] = useState<{ configured: boolean; backend: string | null } | null>(null);
+  useEffect(() => { fetch("/api/storage/upload").then((r) => (r.ok ? r.json() : null)).then((j) => setStorageOn(j)).catch(() => {}); }, []);
   const [ghUrl, setGhUrl] = useState("");
   const [ghBusy, setGhBusy] = useState(false);
   const [gdUrl, setGdUrl] = useState("");
@@ -185,6 +188,32 @@ export default function RagLab() {
       if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
     }).catch(() => {});
   }, []);
+
+  // Auto-persist the working session to localStorage so a refresh doesn't lose docs (no Save needed).
+  // Only when NOT opening a specific saved project (?project=…), which loads its own config above.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("project")) return;
+    try {
+      const c = JSON.parse(localStorage.getItem("awb_rag_autosave_v1") || "null");
+      if (!c) return;
+      if (Array.isArray(c.docs) && c.docs.length) setDocs(c.docs.map((d: { name: string; kind?: string; text?: string; r2Url?: string }) => ({ id: rid(), name: d.name, kind: d.kind || "txt", text: d.text || "", r2Url: d.r2Url })));
+      if (c.size != null) setSize(c.size);
+      if (c.overlap != null) setOverlap(c.overlap);
+      if (c.strategy) setStrategy(c.strategy);
+      if (c.metric) setMetric(c.metric);
+      if (c.topK != null) setTopK(c.topK);
+      if (c.question) setQuestion(c.question);
+    } catch { /* ignore corrupt autosave */ }
+  }, []);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        const payload = JSON.stringify({ docs: docs.map((d) => ({ name: d.name, kind: d.kind, text: d.text.slice(0, 200_000), r2Url: d.r2Url })), size, overlap, strategy, metric, topK, question });
+        if (payload.length < 4_500_000) localStorage.setItem("awb_rag_autosave_v1", payload);
+      } catch { /* quota exceeded — skip */ }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [docs, size, overlap, strategy, metric, topK, question]);
 
   // Chunks changed → any neural vectors are stale; drop back to TF-IDF until re-embedded.
   useEffect(() => { setDenseVecs(null); setEmbedMode("tfidf"); setQVec(null); setMetricRows([]); setRelevant(new Set()); setGraph(null); setKgPath([]); setKgVisited([]); setKgSeeds([]); }, [chunks]);
@@ -297,19 +326,21 @@ export default function RagLab() {
       const ext = (f.name.split(".").pop() || "txt").toLowerCase();
       const binary = ["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext);
       try {
-        // Parse text + (best-effort) archive the original file to R2 in parallel.
+        // Parse text + (best-effort) archive the original file to storage in parallel.
         const r2p = uploadToR2(f);
         if (binary) {
           const fd = new FormData(); fd.append("file", f);
           const r = await fetch("/api/rag/extract", { method: "POST", body: fd });
           const j = await r.json();
           if (!r.ok) throw new Error(j.error || "parse failed");
-          const r2Url = await r2p;
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text, r2Url: r2Url || undefined }]);
+          const r2 = await r2p;
+          if (r2.error) setMsg(`Note: "${f.name}" was added, but archiving to storage failed — ${r2.error}`);
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text, r2Url: r2.url || undefined }]);
         } else {
           const text = await f.text();
-          const r2Url = await r2p;
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text, r2Url: r2Url || undefined }]);
+          const r2 = await r2p;
+          if (r2.error) setMsg(`Note: "${f.name}" was added, but archiving to storage failed — ${r2.error}`);
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text, r2Url: r2.url || undefined }]);
         }
       } catch (err) { setMsg(`Could not read ${f.name}: ${(err as Error).message}`); }
     }
@@ -692,6 +723,13 @@ export default function RagLab() {
             })()}
 
             <div style={{ marginBottom: 20 }}>
+              {srcConn === "file" && storageOn && (
+                <div className="note" style={{ marginBottom: 8, fontSize: 11 }}>
+                  {storageOn.configured
+                    ? <>☁ Original files are archived to storage (<b>{storageOn.backend}</b>) — you&apos;ll see a “stored” link per doc.</>
+                    : <>⚠ File storage is <b>off</b> — docs are parsed to text but originals aren&apos;t archived. Admin: create a Vercel Blob store, then <b>redeploy</b>.</>}
+                </div>
+              )}
               {srcConn === "file" && (
                 <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
                   <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>

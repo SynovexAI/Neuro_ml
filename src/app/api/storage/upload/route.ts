@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { storageConfigured, putFile } from "@/lib/storage";
+import { storageConfigured, storageBackend, putFile } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,8 +8,15 @@ export const maxDuration = 60;
 
 const MAX_BYTES = 25 * 1024 * 1024; // 25 MB per upload (raise once background processing is added)
 
-// POST a file (multipart/form-data field "file") → stored in R2 → { key, url }.
-// Returns 501 if R2 isn't configured, so callers can fall back to their existing flow.
+// GET → { configured, backend } so the UI can tell whether uploads will be archived.
+export async function GET() {
+  const user = await getSessionUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  return NextResponse.json({ configured: storageConfigured(), backend: storageBackend() });
+}
+
+// POST a file (multipart/form-data field "file") → stored in Blob/R2 → { key, url }.
+// Returns 501 if storage isn't configured, so callers can fall back to their existing flow.
 export async function POST(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });

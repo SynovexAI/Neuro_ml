@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users, sessions, userProviders, projects, channels, mcpServers, knowledgeBases, agentRuns, usage, etlDatasets } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth";
+import { audit } from "@/lib/monitor";
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const me = await getSessionUser();
@@ -43,5 +44,6 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   ];
   for (const w of wipes) { try { await w; } catch { /* table may not exist / no rows */ } }
   await db.delete(users).where(eq(users.id, id));
+  await audit("user_deleted", me.id, { deleted: id }).catch(() => {});
   return NextResponse.json({ ok: true });
 }

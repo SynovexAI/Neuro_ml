@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { providers } from "@/lib/db/schema";
 import { getSessionUser, uid } from "@/lib/auth";
 import { encrypt, decrypt, maskKey } from "@/lib/crypto";
+import { audit } from "@/lib/monitor";
 
 async function admin() {
   const u = await getSessionUser();
@@ -21,7 +22,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!(await admin())) return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  const me = await admin();
+  if (!me) return NextResponse.json({ error: "forbidden" }, { status: 403 });
   const b = await req.json().catch(() => ({}));
   if (!b.provider || !b.baseUrl) return NextResponse.json({ error: "provider and baseUrl required" }, { status: 400 });
   const id = uid();
@@ -34,5 +36,6 @@ export async function POST(req: Request) {
     defaultModel: b.defaultModel ? String(b.defaultModel) : null,
     enabled: b.enabled !== false,
   });
+  await audit("provider_added", me.id, { provider: String(b.provider), scope: "global" }).catch(() => {});
   return NextResponse.json({ ok: true, id });
 }

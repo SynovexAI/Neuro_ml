@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import AddKeyBanner from "@/components/AddKeyBanner";
+import TrackPageView from "@/components/TrackPageView";
+import StorageAlertBanner from "@/components/StorageAlertBanner";
 import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
 import Toaster from "./Toaster";
@@ -53,6 +55,7 @@ const ZONES: Zone[] = [
       { href: "/admin/usage", label: "Usage & Monitoring" },
       { href: "/admin/agents", label: "Agent analytics" },
       { href: "/admin/analytics", label: "Analytics" },
+      { href: "/admin/audit", label: "Audit log" },
       { href: "/admin/storage", label: "Storage" },
     ],
   },
@@ -121,7 +124,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
           <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
           <ThemeToggle />
         </header>
-        <div className="work"><AddKeyBanner />{children}</div>
+        <div className="work"><TrackPageView /><AddKeyBanner />{user.role === "admin" && <StorageAlertBanner />}{children}</div>
       </div>
       <Toaster />
     </div>
