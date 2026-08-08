@@ -7,6 +7,7 @@ import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
 import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
 import ModelPicker from "@/components/ModelPicker";
+import RagExperiments, { type ExpConfig } from "@/components/RagExperiments";
 
 type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
 
@@ -134,11 +135,15 @@ export default function RagLab() {
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
-  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive" | "kb">("file");
+  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "datasets" | "github" | "gdrive" | "kb">("file");
   const [connectorOpen, setConnectorOpen] = useState(false);
   const [kbList, setKbList] = useState<{ id: string; name: string; docCount: number; chunkCount: number }[]>([]);
   const [kbLoading, setKbLoading] = useState(false);
   const [kbBusy, setKbBusy] = useState("");
+  // Shared built-in practice datasets (bundled — zero cloud storage; one copy serves every student).
+  const [sampleList, setSampleList] = useState<{ id: string; name: string; emoji: string; description: string; questions: string[]; words: number }[]>([]);
+  const [sampleLoading, setSampleLoading] = useState(false);
+  const [sampleBusy, setSampleBusy] = useState("");
   const [storageOn, setStorageOn] = useState<{ configured: boolean; backend: string | null } | null>(null);
   useEffect(() => { fetch("/api/storage/upload").then((r) => (r.ok ? r.json() : null)).then((j) => setStorageOn(j)).catch(() => {}); }, []);
   const [ghUrl, setGhUrl] = useState("");
@@ -157,6 +162,13 @@ export default function RagLab() {
   const [trace, setTrace] = useState<{ who: string; what: string; state: string }[]>([]);
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
+  // RAG debugger: the FULL ranking + which indices were selected into the top-k, plus last-run latency.
+  const [debugRank, setDebugRank] = useState<{ i: number; score: number }[]>([]);
+  const [selectedIdx, setSelectedIdx] = useState<number[]>([]);
+  const [lastLatency, setLastLatency] = useState(0);
+  const [dbgOpen, setDbgOpen] = useState(false);
+  // RAG vs no-RAG: the same question answered with retrieved context vs from the model alone.
+  const [vs, setVs] = useState<{ running: boolean; withCtx: string; without: string } | null>(null);
   const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
   const [agentCfg, setAgentCfg] = useState<AgentConfig>({ enabled: ["vector", "keyword", "hybrid"], maxSteps: 5, topK: 4, selfCheck: true, maxTokens: 1024 });
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
@@ -408,6 +420,23 @@ export default function RagLab() {
       invalidate();
     } catch (e) { setMsg((e as Error).message); } finally { setKbBusy(""); }
   }
+  async function loadSampleList() {
+    setSampleLoading(true);
+    try { const r = await fetch("/api/rag/samples"); const j = await r.json(); if (r.ok) setSampleList(j.samples || []); } catch { /* ignore */ } finally { setSampleLoading(false); }
+  }
+  // Load one shared practice dataset. Replaces the current docs so each experiment starts
+  // from a clean, known corpus, and seeds the first suggested question.
+  async function pullSample(s: { id: string; name: string; questions?: string[] }) {
+    setSampleBusy(s.id); setMsg("");
+    try {
+      const r = await fetch(`/api/rag/samples?id=${encodeURIComponent(s.id)}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      setDocs([{ id: rid(), name: `${s.name}.txt`, kind: "txt", text: j.text }]);
+      if (Array.isArray(j.questions) && j.questions[0]) setQuestion(j.questions[0]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setSampleBusy(""); }
+  }
   const removeDoc = (id: string) => { setDocs((d) => d.filter((x) => x.id !== id)); invalidate(); };
   function invalidate() { setChunks([]); setIndex(null); }
 
@@ -464,6 +493,21 @@ export default function RagLab() {
       const avg = hs.length ? hs.reduce((a, h) => a + h.score, 0) / hs.length : 0;
       return { size: sz, overlap: ov, chunks: cks.length, top, avg, best: hs[0] != null ? cks[hs[0].i] : "" };
     }));
+  }
+  // Apply a saved experiment's settings back into the lab (config only — the documents
+  // stay as they are; re-run chunking/index to see the effect).
+  function applyExpConfig(c: ExpConfig) {
+    if (c.backend === "vector" || c.backend === "kg" || c.backend === "hybrid") setBackend(c.backend);
+    if (c.size) setSize(c.size);
+    if (c.overlap != null) setOverlap(c.overlap);
+    if (c.strategy) setStrategy(c.strategy as Strategy);
+    if (c.metric) setMetric(c.metric as Metric);
+    if (c.topK) setTopK(c.topK);
+    if (c.rerank === "none" || c.rerank === "mmr") setRerank(c.rerank);
+    if (typeof c.mmrLambda === "number") setMmrLambda(c.mmrLambda);
+    if (c.embModel) setEmbModel(c.embModel);
+    if (c.kgHops) setKgHops(c.kgHops);
+    setMsg("Loaded experiment settings — re-run chunking & index to apply them.");
   }
   async function saveProject() {
     const MAX = 600_000; // cap saved document text (~0.6 MB) so a project row stays small
@@ -603,10 +647,13 @@ export default function RagLab() {
     ];
     setTraceStep(steps, 1);
     let top: { i: number; score: number }[];
+    let rankedAll: { i: number; score: number }[] = [];
+    let selOrder: number[] = [];
     if (backend === "kg" && graph) {
       const r = retrieveGraph(graph, question, topK, kgHops);
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
       top = r.chunkIds.map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+      rankedAll = top; selOrder = top.map((h) => h.i);
     } else if (backend === "hybrid" && graph && index) {
       const r = retrieveGraph(graph, question, Math.max(topK * 3, 8), Math.max(kgHops, 2));
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
@@ -615,13 +662,16 @@ export default function RagLab() {
       const order = applyRerank(inGraph.length ? inGraph : ranked, topK);
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+      rankedAll = ranked; selOrder = order;
     } else {
       const qv = await ensureQVec();
       const ranked = fullRank(strategy, qv); const order = applyRerank(ranked, topK);
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+      rankedAll = ranked; selOrder = order;
     }
     setHits(top);
+    setDebugRank(rankedAll); setSelectedIdx(selOrder);
     setTraceStep(steps, 3);
     const context = top.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
     const messages = [
@@ -635,10 +685,38 @@ export default function RagLab() {
       if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); setAnswer("⚠ " + (j.error || "failed")); setMeta("error"); setRunning(false); return; }
       const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
       for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); setAnswer(text); }
-      setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${Math.round(performance.now() - t0)}ms`);
+      const lat = Math.round(performance.now() - t0); setLastLatency(lat);
+      setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${lat}ms`);
       setTrace(steps.map((s) => ({ ...s, state: "done" })));
     } catch (e) { setAnswer("⚠ " + (e as Error).message); setMeta("error"); }
     setRunning(false);
+  }
+
+  // RAG vs no-RAG: answer the SAME question twice — once grounded on the retrieved
+  // chunks, once from the model's own knowledge — so the value of retrieval is visible.
+  async function askCompareRag() {
+    if (!hits.length) { setVs({ running: false, withCtx: "", without: "Click ▶ Ask first so there's a retrieval to compare against." }); return; }
+    setVs({ running: true, withCtx: "", without: "" });
+    const context = hits.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
+    const withMsgs = [
+      { role: "system" as const, content: "You are a helpful assistant. Answer using ONLY the provided context. Cite inline like [chunk N]. If the answer is not in the context, say you don't know." },
+      { role: "user" as const, content: `Context:\n${context}\n\nQuestion: ${question}` },
+    ];
+    const withoutMsgs = [
+      { role: "system" as const, content: "You are a helpful assistant. Answer the question from your own general knowledge. If you are unsure or do not know, say so plainly." },
+      { role: "user" as const, content: question },
+    ];
+    const run = async (messages: { role: "system" | "user"; content: string }[]): Promise<string> => {
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+      if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "failed"); }
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+      for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+      return text;
+    };
+    try {
+      const [w, wo] = await Promise.all([run(withMsgs), run(withoutMsgs)]);
+      setVs({ running: false, withCtx: w, without: wo });
+    } catch (e) { setVs({ running: false, withCtx: "⚠ " + (e as Error).message, without: "⚠ " + (e as Error).message }); }
   }
 
   const stepBtn = (k: Step, n: number, label: string, enabled: boolean) => (
@@ -646,6 +724,10 @@ export default function RagLab() {
   );
   const stepWords = Math.max(1, size - overlap);
   const pLayout = (t: ReturnType<typeof plotlyTheme>, title: string, extra: Record<string, unknown> = {}) => ({ title: { text: title, font: { size: 13, color: t.text } }, paper_bgcolor: t.paper, plot_bgcolor: t.plot, font: { color: t.muted, size: 11 }, margin: { l: 44, r: 16, t: 40, b: 60 }, xaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, yaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, colorway: t.colorway, ...extra });
+
+  // Metrics for the CURRENT strategy (if the user evaluated) — attached to a saved experiment.
+  const activeMetricName = rerank === "mmr" ? `${strategy}+mmr` : strategy;
+  const currentMetrics = (() => { const row = metricRows.find((r) => r.name === activeMetricName); return row ? { p: row.p, r: row.r, mrr: row.mrr, ndcg: row.ndcg } : null; })();
 
   return (
     <div className="rag-lab">
@@ -684,6 +766,7 @@ export default function RagLab() {
               type Row = [typeof srcConn | string, string, string, string, boolean?];
               const CONNECTORS: Row[] = [
                 ["file", "📄", "Upload file", "PDF · DOCX · TXT · CSV · XLSX"],
+                ["datasets", "📚", "Practice datasets", "shared built-in corpora — no upload"],
                 ["kb", "🧠", "Knowledge base", "use a saved KB from Studio"],
                 ["url", "🌐", "Web page", "scrape article text from a URL"],
                 ["github", "🐙", "GitHub", "README · file · folder from a public repo"],
@@ -708,7 +791,7 @@ export default function RagLab() {
                       <div className="note" style={{ padding: "9px 12px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--border)" }}>Available connectors</div>
                       <div style={{ maxHeight: 300, overflowY: "auto", padding: 6 }}>
                         {CONNECTORS.map(([k, ic, title, sub, soon]) => (
-                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); if (k === "kb") loadKbList(); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
+                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); if (k === "kb") loadKbList(); if (k === "datasets") loadSampleList(); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
                             <span style={{ width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: srcConn === k ? "var(--accent)" : "var(--panel-2)", color: srcConn === k ? "#fff" : "var(--muted)" }}>{ic}</span>
                             <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{title}</span><span className="note" style={{ fontSize: 10 }}>{sub}</span></span>
                             {soon ? <span style={{ fontSize: 8.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em", padding: "2px 6px", borderRadius: 5, background: "var(--panel-2)", color: "var(--faint)", border: "1px solid var(--border)", flex: "0 0 auto" }}>soon</span>
@@ -765,6 +848,23 @@ export default function RagLab() {
                   <input type="text" value={gdUrl} onChange={(e) => setGdUrl(e.target.value)} placeholder="https://docs.google.com/document/d/…  or  /spreadsheets/d/…" style={{ marginBottom: 10 }} onKeyDown={(e) => { if (e.key === "Enter") fetchGDrive(); }} />
                   <button className="btn block" onClick={fetchGDrive} disabled={gdBusy}>{gdBusy ? <><span className="busy-dot" />Importing…</> : "📁 Import from Google Drive"}</button>
                   <div className="note" style={{ marginTop: 10, lineHeight: 1.55 }}>Paste a <b>Google Doc</b> or <b>Sheet</b> link that&apos;s shared as <b>“Anyone with the link”</b> — it&apos;s exported to text/CSV and added as a document. Private files (which need OAuth) aren&apos;t supported here.</div>
+                </div>
+              )}
+              {srcConn === "datasets" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Shared practice datasets</span><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadSampleList} disabled={sampleLoading}>↻ Refresh</button></div>
+                  <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Ready-made corpora bundled with the platform — pick one to experiment with. <b>No upload, no storage used</b>: one shared copy serves everyone, and only your experiment settings are saved. Loading a dataset replaces the current documents and seeds a suggested question.</div>
+                  {sampleLoading ? <div className="note"><span className="busy-dot" /> loading…</div>
+                    : sampleList.length === 0 ? <div className="note">No datasets available.</div>
+                    : <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+                        {sampleList.map((s) => (
+                          <div key={s.id} className="row" style={{ gap: 10, alignItems: "center", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", background: "var(--surface)" }}>
+                            <span style={{ fontSize: 18 }}>{s.emoji}</span>
+                            <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontWeight: 600, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span><span className="note" style={{ fontSize: 10, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.description}</span><span className="note" style={{ fontSize: 9.5 }}>{s.words} words · {s.questions.length} sample questions</span></span>
+                            <button className="btn sm" onClick={() => pullSample(s)} disabled={sampleBusy === s.id}>{sampleBusy === s.id ? "loading…" : "Use →"}</button>
+                          </div>
+                        ))}
+                      </div>}
                 </div>
               )}
               {srcConn === "sample" && (
@@ -1381,6 +1481,88 @@ export default function RagLab() {
             })()}
           </div>
         </div>
+      )}
+
+      {/* RAG DEBUGGER — every candidate chunk ranked, with the top-k cutoff made explicit */}
+      {step === "query" && answerMode === "direct" && backend !== "kg" && debugRank.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">🐛 Retrieval debugger</span><span className="mono r">top-{topK} of {debugRank.length} candidates</span>
+            <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setDbgOpen((o) => !o)}>{dbgOpen ? "Hide" : "Show"}</button>
+          </div>
+          {dbgOpen && <div className="card-b">
+            {(() => {
+              const selSet = new Set(selectedIdx);
+              const scoreOf = new Map(debugRank.map((h) => [h.i, h.score]));
+              const cutoff = selectedIdx.length ? Math.min(...selectedIdx.map((i) => scoreOf.get(i) ?? 0)) : 0;
+              const maxScore = Math.max(...debugRank.map((h) => h.score), 0.0001);
+              const shown = debugRank.slice(0, 20);
+              return (<>
+                <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Every chunk ranked by similarity for “{question}”. <b style={{ color: "var(--good)" }}>Green</b> chunks made the top-{topK} context; the rest were cut. Cutoff (lowest selected score) = <b>{cutoff.toFixed(3)}</b>.</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {shown.map((h, rank) => {
+                    const on = selSet.has(h.i);
+                    return (
+                      <div key={h.i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="mono" style={{ width: 30, flex: "0 0 auto", fontSize: 11, color: "var(--faint)" }}>#{rank + 1}</span>
+                        <span className="mono" style={{ width: 40, flex: "0 0 auto", fontSize: 11, fontWeight: 600, color: on ? "var(--good)" : "var(--muted)" }}>c{h.i + 1}</span>
+                        <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 5, height: 16, position: "relative", overflow: "hidden" }}>
+                          <div style={{ width: `${Math.max(3, (h.score / maxScore) * 100)}%`, height: "100%", background: on ? "var(--good)" : "var(--border-strong)", borderRadius: 5 }} />
+                        </div>
+                        <span className="mono" style={{ width: 50, flex: "0 0 auto", textAlign: "right", fontSize: 11, color: "var(--muted)" }}>{h.score.toFixed(3)}</span>
+                        <span style={{ width: 112, flex: "0 0 auto", fontSize: 10 }}>
+                          {on ? <span style={{ color: "var(--good)", fontWeight: 600 }}>✓ selected</span>
+                              : <span className="note" title={`score ${h.score.toFixed(3)} < cutoff ${cutoff.toFixed(3)}`}>✕ below cutoff</span>}
+                        </span>
+                        <span className="note" style={{ flex: 1, minWidth: 0, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chunks[h.i]?.text.slice(0, 90)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {debugRank.length > 20 && <div className="note" style={{ marginTop: 6 }}>Showing the top 20 of {debugRank.length} candidates.</div>}
+                <div className="note" style={{ marginTop: 8, lineHeight: 1.5 }}>The core RAG debugging skill: if a chunk you expected is missing from the answer, find it here. A low score means the retriever didn&apos;t rate it relevant — try a bigger chunk size, neural embeddings, or a higher top-K.</div>
+              </>);
+            })()}
+          </div>}
+        </div>
+      )}
+
+      {/* RAG vs NO-RAG — same question answered with vs without retrieval */}
+      {step === "query" && index && answerMode === "direct" && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">⚖️ RAG vs no-RAG</span><span className="mono r">same question · with vs without retrieval</span></div>
+          <div className="card-b">
+            <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Answers “{question}” twice — grounded on your retrieved chunks vs the model&apos;s own knowledge. Shows exactly what retrieval adds (and exposes hallucinations when the model has to guess).</div>
+            <button className="btn sm" onClick={askCompareRag} disabled={!!vs?.running || !hits.length}>{vs?.running ? "running…" : hits.length ? "▶ Compare RAG vs no-RAG" : "Ask first, then compare"}</button>
+            {vs?.running && <div className="note" style={{ marginTop: 10 }}><span className="busy-dot" /> generating both answers…</div>}
+            {vs && !vs.running && (vs.withCtx || vs.without) && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+                <div style={pnl}>
+                  {kgHead("var(--good)", "✅ With RAG (grounded)")}
+                  <div style={{ padding: 12, fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--text)", maxHeight: 320, overflow: "auto" }}>{vs.withCtx || "—"}</div>
+                </div>
+                <div style={pnl}>
+                  {kgHead("var(--warn)", "⚠️ No RAG (model only)")}
+                  <div style={{ padding: 12, fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--muted)", maxHeight: 320, overflow: "auto" }}>{vs.without || "—"}</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* EXPERIMENT HISTORY + SIDE-BY-SIDE COMPARISON (config + metrics only — storage-cheap) */}
+      {step === "query" && answerMode === "direct" && (
+        <RagExperiments
+          current={{
+            config: { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops },
+            metrics: currentMetrics,
+            question,
+            dataset: docs[0]?.name || "",
+            chunkCount: chunks.length,
+            latencyMs: lastLatency,
+          }}
+          onLoad={applyExpConfig}
+        />
       )}
     </div>
   );
