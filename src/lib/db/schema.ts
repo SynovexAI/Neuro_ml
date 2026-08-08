@@ -224,7 +224,25 @@ export const etlDatasetRows = mysqlTable("etl_dataset_rows", {
   data: json("data"),                       // one record
 }, (t) => [index("etl_rows_ds_idx").on(t.datasetId)]);
 
+// RAG Lab experiment tracking. Stores ONLY the pipeline configuration + metrics
+// (no document or embedding copies) so it's storage-cheap — a shared dataset is
+// referenced by name, and each experiment row is a few hundred bytes. Powers the
+// Experiment History + side-by-side comparison in the RAG Lab.
+export const ragExperiments = mysqlTable("rag_experiments", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  label: varchar("label", { length: 160 }).notNull(),
+  dataset: varchar("dataset", { length: 200 }),         // dataset name/description (not the text)
+  question: text("question"),
+  config: json("config"),                                // { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops }
+  metrics: json("metrics"),                              // { p, r, mrr, ndcg } for the active strategy, or null if not evaluated
+  chunkCount: int("chunk_count").notNull().default(0),
+  latencyMs: int("latency_ms").notNull().default(0),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("rag_exp_user_ts_idx").on(t.userId, t.ts)]);
+
 export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
 export type KbChunk = typeof kbChunks.$inferSelect;
 export type Channel = typeof channels.$inferSelect;
 export type EtlDataset = typeof etlDatasets.$inferSelect;
+export type RagExperiment = typeof ragExperiments.$inferSelect;
