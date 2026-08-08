@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric } from "@/lib/ragUtils";
+import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric } from "@/lib/ragUtils";
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
 import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
 import ModelPicker from "@/components/ModelPicker";
 import RagExperiments, { type ExpConfig } from "@/components/RagExperiments";
+import EmbeddingExplorer from "@/components/EmbeddingExplorer";
 
 type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
 
@@ -1134,11 +1135,9 @@ export default function RagLab() {
                 )}
                 {embedMode === "neural" && denseVecs && embedInfo && <div className="note" style={{ marginTop: 8 }}>real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</div>}
                 {embedMode === "tfidf" && <div className="note" style={{ marginTop: 8 }}>TF-IDF weights each term by rarity. Switch to Neural for real semantic embeddings{provider === null && provKnown ? " (needs a provider — TF-IDF works without one)" : ""} — the pipeline is identical.</div>}
-                {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
-                  const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
-                  const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
-                  return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
-                })()}
+                {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (
+                  <EmbeddingExplorer vectors={denseVecs} chunks={chunks} dim={embedInfo?.dim ?? (denseVecs[0]?.length ?? 0)} metric={metric} clusterAssign={clusters?.assign} />
+                )}
               </div>
             </div>
 
