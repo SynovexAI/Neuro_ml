@@ -840,11 +840,12 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
 .acanvas.n8n-light::-webkit-scrollbar-track{background:#f8fafc}
 .acanvas.n8n-light::-webkit-scrollbar-corner{background:#f8fafc}
 .acanvas.n8n-light{background-color:#f8fafc;background-image:radial-gradient(#cbd5e1 1.2px,transparent 1.2px),linear-gradient(135deg,rgba(241,245,249,.6) 25%,transparent 25%,transparent 50%,rgba(241,245,249,.6) 50%,rgba(241,245,249,.6) 75%,transparent 75%,transparent);background-size:24px 24px,40px 40px}
-.acanvas .wires2{position:absolute;inset:0;pointer-events:none;overflow:visible}
-.acanvas .wires2 path{fill:none;stroke:var(--border-strong);stroke-width:2.2}
+.acanvas .wires2 path{fill:none;stroke:var(--border-strong);stroke-width:2.2;transition:stroke 0.2s,stroke-width 0.2s}
 .acanvas.n8n-light .wires2 path{stroke:#94a3b8}
 .acanvas .wires2 path.sub{stroke:var(--sky);stroke-dasharray:5 4;opacity:.85}
 .acanvas .wires2 path.active{stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4;opacity:.8}
+.acanvas .wires2 path.active-running{stroke:#38bdf8;stroke-width:3px;stroke-dasharray:6 4;animation:n8nDash 0.4s linear infinite;filter:drop-shadow(0 0 6px rgba(56,189,248,0.85));opacity:1}
+.acanvas .wires2 path.active-done{stroke:#10b981;stroke-width:2.5px;filter:drop-shadow(0 0 4px rgba(16,185,129,0.6));opacity:0.95}
 @keyframes n8nDash{to{stroke-dashoffset:-20}}
 
 .anode{position:absolute;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-sm);cursor:grab;user-select:none;transition:box-shadow .15s,border-color .15s,transform .15s;z-index:2}

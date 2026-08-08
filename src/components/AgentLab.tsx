@@ -1440,7 +1440,15 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const flowCanvas = () => (
     <div className="acanvas" ref={canvasRef} onClick={() => setAddOpen(false)}>
       <svg className="wires2" width="100%" height={CANVAS_H}>
-        {wires.map((w, i) => { const act = ["running", "done"].includes(nodeStatus[w.from] || "") || ["running", "done"].includes(nodeStatus[w.to] || ""); const sel = w.kind === "sub" && aSel === w.from; return <path key={i} className={`${w.kind === "sub" ? "sub" : ""} ${act ? "active" : ""} ${sel ? "selw" : ""}`} d={wirePath(w)} />; })}
+        {wires.map((w, i) => {
+          const fromSt = nodeStatus[w.from] || "";
+          const toSt = nodeStatus[w.to] || "";
+          const isRunning = fromSt === "running" || toSt === "running";
+          const isDone = (fromSt === "done" || fromSt === "running") && (toSt === "done" || toSt === "running");
+          const sel = w.kind === "sub" && aSel === w.from;
+          const wireClass = `${w.kind === "sub" ? "sub" : ""} ${isRunning ? "active-running" : isDone ? "active-done" : ""} ${sel ? "selw" : ""}`;
+          return <path key={i} className={wireClass} d={wirePath(w)} />;
+        })}
         {wires.filter((w) => w.kind === "sub").map((w, i) => <path key={"hit" + i} className="wire-hit" d={wirePath(w)} onClick={(e) => { e.stopPropagation(); setASel(w.from); }} />)}
         {connectFrom && <path className="sub selw" d={tempWirePath()} />}
       </svg>
