@@ -6,13 +6,15 @@ type Row = { id: string; event: string; userId: string | null; detail: unknown; 
 const COLOR: Record<string, string> = {
   login: "var(--good)", login_failed: "var(--crit)", quota_exceeded: "var(--warn)",
   user_deleted: "var(--crit)", provider_added: "var(--accent)", provider_deleted: "var(--crit)",
-  mcp_server_added: "var(--accent)", signup: "var(--good)",
+  mcp_server_added: "var(--accent)", signup: "var(--good)", logout: "var(--muted)",
+  page_view: "var(--muted)", agent_run: "var(--accent)", kb_synced: "var(--accent)", etl_stored: "var(--accent)",
 };
 
 export default function AuditLogViewer() {
   const [rows, setRows] = useState<Row[]>([]);
   const [events, setEvents] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
+  const [hideNav, setHideNav] = useState(false);
   const [loading, setLoading] = useState(true);
 
   async function load(ev = filter) {
@@ -28,6 +30,7 @@ export default function AuditLogViewer() {
 
   const fmtTs = (t: string | null) => (t ? new Date(t).toLocaleString() : "—");
   const fmtDetail = (d: unknown) => { if (d == null) return ""; try { return typeof d === "string" ? d : JSON.stringify(d); } catch { return String(d); } };
+  const shown = hideNav ? rows.filter((r) => r.event !== "page_view") : rows;
 
   return (
     <div>
@@ -37,16 +40,19 @@ export default function AuditLogViewer() {
           <option value="">all events</option>
           {events.map((e) => <option key={e} value={e}>{e}</option>)}
         </select>
-        <span className="note">{rows.length} shown</span>
+        <label className="note" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+          <input type="checkbox" checked={hideNav} onChange={(e) => setHideNav(e.target.checked)} /> hide navigation
+        </label>
+        <span className="note">{shown.length} shown</span>
         <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => load()}>↻ Refresh</button>
       </div>
       {loading ? <div className="note"><span className="busy-dot" /> loading…</div>
-        : rows.length === 0 ? <div className="note">No audit events{filter ? ` for "${filter}"` : ""} yet.</div>
+        : shown.length === 0 ? <div className="note">No audit events{filter ? ` for "${filter}"` : ""} yet.</div>
         : (
           <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
             <table className="dtable" style={{ width: "100%" }}><tbody>
               <tr><th style={{ textAlign: "left" }}>when</th><th style={{ textAlign: "left" }}>event</th><th style={{ textAlign: "left" }}>user</th><th style={{ textAlign: "left" }}>detail</th></tr>
-              {rows.map((r) => (
+              {shown.map((r) => (
                 <tr key={r.id}>
                   <td style={{ whiteSpace: "nowrap", color: "var(--muted)", fontFamily: "var(--mono)", fontSize: 11 }}>{fmtTs(r.ts)}</td>
                   <td><span style={{ fontFamily: "var(--mono)", fontSize: 11.5, fontWeight: 600, color: COLOR[r.event] || "var(--text)" }}>{r.event}</span></td>

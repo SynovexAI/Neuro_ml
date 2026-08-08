@@ -13,7 +13,7 @@ import ThemeToggle from "./ThemeToggle";
 type Role = "admin" | "student";
 export type ShellUser = { name?: string | null; email: string; role: Role };
 
-type Zone = { id: string; label: string; desc: string; icon: string; home: string; adminOnly?: boolean; items: { href: string; label: string }[] };
+type Zone = { id: string; label: string; desc: string; icon: string; home: string; adminOnly?: boolean; items: { href: string; label: string; adminOnly?: boolean; studentOnly?: boolean }[] };
 
 const ZONES: Zone[] = [
   {
@@ -23,8 +23,8 @@ const ZONES: Zone[] = [
       { href: "/compose", label: "Compose" },
       { href: "/kb", label: "Knowledge bases" },
       { href: "/studio/mcp", label: "MCP servers" },
-      { href: "/admin/providers", label: "Providers & models" },
-      { href: "/settings/keys", label: "My API keys" },
+      { href: "/admin/providers", label: "Providers & models", adminOnly: true },
+      { href: "/settings/keys", label: "My API keys", studentOnly: true },
       { href: "/projects", label: "My Projects" },
       { href: "/templates", label: "Templates" },
     ],
@@ -107,7 +107,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
           </>)}
         </div>
 
-        <nav className="nav">{zone.items.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
+        <nav className="nav">{zone.items.filter((l) => (!l.adminOnly || user.role === "admin") && (!l.studentOnly || user.role !== "admin")).map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
 
         <div className="side-account">
           <div className="avatar">{initial}</div>
