@@ -807,10 +807,10 @@ const CURRICULUM_CATEGORIES = [
     id: "Fundamentals",
     phase: "Phase 01",
     label: "Fundamentals & Definition",
-    svgIcon: <BotSvg size={16} color="var(--accent-strong)" />,
+    getSvgIcon: (color: string) => <BotSvg size={15} color={color} />,
     color: "#6366f1",
-    bg: "rgba(99, 102, 241, 0.12)",
-    border: "rgba(99, 102, 241, 0.4)",
+    bg: "rgba(99, 102, 241, 0.08)",
+    border: "rgba(99, 102, 241, 0.35)",
     tagline: "Core agent loop & LLM brain comparison",
     getTopics: () => LEARN_MAP.filter((t) => t.category === "Fundamentals")
   },
@@ -818,10 +818,10 @@ const CURRICULUM_CATEGORIES = [
     id: "Agent Types",
     phase: "Phase 02",
     label: "Types of AI Agents",
-    svgIcon: <PuzzleSvg size={16} color="var(--accent-strong)" />,
+    getSvgIcon: (color: string) => <PuzzleSvg size={15} color={color} />,
     color: "#a855f7",
-    bg: "rgba(168, 85, 247, 0.12)",
-    border: "rgba(168, 85, 247, 0.4)",
+    bg: "rgba(168, 85, 247, 0.08)",
+    border: "rgba(168, 85, 247, 0.35)",
     tagline: "Simple reflex, ReAct & multi-agent swarms",
     getTopics: () => LEARN_MAP.filter((t) => t.category === "Agent Types")
   },
@@ -829,10 +829,10 @@ const CURRICULUM_CATEGORIES = [
     id: "Execution Flow",
     phase: "Phase 03",
     label: "Execution & Message Flow",
-    svgIcon: <RefreshSvg size={16} color="var(--accent-strong)" />,
+    getSvgIcon: (color: string) => <RefreshSvg size={15} color={color} />,
     color: "#38bdf8",
-    bg: "rgba(56, 189, 248, 0.12)",
-    border: "rgba(56, 189, 248, 0.4)",
+    bg: "rgba(56, 189, 248, 0.08)",
+    border: "rgba(56, 189, 248, 0.35)",
     tagline: "Token window assembly & tool dispatch",
     getTopics: () => LEARN_MAP.filter((t) => t.category === "Execution Flow")
   },
@@ -840,10 +840,10 @@ const CURRICULUM_CATEGORIES = [
     id: "Knowledge & RAG",
     phase: "Phase 04",
     label: "Chunks, Embeddings & RAG",
-    svgIcon: <BookSvg size={16} color="var(--accent-strong)" />,
+    getSvgIcon: (color: string) => <BookSvg size={15} color={color} />,
     color: "#10b981",
-    bg: "rgba(16, 185, 129, 0.12)",
-    border: "rgba(16, 185, 129, 0.4)",
+    bg: "rgba(16, 185, 129, 0.08)",
+    border: "rgba(16, 185, 129, 0.35)",
     tagline: "Text chunking, vector DBs & similarity search",
     getTopics: () => LEARN_MAP.filter((t) => t.category === "Knowledge & RAG" || t.category === "Knowledge")
   },
@@ -851,10 +851,10 @@ const CURRICULUM_CATEGORIES = [
     id: "Implementation",
     phase: "Phase 05",
     label: "5-Step Implementation",
-    svgIcon: <BuildSvg size={16} color="var(--accent-strong)" />,
+    getSvgIcon: (color: string) => <BuildSvg size={15} color={color} />,
     color: "#f59e0b",
-    bg: "rgba(245, 158, 11, 0.12)",
-    border: "rgba(245, 158, 11, 0.4)",
+    bg: "rgba(245, 158, 11, 0.08)",
+    border: "rgba(245, 158, 11, 0.35)",
     tagline: "System prompts, tool schemas & guardrails",
     getTopics: () => LEARN_MAP.filter((t) => t.category === "Implementation")
   },
@@ -2141,25 +2141,26 @@ if __name__ == "__main__":
                       {/* Category Tree Node */}
                       <div style={{
                         width: "100%",
-                        background: "var(--panel)",
-                        border: "1px solid var(--border-strong)",
+                        background: cat.bg,
+                        border: `1.5px solid ${cat.border}`,
                         borderRadius: 10,
                         padding: "9px 11px",
                         display: "flex",
                         flexDirection: "column",
                         gap: 3,
                         textAlign: "center",
-                        alignItems: "center"
+                        alignItems: "center",
+                        boxShadow: `0 2px 8px ${cat.color}15`
                       }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          {cat.svgIcon}
+                          {cat.getSvgIcon(cat.color)}
                           <span style={{ fontWeight: 800, fontSize: 12.5, color: "var(--text)" }}>{cat.label}</span>
                         </div>
                         <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 500 }}>{cat.tagline}</span>
                       </div>
 
                       {/* Sub-tree Down Connector Line */}
-                      <div style={{ width: 1.5, height: 12, background: "var(--border-strong)", opacity: 0.6 }} />
+                      <div style={{ width: 1.5, height: 12, background: cat.color, opacity: 0.6 }} />
 
                       {/* Vertical Stack of Topic Node Cards */}
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
@@ -2168,7 +2169,7 @@ if __name__ == "__main__":
                             <button
                               style={{
                                 background: "var(--surface)",
-                                border: "1px solid var(--border)",
+                                border: `1px solid ${cat.border}`,
                                 borderRadius: 9,
                                 padding: "8px 10px",
                                 display: "flex",
@@ -2181,12 +2182,12 @@ if __name__ == "__main__":
                               }}
                               onClick={() => setSelectedTopic(topic)}
                               onMouseEnter={(e) => {
-                                e.currentTarget.style.borderColor = "var(--accent)";
+                                e.currentTarget.style.borderColor = cat.color;
                                 e.currentTarget.style.transform = "translateY(-1px)";
-                                e.currentTarget.style.boxShadow = "var(--shadow-sm)";
+                                e.currentTarget.style.boxShadow = `0 4px 12px ${cat.color}22`;
                               }}
                               onMouseLeave={(e) => {
-                                e.currentTarget.style.borderColor = "var(--border)";
+                                e.currentTarget.style.borderColor = cat.border;
                                 e.currentTarget.style.transform = "none";
                                 e.currentTarget.style.boxShadow = "none";
                               }}
@@ -2195,32 +2196,32 @@ if __name__ == "__main__":
                                 width: 26,
                                 height: 26,
                                 borderRadius: 6,
-                                background: "var(--panel)",
-                                border: "1px solid var(--border)",
+                                background: cat.bg,
+                                border: `1px solid ${cat.border}`,
                                 display: "grid",
                                 placeItems: "center",
                                 flexShrink: 0,
-                                color: "var(--accent-strong)"
+                                color: cat.color
                               }}>
-                                {topic.id === "types_of_agents" ? <PuzzleSvg size={13} color="var(--accent-strong)" /> :
-                                 topic.id === "genai_vs_agent" ? <ScaleSvg size={13} color="var(--accent-strong)" /> :
-                                 topic.id === "llm_plus_apis" ? <ZapSvg size={13} color="var(--accent-strong)" /> :
-                                 topic.id === "message_flow" || topic.id === "react_loop" ? <RefreshSvg size={13} color="var(--accent-strong)" /> :
-                                 topic.id === "chunks_and_embeddings" ? <BookSvg size={13} color="var(--accent-strong)" /> :
-                                 topic.id === "5_step_build" ? <BuildSvg size={13} color="var(--accent-strong)" /> :
-                                 <BotSvg size={13} color="var(--accent-strong)" />}
+                                {topic.id === "types_of_agents" ? <PuzzleSvg size={13} color={cat.color} /> :
+                                 topic.id === "genai_vs_agent" ? <ScaleSvg size={13} color={cat.color} /> :
+                                 topic.id === "llm_plus_apis" ? <ZapSvg size={13} color={cat.color} /> :
+                                 topic.id === "message_flow" || topic.id === "react_loop" ? <RefreshSvg size={13} color={cat.color} /> :
+                                 topic.id === "chunks_and_embeddings" ? <BookSvg size={13} color={cat.color} /> :
+                                 topic.id === "5_step_build" ? <BuildSvg size={13} color={cat.color} /> :
+                                 <BotSvg size={13} color={cat.color} />}
                               </div>
                               <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0, overflow: "hidden" }}>
                                 <div style={{ fontWeight: 700, fontSize: 11.5, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.25 }}>
                                   {topic.title}
                                 </div>
-                                <div style={{ fontSize: 10, color: "var(--accent-strong)", fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}>
+                                <div style={{ fontSize: 10, color: cat.color, fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}>
                                   Click to learn →
                                 </div>
                               </div>
                             </button>
                             {idx < arr.length - 1 && (
-                              <div style={{ width: 1.5, height: 8, background: "var(--border-strong)", margin: "0 auto", opacity: 0.5 }} />
+                              <div style={{ width: 1.5, height: 8, background: cat.color, margin: "0 auto", opacity: 0.4 }} />
                             )}
                           </React.Fragment>
                         ))}
