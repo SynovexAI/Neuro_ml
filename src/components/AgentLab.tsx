@@ -2073,148 +2073,156 @@ if __name__ == "__main__":
       {step === "learn" && (<>
         {!selectedTopic ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-            {/* Master Curriculum Pipeline Roadmap */}
+            {/* FORMAL AI AGENT CONCEPT NETWORK TREE MAP ARCHITECTURE */}
             <div className="card" style={{ borderRadius: 16 }}>
               {/* Header Banner */}
               <div className="card-h">
                 <span className="t" style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 15, color: "var(--text)" }}>
-                  <MapSvg size={16} color="var(--accent-strong)" /> <b>AI Agent Curriculum — Master Execution Flow Pipeline</b>
+                  <MapSvg size={16} color="var(--accent-strong)" /> <b>AI Agent Concept Network Map</b>
                 </span>
                 <span className="badge good">{LEARN_MAP.length} Interactive Lessons</span>
               </div>
 
-              <div className="card-b" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 14 }}>
-                {/* Phase Pipeline Step Navigator */}
+              <div className="card-b" style={{
+                padding: "24px 20px",
+                background: "radial-gradient(var(--border) 1px, transparent 1px)",
+                backgroundSize: "18px 18px",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 18
+              }}>
+                {/* 1. Root Master AI Agent Node */}
                 <div style={{
+                  background: "var(--surface)",
+                  border: "1.5px solid var(--accent)",
+                  borderRadius: 24,
+                  padding: "9px 24px",
                   display: "flex",
                   alignItems: "center",
-                  gap: 6,
-                  overflowX: "auto",
-                  paddingBottom: 6,
-                  borderBottom: "1px solid var(--border)"
+                  gap: 10,
+                  boxShadow: "var(--shadow-md)",
+                  zIndex: 2
                 }}>
-                  {CURRICULUM_CATEGORIES.map((cat, idx) => (
-                    <React.Fragment key={cat.id}>
-                      <div style={{
-                        background: "var(--surface)",
-                        border: "1px solid var(--border-strong)",
-                        borderRadius: 8,
-                        padding: "5px 10px",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        flexShrink: 0
-                      }}>
-                        <span style={{ fontSize: 9.5, background: "var(--accent)", color: "#fff", padding: "1px 5px", borderRadius: 4, fontWeight: 800 }}>{cat.phase}</span>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--text)" }}>{cat.label}</span>
-                      </div>
-                      {idx < CURRICULUM_CATEGORIES.length - 1 && (
-                        <span style={{ color: "var(--muted)", fontWeight: 700, fontSize: 12, opacity: 0.5, flexShrink: 0 }}>──►</span>
-                      )}
-                    </React.Fragment>
-                  ))}
+                  <BotSvg size={18} color="var(--accent-strong)" />
+                  <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--text)", letterSpacing: "-0.01em" }}>AI Agent Architecture</span>
                 </div>
 
-                {/* 5-Phase Compact Learning Flow Grid (Fits 1 Row) */}
+                {/* 2. Top Branch Connecting Lines (SVG Tree Lines) */}
+                <div style={{ width: "100%", height: 26, display: "flex", justifyContent: "center" }}>
+                  <svg width="100%" height="26" style={{ overflow: "visible" }}>
+                    <path
+                      d="M 50% 0 L 50% 13 M 10% 13 L 90% 13 M 10% 13 L 10% 26 M 30% 13 L 30% 26 M 50% 13 L 50% 26 M 70% 13 L 70% 26 M 90% 13 L 90% 26"
+                      fill="none"
+                      stroke="var(--border-strong)"
+                      strokeWidth="1.5"
+                      strokeDasharray="4 3"
+                    />
+                  </svg>
+                </div>
+
+                {/* 3. 5 Category Tree Columns */}
                 <div style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(185px, 1fr))",
-                  gap: 10,
+                  gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+                  gap: 14,
                   width: "100%"
                 }}>
                   {CURRICULUM_CATEGORIES.map((cat) => (
                     <div
                       key={cat.id}
                       style={{
-                        background: "var(--surface)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 10,
-                        padding: "10px 12px",
                         display: "flex",
                         flexDirection: "column",
-                        gap: 8,
-                        position: "relative"
+                        alignItems: "center",
+                        gap: 10
                       }}
                     >
-                      {/* Phase Header */}
-                      <div style={{ display: "flex", flexDirection: "column", gap: 3, borderBottom: "1px solid var(--border)", paddingBottom: 6 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                          <span style={{ fontSize: 9.5, background: "var(--accent-weak)", color: "var(--accent-strong)", padding: "2px 6px", borderRadius: 4, fontWeight: 800, border: "1px solid var(--border)" }}>{cat.phase}</span>
-                          <div style={{
-                            width: 24,
-                            height: 24,
-                            borderRadius: 6,
-                            background: "var(--panel)",
-                            border: "1px solid var(--border)",
-                            display: "grid",
-                            placeItems: "center",
-                            color: "var(--accent-strong)"
-                          }}>
-                            {cat.svgIcon}
-                          </div>
+                      {/* Category Tree Node */}
+                      <div style={{
+                        width: "100%",
+                        background: "var(--panel)",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: 10,
+                        padding: "9px 11px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 3,
+                        textAlign: "center",
+                        alignItems: "center"
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          {cat.svgIcon}
+                          <span style={{ fontWeight: 800, fontSize: 12.5, color: "var(--text)" }}>{cat.label}</span>
                         </div>
-                        <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--text)", marginTop: 2, lineHeight: 1.25 }}>{cat.label}</div>
-                        <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 500, lineHeight: 1.3 }}>{cat.tagline}</div>
+                        <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 500 }}>{cat.tagline}</span>
                       </div>
 
-                      {/* Connected Concept Cards */}
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        {cat.getTopics().map((topic) => (
-                          <button
-                            key={topic.id}
-                            style={{
-                              background: "var(--panel)",
-                              border: "1px solid var(--border)",
-                              borderRadius: 8,
-                              padding: "6px 8px",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                              textAlign: "left",
-                              cursor: "pointer",
-                              transition: "all 0.15s ease",
-                              width: "100%"
-                            }}
-                            onClick={() => setSelectedTopic(topic)}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.borderColor = "var(--accent)";
-                              e.currentTarget.style.transform = "translateY(-1px)";
-                              e.currentTarget.style.boxShadow = "var(--shadow-sm)";
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.borderColor = "var(--border)";
-                              e.currentTarget.style.transform = "none";
-                              e.currentTarget.style.boxShadow = "none";
-                            }}
-                          >
-                            <div style={{
-                              width: 26,
-                              height: 26,
-                              borderRadius: 6,
-                              background: "var(--surface)",
-                              border: "1px solid var(--border)",
-                              display: "grid",
-                              placeItems: "center",
-                              flexShrink: 0,
-                              color: "var(--accent-strong)"
-                            }}>
-                              {topic.id === "types_of_agents" ? <PuzzleSvg size={13} color="var(--accent-strong)" /> :
-                               topic.id === "genai_vs_agent" ? <ScaleSvg size={13} color="var(--accent-strong)" /> :
-                               topic.id === "llm_plus_apis" ? <ZapSvg size={13} color="var(--accent-strong)" /> :
-                               topic.id === "message_flow" || topic.id === "react_loop" ? <RefreshSvg size={13} color="var(--accent-strong)" /> :
-                               topic.id === "chunks_and_embeddings" ? <BookSvg size={13} color="var(--accent-strong)" /> :
-                               topic.id === "5_step_build" ? <BuildSvg size={13} color="var(--accent-strong)" /> :
-                               <BotSvg size={13} color="var(--accent-strong)" />}
-                            </div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 1, flex: 1, minWidth: 0, overflow: "hidden" }}>
-                              <div style={{ fontWeight: 700, fontSize: 11.5, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.25 }}>
-                                {topic.title}
+                      {/* Sub-tree Down Connector Line */}
+                      <div style={{ width: 1.5, height: 12, background: "var(--border-strong)", opacity: 0.6 }} />
+
+                      {/* Vertical Stack of Topic Node Cards */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
+                        {cat.getTopics().map((topic, idx, arr) => (
+                          <React.Fragment key={topic.id}>
+                            <button
+                              style={{
+                                background: "var(--surface)",
+                                border: "1px solid var(--border)",
+                                borderRadius: 9,
+                                padding: "8px 10px",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 9,
+                                textAlign: "left",
+                                cursor: "pointer",
+                                transition: "all 0.15s ease",
+                                width: "100%"
+                              }}
+                              onClick={() => setSelectedTopic(topic)}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = "var(--accent)";
+                                e.currentTarget.style.transform = "translateY(-1px)";
+                                e.currentTarget.style.boxShadow = "var(--shadow-sm)";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = "var(--border)";
+                                e.currentTarget.style.transform = "none";
+                                e.currentTarget.style.boxShadow = "none";
+                              }}
+                            >
+                              <div style={{
+                                width: 26,
+                                height: 26,
+                                borderRadius: 6,
+                                background: "var(--panel)",
+                                border: "1px solid var(--border)",
+                                display: "grid",
+                                placeItems: "center",
+                                flexShrink: 0,
+                                color: "var(--accent-strong)"
+                              }}>
+                                {topic.id === "types_of_agents" ? <PuzzleSvg size={13} color="var(--accent-strong)" /> :
+                                 topic.id === "genai_vs_agent" ? <ScaleSvg size={13} color="var(--accent-strong)" /> :
+                                 topic.id === "llm_plus_apis" ? <ZapSvg size={13} color="var(--accent-strong)" /> :
+                                 topic.id === "message_flow" || topic.id === "react_loop" ? <RefreshSvg size={13} color="var(--accent-strong)" /> :
+                                 topic.id === "chunks_and_embeddings" ? <BookSvg size={13} color="var(--accent-strong)" /> :
+                                 topic.id === "5_step_build" ? <BuildSvg size={13} color="var(--accent-strong)" /> :
+                                 <BotSvg size={13} color="var(--accent-strong)" />}
                               </div>
-                              <div style={{ fontSize: 10, color: "var(--accent-strong)", fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}>
-                                Learn Lesson →
+                              <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0, overflow: "hidden" }}>
+                                <div style={{ fontWeight: 700, fontSize: 11.5, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.25 }}>
+                                  {topic.title}
+                                </div>
+                                <div style={{ fontSize: 10, color: "var(--accent-strong)", fontWeight: 700, display: "flex", alignItems: "center", gap: 3 }}>
+                                  Click to learn →
+                                </div>
                               </div>
-                            </div>
-                          </button>
+                            </button>
+                            {idx < arr.length - 1 && (
+                              <div style={{ width: 1.5, height: 8, background: "var(--border-strong)", margin: "0 auto", opacity: 0.5 }} />
+                            )}
+                          </React.Fragment>
                         ))}
                       </div>
                     </div>
