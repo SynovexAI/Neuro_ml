@@ -4,9 +4,11 @@ import { db } from "@/lib/db";
 import { agentRuns } from "@/lib/db/schema";
 import { getSessionUser, uid } from "@/lib/auth";
 import { rateLimitDb } from "@/lib/ratelimit";
+import { audit } from "@/lib/monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const num = (v: unknown, cap = 10_000_000) => Math.max(0, Math.min(cap, Math.floor(Number(v) || 0)));
 
@@ -41,5 +43,6 @@ export async function POST(req: Request) {
     outcome: b.outcome ? String(b.outcome).slice(0, 24) : null,
     errorMsg: b.errorMsg ? String(b.errorMsg).slice(0, 300) : null,
   });
+  await audit("agent_run", user.id, { agent: b.agentName ? String(b.agentName).slice(0, 120) : "agent", type: b.agentType, outcome: b.outcome, model: b.model }).catch(() => {});
   return NextResponse.json({ ok: true });
 }

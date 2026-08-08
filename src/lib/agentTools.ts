@@ -148,6 +148,38 @@ async function nativeTool(tool: string, input: string): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
+// POST a request to the hosted-MCP proxy (/api/agent/mcp) — free-tier OK.
+async function mcpPost(body: object): Promise<string> {
+  try {
+    const r = await fetch("/api/agent/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) return "Error: " + (j.error || "failed");
+    return j.text || "(no result)";
+  } catch (e) { return "Error: " + (e as Error).message; }
+}
+// Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
+// JSON {"tool":"…","args":{…}} calls one.
+async function mcpTool(server: string, input: string): Promise<string> {
+  const s = (input || "").trim();
+  if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
+  if (s.startsWith("{")) {
+    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; return mcpPost({ server, action: "call", tool: p.tool, args: p.args }); }
+    catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
+  }
+  return mcpPost({ server, action: "call", tool: s });
+}
+// Generic tool over ANY connected hosted MCP server (DeepWiki, Context7, HF, …).
+async function mcpAnyTool(input: string): Promise<string> {
+  const s = (input || "").trim();
+  if (!s || /^servers?$/i.test(s)) return mcpPost({ action: "servers" });
+  if (s.startsWith("{")) {
+    try { const p = JSON.parse(s) as { server?: string; action?: string; tool?: string; args?: unknown }; return mcpPost({ server: p.server, action: p.action || (p.tool ? "call" : "list"), tool: p.tool, args: p.args }); }
+    catch { return 'Error: input must be "servers", "<server> list", or JSON like {"server":"deepwiki","tool":"ask_question","args":{…}}.'; }
+  }
+  const m = s.match(/^(\S+)(?:\s+list)?$/i); // "<server>" or "<server> list"
+  if (m) return mcpPost({ server: m[1], action: "list" });
+  return 'Use: "servers", "<server> list", or JSON {"server":"…","tool":"…","args":{…}}.';
+}
 // Cross-turn memory in the browser (localStorage). Free, no backend.
 function memoryTool(input: string): string {
   if (typeof localStorage === "undefined") return "Memory unavailable here.";
@@ -176,6 +208,8 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
   { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
   { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
+  { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
+  { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).

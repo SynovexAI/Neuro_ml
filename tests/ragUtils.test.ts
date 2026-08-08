@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chunkText, buildIndex, retrieve, tokenize } from "@/lib/ragUtils";
+import { chunkText, buildIndex, retrieve, tokenize, simSparse, simDense, type Metric } from "@/lib/ragUtils";
 
 describe("chunkText", () => {
   it("returns a single chunk when text fits in one window", () => {
@@ -43,5 +43,29 @@ describe("buildIndex + retrieve", () => {
 
   it("returns at most k hits", () => {
     expect(retrieve(idx, "refund", "keyword", 2).length).toBeLessThanOrEqual(2);
+  });
+
+  it("ranks the refund chunk first under every vector metric", () => {
+    for (const m of ["cosine", "dot", "euclidean"] as Metric[]) {
+      const hits = retrieve(idx, "how do refunds for damaged items work", "vector", 1, m);
+      expect(hits[0].i, `metric ${m}`).toBe(0);
+    }
+  });
+});
+
+describe("similarity metrics", () => {
+  it("sparse: identical vectors are maximally similar; distance metrics stay finite", () => {
+    const a = { x: 1, y: 2 };
+    expect(simSparse(a, a, "cosine")).toBeCloseTo(1, 6);
+    expect(simSparse(a, a, "euclidean")).toBeCloseTo(1, 6); // 1/(1+0)
+    expect(simSparse(a, a, "dot")).toBeCloseTo(5, 6); // 1*1 + 2*2
+    expect(simSparse(a, { z: 9 }, "euclidean")).toBeGreaterThan(0); // disjoint keys handled
+  });
+
+  it("dense: cosine ignores magnitude while dot rewards it", () => {
+    const a = [1, 0], b = [2, 0];
+    expect(simDense(a, b, "cosine")).toBeCloseTo(1, 6);
+    expect(simDense(a, b, "dot")).toBeCloseTo(2, 6);
+    expect(simDense(a, [0, 1], "cosine")).toBeCloseTo(0, 6);
   });
 });

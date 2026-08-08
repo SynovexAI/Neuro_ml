@@ -72,6 +72,8 @@ export default function KnowledgeBases() {
     try {
       for (const f of Array.from(files)) {
         const ext = (f.name.split(".").pop() || "").toLowerCase();
+        // Best-effort: archive the original file to object storage (no-ops if storage isn't configured).
+        try { const afd = new FormData(); afd.append("file", f); void fetch("/api/storage/upload", { method: "POST", body: afd }); } catch { /* ignore */ }
         let text = "";
         if (["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext)) {
           const fd = new FormData(); fd.append("file", f);

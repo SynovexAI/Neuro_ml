@@ -1,12 +1,29 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { chunkText, buildIndex, retrieve, retrieveDense, denseCos, mmrRerank, retrievalMetrics, pca2, cosine, tokenize, queryVector, type RagIndex, type Strategy, type Vec } from "@/lib/ragUtils";
+import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric } from "@/lib/ragUtils";
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
+import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
+import ModelPicker from "@/components/ModelPicker";
+import RagExperiments, { type ExpConfig } from "@/components/RagExperiments";
+import EmbeddingExplorer from "@/components/EmbeddingExplorer";
 
-type Doc = { id: string; name: string; kind: string; text: string };
+type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
+
+// Best-effort: also store the original file in R2 (returns its URL). No-ops (returns null) if
+// storage isn't configured — the RAG flow works either way since we already keep the parsed text.
+async function uploadToR2(f: File): Promise<{ url: string | null; error?: string }> {
+  try {
+    const fd = new FormData(); fd.append("file", f);
+    const r = await fetch("/api/storage/upload", { method: "POST", body: fd });
+    if (r.status === 501) return { url: null }; // storage off — expected, not an error
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return { url: null, error: j.error || `archive failed (HTTP ${r.status})` };
+    return { url: typeof j.url === "string" ? j.url : null };
+  } catch (e) { return { url: null, error: (e as Error).message }; }
+}
 type Chunk = { text: string; docName: string; docKind: string };
 type Step = "source" | "chunk" | "embed" | "query";
 type Backend = "vector" | "kg" | "hybrid";
@@ -14,6 +31,20 @@ type Backend = "vector" | "kg" | "hybrid";
 const SAMPLE = `Returns policy. Damaged items may be returned within 30 days of delivery for a full refund, provided the original packaging is included. Refunds are issued to the original payment method within 5 business days of the returned item being received. To start a return, sign in and open the order, then select the item and a reason for return. Store hours are 9am to 6pm on weekdays, closed on public holidays. Shipping is free on orders over $50, otherwise a flat $6 fee applies. International orders may take 10 to 15 business days to arrive. Gift cards are non-refundable. Warranty claims for electronics are handled by the manufacturer for the first 12 months.`;
 
 const rid = () => Math.random().toString(36).slice(2, 10);
+
+// Suggested embedding models per provider family (typeable — these are just hints).
+// Gemini + Ollama are the free-friendly picks; Groq/Cerebras don't serve /embeddings.
+const EMB_SUGGEST: Record<string, string[]> = {
+  gemini: ["gemini-embedding-001", "text-embedding-004"],
+  ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
+  openai: ["text-embedding-3-small", "text-embedding-3-large"],
+  mistral: ["mistral-embed"],
+  cohere: ["embed-english-v3.0", "embed-multilingual-v3.0"],
+  github: ["text-embedding-3-small", "text-embedding-3-large", "cohere-embed-v3-english"],
+  nvidia: ["nvidia/nv-embedqa-e5-v5", "nvidia/nv-embed-v1"],
+  custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
+};
+const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
 
 function computeChunks(docs: Doc[], size: number, overlap: number): Chunk[] {
   const out: Chunk[] = [];
@@ -73,6 +104,8 @@ export default function RagLab() {
   const [embIdx, setEmbIdx] = useState(0);
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
+  const [mvOpen, setMvOpen] = useState<number | null>(null); // entity row whose full text is expanded
+  const [embOpenKey, setEmbOpenKey] = useState(0); // bumped after "Fetch models" to auto-open the embed-model picker
 
   // ── knowledge-graph backend ──
   const [backend, setBackend] = useState<Backend>("vector");
@@ -89,9 +122,11 @@ export default function RagLab() {
   const [kgPlayKey, setKgPlayKey] = useState(0);
 
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
+  const [metric, setMetric] = useState<Metric>("cosine");
   const [topK, setTopK] = useState(3);
   // neural embeddings (real, via provider) + re-ranking + retrieval metrics
   const [embedMode, setEmbedMode] = useState<"tfidf" | "neural">("tfidf");
+  const [embModel, setEmbModel] = useState("");
   const [denseVecs, setDenseVecs] = useState<number[][] | null>(null);
   const [embedInfo, setEmbedInfo] = useState<{ model: string; dim: number } | null>(null);
   const [qVec, setQVec] = useState<number[] | null>(null);
@@ -101,6 +136,22 @@ export default function RagLab() {
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
+  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "datasets" | "github" | "gdrive" | "kb">("file");
+  const [connectorOpen, setConnectorOpen] = useState(false);
+  const [kbList, setKbList] = useState<{ id: string; name: string; docCount: number; chunkCount: number }[]>([]);
+  const [kbLoading, setKbLoading] = useState(false);
+  const [kbBusy, setKbBusy] = useState("");
+  // Shared built-in practice datasets (bundled — zero cloud storage; one copy serves every student).
+  const [sampleList, setSampleList] = useState<{ id: string; name: string; emoji: string; description: string; questions: string[]; words: number }[]>([]);
+  const [sampleLoading, setSampleLoading] = useState(false);
+  const [sampleBusy, setSampleBusy] = useState("");
+  const [storageOn, setStorageOn] = useState<{ configured: boolean; backend: string | null } | null>(null);
+  useEffect(() => { fetch("/api/storage/upload").then((r) => (r.ok ? r.json() : null)).then((j) => setStorageOn(j)).catch(() => {}); }, []);
+  const [ghUrl, setGhUrl] = useState("");
+  const [ghBusy, setGhBusy] = useState(false);
+  const [gdUrl, setGdUrl] = useState("");
+  const [gdBusy, setGdBusy] = useState(false);
+  function addSample() { setDocs((d) => (d.some((x) => x.name === "sample-returns-policy.txt") ? d : [...d, { id: rid(), name: "sample-returns-policy.txt", kind: "txt", text: SAMPLE }])); invalidate(); }
   const [fetching, setFetching] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [openDocs, setOpenDocs] = useState<Set<string>>(new Set());
@@ -112,6 +163,15 @@ export default function RagLab() {
   const [trace, setTrace] = useState<{ who: string; what: string; state: string }[]>([]);
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
+  // RAG debugger: the FULL ranking + which indices were selected into the top-k, plus last-run latency.
+  const [debugRank, setDebugRank] = useState<{ i: number; score: number }[]>([]);
+  const [selectedIdx, setSelectedIdx] = useState<number[]>([]);
+  const [lastLatency, setLastLatency] = useState(0);
+  const [dbgOpen, setDbgOpen] = useState(false);
+  // RAG vs no-RAG: the same question answered with retrieved context vs from the model alone.
+  const [vs, setVs] = useState<{ running: boolean; withCtx: string; without: string } | null>(null);
+  const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
+  const [agentCfg, setAgentCfg] = useState<AgentConfig>({ enabled: ["vector", "keyword", "hybrid"], maxSteps: 5, topK: 4, selfCheck: true, maxTokens: 1024 });
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
@@ -134,10 +194,39 @@ export default function RagLab() {
       if (c.size != null) setSize(c.size);
       if (c.overlap != null) setOverlap(c.overlap);
       if (c.strategy) setStrategy(c.strategy);
+      if (c.metric) setMetric(c.metric);
       if (c.topK != null) setTopK(c.topK);
       if (c.question) setQuestion(c.question);
+      if (c.answerMode === "agentic" || c.answerMode === "direct") setAnswerMode(c.answerMode);
+      if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
     }).catch(() => {});
   }, []);
+
+  // Auto-persist the working session to localStorage so a refresh doesn't lose docs (no Save needed).
+  // Only when NOT opening a specific saved project (?project=…), which loads its own config above.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("project")) return;
+    try {
+      const c = JSON.parse(localStorage.getItem("awb_rag_autosave_v1") || "null");
+      if (!c) return;
+      if (Array.isArray(c.docs) && c.docs.length) setDocs(c.docs.map((d: { name: string; kind?: string; text?: string; r2Url?: string }) => ({ id: rid(), name: d.name, kind: d.kind || "txt", text: d.text || "", r2Url: d.r2Url })));
+      if (c.size != null) setSize(c.size);
+      if (c.overlap != null) setOverlap(c.overlap);
+      if (c.strategy) setStrategy(c.strategy);
+      if (c.metric) setMetric(c.metric);
+      if (c.topK != null) setTopK(c.topK);
+      if (c.question) setQuestion(c.question);
+    } catch { /* ignore corrupt autosave */ }
+  }, []);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        const payload = JSON.stringify({ docs: docs.map((d) => ({ name: d.name, kind: d.kind, text: d.text.slice(0, 200_000), r2Url: d.r2Url })), size, overlap, strategy, metric, topK, question });
+        if (payload.length < 4_500_000) localStorage.setItem("awb_rag_autosave_v1", payload);
+      } catch { /* quota exceeded — skip */ }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [docs, size, overlap, strategy, metric, topK, question]);
 
   // Chunks changed → any neural vectors are stale; drop back to TF-IDF until re-embedded.
   useEffect(() => { setDenseVecs(null); setEmbedMode("tfidf"); setQVec(null); setMetricRows([]); setRelevant(new Set()); setGraph(null); setKgPath([]); setKgVisited([]); setKgSeeds([]); }, [chunks]);
@@ -148,7 +237,9 @@ export default function RagLab() {
   // IVF-style clustering of the stored vectors, shared by the Embed & Retrieve steps.
   const clusters = useMemo(() => {
     if (!index) return null;
-    const k = Math.min(4, index.vectors.length);
+    // Milvus rule of thumb: nlist ≈ √N clusters — more chunks ⇒ more buckets (clamped 2..12).
+    const N = index.vectors.length;
+    const k = Math.max(1, Math.min(12, N < 4 ? N : Math.round(Math.sqrt(N))));
     const assign = ivfCluster(index.vectors, k);
     const buckets = Array.from({ length: k }, (_, c) => index.vectors.map((_, i) => i).filter((i) => assign[i] === c));
     const centroids: Vec[] = buckets.map((ids) => { const s: Vec = {}; ids.forEach((i) => { const v = index.vectors[i]; for (const t in v) s[t] = (s[t] || 0) + v[t]; }); const out: Vec = {}; const cnt = ids.length || 1; for (const t in s) out[t] = s[t] / cnt; return out; });
@@ -160,7 +251,20 @@ export default function RagLab() {
   const canQuery = backend === "vector" ? !!index : backend === "kg" ? !!graph : (!!index && !!graph);
   const pnl: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 14, background: "var(--panel)", overflow: "hidden" };
   const kgHead = (dot: string, title: string, right?: React.ReactNode) => <div className="row" style={{ alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}><div className="row" style={{ gap: 8, alignItems: "center" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: dot }} /><span style={{ fontWeight: 600, fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".07em", color: "var(--muted)" }}>{title}</span></div>{right}</div>;
-  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
+  // Little pill + the "which vector / which similarity" badge pair (so it's obvious what's active).
+  const pill = (color: string, txt: React.ReactNode) => <span style={{ fontSize: 9.5, fontWeight: 600, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 8px", borderRadius: 20, background: `color-mix(in srgb, ${color} 15%, transparent)`, color, whiteSpace: "nowrap" }}>{txt}</span>;
+  // Embedding-model options: the provider's REAL fetched models (embedding-named first),
+  // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
+  const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
+  const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
+  // Prefer the provider's own suggested embedding model (avoids carrying a stale embed model
+  // from a previously-selected provider); fall back to a fetched embedding-named model.
+  const pickDefaultEmb = (id: string) => embSuggestFor(provType(id))[0] || models.find((m) => /embed/i.test(m)) || "";
+  const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+    {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
+    {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
+  </div>;
+  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; if (k === "kb") return { ic: "🧠", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
       <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
@@ -215,10 +319,9 @@ export default function RagLab() {
     return () => { if (timer.current) clearTimeout(timer.current); };
   }, []);
 
-  // Auto-run chunking / embedding the first time you enter a step (explicit buttons re-run).
+  // Embedding is run explicitly via the "Run embedding" button (no auto-run on entering the Index step).
+  // Knowledge-graph backends still auto-extract on entry, since that step has its own build button too.
   useEffect(() => {
-    if (step === "chunk" && chunks.length === 0 && docs.length) runChunking();
-    if (step === "embed" && !index && chunks.length) runEmbedding();
     if (step === "embed" && backend !== "vector" && !graph && chunks.length) buildGraphHeuristic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
@@ -236,15 +339,21 @@ export default function RagLab() {
       const ext = (f.name.split(".").pop() || "txt").toLowerCase();
       const binary = ["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext);
       try {
+        // Parse text + (best-effort) archive the original file to storage in parallel.
+        const r2p = uploadToR2(f);
         if (binary) {
           const fd = new FormData(); fd.append("file", f);
           const r = await fetch("/api/rag/extract", { method: "POST", body: fd });
           const j = await r.json();
           if (!r.ok) throw new Error(j.error || "parse failed");
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text }]);
+          const r2 = await r2p;
+          if (r2.error) setMsg(`Note: "${f.name}" was added, but archiving to storage failed — ${r2.error}`);
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text, r2Url: r2.url || undefined }]);
         } else {
           const text = await f.text();
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text }]);
+          const r2 = await r2p;
+          if (r2.error) setMsg(`Note: "${f.name}" was added, but archiving to storage failed — ${r2.error}`);
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text, r2Url: r2.url || undefined }]);
         }
       } catch (err) { setMsg(`Could not read ${f.name}: ${(err as Error).message}`); }
     }
@@ -262,6 +371,72 @@ export default function RagLab() {
       setDocs((d) => [...d, { id: rid(), name: j.title || url, kind: "url", text: j.text }]);
       invalidate();
     } catch (e) { setMsg((e as Error).message); } finally { setFetching(false); }
+  }
+  async function fetchGithub() {
+    if (!ghUrl.trim()) { setMsg("Paste a GitHub repo/file URL or owner/repo."); return; }
+    setGhBusy(true); setMsg("");
+    try {
+      const r = await fetch("/api/rag/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: ghUrl.trim() }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const incoming: Doc[] = (j.docs || []).map((d: { name: string; text: string }) => ({ id: rid(), name: d.name, kind: "github", text: d.text }));
+      if (!incoming.length) throw new Error("Nothing to import from that repo.");
+      setDocs((d) => [...d, ...incoming]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setGhBusy(false); }
+  }
+  async function fetchGDrive() {
+    const s = gdUrl.trim();
+    if (!s) { setMsg("Paste a public Google Docs / Sheets share link."); return; }
+    // Turn a share link into a plain-text export URL (works for docs shared "anyone with the link").
+    const doc = s.match(/docs\.google\.com\/document\/d\/([\w-]+)/);
+    const sheet = s.match(/docs\.google\.com\/spreadsheets\/d\/([\w-]+)/);
+    const exportUrl = doc ? `https://docs.google.com/document/d/${doc[1]}/export?format=txt`
+      : sheet ? `https://docs.google.com/spreadsheets/d/${sheet[1]}/export?format=csv`
+      : /^https?:\/\//.test(s) ? s : "";
+    if (!exportUrl) { setMsg("Not a recognized Google Docs/Sheets link."); return; }
+    setGdBusy(true); setMsg("");
+    try {
+      const r = await fetch("/api/rag/fetch-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: exportUrl }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      if (!j.text || !j.text.trim() || /sign in|request access/i.test(j.text.slice(0, 400))) throw new Error("Couldn't read it — make sure the doc is shared as “Anyone with the link”.");
+      setDocs((d) => [...d, { id: rid(), name: (doc ? "Google Doc" : sheet ? "Google Sheet" : j.title) + ` · ${(doc || sheet || ["", "drive"])[1].slice(0, 8)}`, kind: "gdrive", text: j.text }]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setGdBusy(false); }
+  }
+  async function loadKbList() {
+    setKbLoading(true);
+    try { const r = await fetch("/api/kb"); const j = await r.json(); if (r.ok) setKbList(j.kbs || []); } catch { /* ignore */ } finally { setKbLoading(false); }
+  }
+  async function pullKb(kb: { id: string; name: string }) {
+    setKbBusy(kb.id); setMsg("");
+    try {
+      const r = await fetch(`/api/kb/${kb.id}/docs`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const incoming: Doc[] = (j.docs || []).filter((d: { text?: string }) => d.text && d.text.trim()).map((d: { name: string; text: string }) => ({ id: rid(), name: `${kb.name} · ${d.name}`, kind: "kb", text: d.text }));
+      if (!incoming.length) throw new Error("This knowledge base has no text yet.");
+      setDocs((d) => [...d, ...incoming]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setKbBusy(""); }
+  }
+  async function loadSampleList() {
+    setSampleLoading(true);
+    try { const r = await fetch("/api/rag/samples"); const j = await r.json(); if (r.ok) setSampleList(j.samples || []); } catch { /* ignore */ } finally { setSampleLoading(false); }
+  }
+  // Load one shared practice dataset. Replaces the current docs so each experiment starts
+  // from a clean, known corpus, and seeds the first suggested question.
+  async function pullSample(s: { id: string; name: string; questions?: string[] }) {
+    setSampleBusy(s.id); setMsg("");
+    try {
+      const r = await fetch(`/api/rag/samples?id=${encodeURIComponent(s.id)}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      setDocs([{ id: rid(), name: `${s.name}.txt`, kind: "txt", text: j.text }]);
+      if (Array.isArray(j.questions) && j.questions[0]) setQuestion(j.questions[0]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setSampleBusy(""); }
   }
   const removeDoc = (id: string) => { setDocs((d) => d.filter((x) => x.id !== id)); invalidate(); };
   function invalidate() { setChunks([]); setIndex(null); }
@@ -320,6 +495,21 @@ export default function RagLab() {
       return { size: sz, overlap: ov, chunks: cks.length, top, avg, best: hs[0] != null ? cks[hs[0].i] : "" };
     }));
   }
+  // Apply a saved experiment's settings back into the lab (config only — the documents
+  // stay as they are; re-run chunking/index to see the effect).
+  function applyExpConfig(c: ExpConfig) {
+    if (c.backend === "vector" || c.backend === "kg" || c.backend === "hybrid") setBackend(c.backend);
+    if (c.size) setSize(c.size);
+    if (c.overlap != null) setOverlap(c.overlap);
+    if (c.strategy) setStrategy(c.strategy as Strategy);
+    if (c.metric) setMetric(c.metric as Metric);
+    if (c.topK) setTopK(c.topK);
+    if (c.rerank === "none" || c.rerank === "mmr") setRerank(c.rerank);
+    if (typeof c.mmrLambda === "number") setMmrLambda(c.mmrLambda);
+    if (c.embModel) setEmbModel(c.embModel);
+    if (c.kgHops) setKgHops(c.kgHops);
+    setMsg("Loaded experiment settings — re-run chunking & index to apply them.");
+  }
   async function saveProject() {
     const MAX = 600_000; // cap saved document text (~0.6 MB) so a project row stays small
     let used = 0;
@@ -330,7 +520,7 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, topK, question };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg };
     try {
       const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
@@ -340,18 +530,21 @@ export default function RagLab() {
   }
   // ── neural embeddings (real, via the provider's /embeddings endpoint) ──
   async function embedViaApi(texts: string[]): Promise<number[][]> {
-    const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts }) });
+    const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts, ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
     const j = await res.json();
     if (!res.ok) throw new Error(j.error || "embed failed");
     return j.vectors as number[][];
   }
   async function runNeuralEmbed() {
     if (!chunks.length) return; setEmbedding(true); setMsg("");
+    // Always build the sparse index too: retrieval (keyword/hybrid) and canQuery/the store views
+    // all key off `index`; the dense vectors add the semantic layer on top of it.
+    if (!index) setIndex(buildIndex(chunks.map((c) => c.text)));
     try {
-      const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text) }) });
+      const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
-      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]);
-    } catch (e) { setMsg((e as Error).message); setEmbedMode("tfidf"); setDenseVecs(null); }
+      setDenseVecs(j.vectors); setEmbedInfo({ model: j.model, dim: j.dim }); setEmbedMode("neural"); setQVec(null); setMetricRows([]); setMsg("");
+    } catch (e) { setMsg("Neural embedding failed: " + (e as Error).message + " — check the provider/model. Vector search stays on TF-IDF until this succeeds."); setDenseVecs(null); }
     setEmbedding(false);
   }
   // ── knowledge-graph construction ──
@@ -390,8 +583,8 @@ export default function RagLab() {
   }
   // Full ranking of every chunk for a strategy (dense when neural, else TF-IDF/BM25).
   function fullRank(strat: Strategy, qv: number[] | null): { i: number; score: number }[] {
-    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length);
-    return retrieve(index!, question, strat, chunks.length);
+    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length, metric);
+    return retrieve(index!, question, strat, chunks.length, metric);
   }
   // Apply MMR re-ranking (diversity) to a ranked candidate list, returning top-k indices.
   function applyRerank(ranked: { i: number; score: number }[], k: number): number[] {
@@ -399,7 +592,7 @@ export default function RagLab() {
     const cand = ranked.slice(0, Math.min(ranked.length, Math.max(k * 3, k))).map((h) => h.i);
     const relMap = new Map(ranked.map((h) => [h.i, h.score]));
     const rel = (i: number) => relMap.get(i) ?? 0;
-    const sim = (embedMode === "neural" && denseVecs) ? (i: number, j: number) => denseCos(denseVecs[i], denseVecs[j]) : (i: number, j: number) => cosine(index!.vectors[i], index!.vectors[j]);
+    const sim = (embedMode === "neural" && denseVecs) ? (i: number, j: number) => simDense(denseVecs[i], denseVecs[j], metric) : (i: number, j: number) => simSparse(index!.vectors[i], index!.vectors[j], metric);
     return mmrRerank(cand, rel, sim, mmrLambda, k);
   }
   async function evalRetrieval() {
@@ -408,6 +601,41 @@ export default function RagLab() {
     const rows = strats.map((s) => { const ranked = fullRank(s, qv); const order = applyRerank(ranked, chunks.length); const m = retrievalMetrics(order, relevant, topK); return { name: rerank === "mmr" ? `${s}+mmr` : s, ...m }; });
     setMetricRows(rows);
   }
+  // ── Agentic mode plumbing — reuses the existing engine (retrieve/retrieveGraph + /api/chat), read-only ──
+  const agentTools: AgentTool[] = index ? (graph ? ["vector", "keyword", "hybrid", "kg", "web"] : ["vector", "keyword", "hybrid", "web"]) : [];
+  async function agentRetrieve(query: string, tool: AgentTool, k: number): Promise<AgentHit[]> {
+    if (!index) return [];
+    if (tool === "kg" && graph) {
+      const r = retrieveGraph(graph, query, Math.max(k, 4), kgHops);
+      return r.chunkIds.slice(0, k).map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+    }
+    const strat: Strategy = tool === "hybrid" ? "hybrid" : tool === "keyword" ? "keyword" : "vector";
+    let qv: number[] | null = null;
+    if (embedMode === "neural" && denseVecs) { try { qv = (await embedViaApi([query]))[0] || null; } catch { qv = null; } }
+    const ranked = (embedMode === "neural" && denseVecs && qv)
+      ? retrieveDense(index, query, qv, denseVecs, strat, chunks.length, metric)
+      : retrieve(index, query, strat, chunks.length, metric);
+    return ranked.slice(0, k).map((h) => ({ i: h.i, score: h.score }));
+  }
+  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[], opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+    return text;
+  }
+  // Streaming variant for the agent's final answer — emits tokens as they arrive.
+  async function agentChatStream(messages: { role: "system" | "user" | "assistant"; content: string }[], onToken: (t: string) => void, opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; const chunk = dec.decode(value, { stream: true }); text += chunk; onToken(chunk); }
+    return text;
+  }
+  async function agentFetchWeb(url: string): Promise<{ title: string; text: string } | null> {
+    try { const r = await fetch("/api/rag/fetch-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) }); const j = await r.json(); if (!r.ok) return null; return { title: j.title || url, text: j.text || "" }; } catch { return null; }
+  }
+
   async function ask() {
     if (chunks.length === 0 || !canQuery) { setAnswer("Build the index first (step 3)."); return; }
     setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
@@ -420,10 +648,13 @@ export default function RagLab() {
     ];
     setTraceStep(steps, 1);
     let top: { i: number; score: number }[];
+    let rankedAll: { i: number; score: number }[] = [];
+    let selOrder: number[] = [];
     if (backend === "kg" && graph) {
       const r = retrieveGraph(graph, question, topK, kgHops);
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
       top = r.chunkIds.map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+      rankedAll = top; selOrder = top.map((h) => h.i);
     } else if (backend === "hybrid" && graph && index) {
       const r = retrieveGraph(graph, question, Math.max(topK * 3, 8), Math.max(kgHops, 2));
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
@@ -432,13 +663,16 @@ export default function RagLab() {
       const order = applyRerank(inGraph.length ? inGraph : ranked, topK);
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+      rankedAll = ranked; selOrder = order;
     } else {
       const qv = await ensureQVec();
       const ranked = fullRank(strategy, qv); const order = applyRerank(ranked, topK);
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
+      rankedAll = ranked; selOrder = order;
     }
     setHits(top);
+    setDebugRank(rankedAll); setSelectedIdx(selOrder);
     setTraceStep(steps, 3);
     const context = top.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
     const messages = [
@@ -452,10 +686,38 @@ export default function RagLab() {
       if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); setAnswer("⚠ " + (j.error || "failed")); setMeta("error"); setRunning(false); return; }
       const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
       for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); setAnswer(text); }
-      setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${Math.round(performance.now() - t0)}ms`);
+      const lat = Math.round(performance.now() - t0); setLastLatency(lat);
+      setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${lat}ms`);
       setTrace(steps.map((s) => ({ ...s, state: "done" })));
     } catch (e) { setAnswer("⚠ " + (e as Error).message); setMeta("error"); }
     setRunning(false);
+  }
+
+  // RAG vs no-RAG: answer the SAME question twice — once grounded on the retrieved
+  // chunks, once from the model's own knowledge — so the value of retrieval is visible.
+  async function askCompareRag() {
+    if (!hits.length) { setVs({ running: false, withCtx: "", without: "Click ▶ Ask first so there's a retrieval to compare against." }); return; }
+    setVs({ running: true, withCtx: "", without: "" });
+    const context = hits.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
+    const withMsgs = [
+      { role: "system" as const, content: "You are a helpful assistant. Answer using ONLY the provided context. Cite inline like [chunk N]. If the answer is not in the context, say you don't know." },
+      { role: "user" as const, content: `Context:\n${context}\n\nQuestion: ${question}` },
+    ];
+    const withoutMsgs = [
+      { role: "system" as const, content: "You are a helpful assistant. Answer the question from your own general knowledge. If you are unsure or do not know, say so plainly." },
+      { role: "user" as const, content: question },
+    ];
+    const run = async (messages: { role: "system" | "user"; content: string }[]): Promise<string> => {
+      const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+      if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "failed"); }
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+      for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+      return text;
+    };
+    try {
+      const [w, wo] = await Promise.all([run(withMsgs), run(withoutMsgs)]);
+      setVs({ running: false, withCtx: w, without: wo });
+    } catch (e) { setVs({ running: false, withCtx: "⚠ " + (e as Error).message, without: "⚠ " + (e as Error).message }); }
   }
 
   const stepBtn = (k: Step, n: number, label: string, enabled: boolean) => (
@@ -463,6 +725,10 @@ export default function RagLab() {
   );
   const stepWords = Math.max(1, size - overlap);
   const pLayout = (t: ReturnType<typeof plotlyTheme>, title: string, extra: Record<string, unknown> = {}) => ({ title: { text: title, font: { size: 13, color: t.text } }, paper_bgcolor: t.paper, plot_bgcolor: t.plot, font: { color: t.muted, size: 11 }, margin: { l: 44, r: 16, t: 40, b: 60 }, xaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, yaxis: { gridcolor: t.grid, zerolinecolor: t.grid }, colorway: t.colorway, ...extra });
+
+  // Metrics for the CURRENT strategy (if the user evaluated) — attached to a saved experiment.
+  const activeMetricName = rerank === "mmr" ? `${strategy}+mmr` : strategy;
+  const currentMetrics = (() => { const row = metricRows.find((r) => r.name === activeMetricName); return row ? { p: row.p, r: row.r, mrr: row.mrr, ndcg: row.ndcg } : null; })();
 
   return (
     <div className="rag-lab">
@@ -475,7 +741,7 @@ export default function RagLab() {
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button></div>
       </div>
 
-      {provKnown && provider === null && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before the answer step (source/chunk/embed still work).</div>}
+      {provKnown && provider === null && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin for a shared one) before the answer step (source/chunk/embed still work).</div>}
 
       <div className="stepper">
         {stepBtn("source", 1, "Source", true)}
@@ -495,21 +761,137 @@ export default function RagLab() {
             </div>
 
             <input ref={fileRef} type="file" multiple accept=".txt,.md,.csv,.json,.log,.html,.tsv,.pdf,.docx,.doc,.xlsx,.xls,.xlsm,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={onFiles} style={{ display: "none" }} />
-            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 14, marginBottom: 20 }}>
-              <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
-                <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>
-                <b style={{ fontSize: 13.5 }}>{uploading ? "Parsing…" : "Drop files here or click to upload"}</b>
-                <div className="note" style={{ marginTop: 5 }}>multiple files · parsed in-browser or on the server</div>
-                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center", marginTop: 12 }}>
-                  {([["txt", false], ["md", false], ["csv", false], ["json", false], ["html", false], ["pdf", true], ["docx", true], ["xlsx", true]] as [string, boolean][]).map(([f, hot]) => <span key={f} style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 7px", borderRadius: 5, background: hot ? "rgba(91,124,255,.1)" : "var(--panel-2)", border: `1px solid ${hot ? "rgba(91,124,255,.4)" : "var(--border)"}`, color: hot ? "var(--accent)" : "var(--muted)" }}>{f}</span>)}
+            {/* one button → popup of connectors → the chosen connector's input appears */}
+            {(() => {
+              // [key, icon, title, subtitle, soon?] — enabled connectors are wired; `soon` ones need OAuth and are listed but disabled.
+              type Row = [typeof srcConn | string, string, string, string, boolean?];
+              const CONNECTORS: Row[] = [
+                ["file", "📄", "Upload file", "PDF · DOCX · TXT · CSV · XLSX"],
+                ["datasets", "📚", "Practice datasets", "shared built-in corpora — no upload"],
+                ["kb", "🧠", "Knowledge base", "use a saved KB from Studio"],
+                ["url", "🌐", "Web page", "scrape article text from a URL"],
+                ["github", "🐙", "GitHub", "README · file · folder from a public repo"],
+                ["gdrive", "📁", "Google Drive", "public Google Doc / Sheet link"],
+                ["sample", "📚", "Sample corpus", "built-in returns-policy demo"],
+                ["notion", "📝", "Notion", "needs OAuth — configure in Admin", true],
+                ["confluence", "🧩", "Confluence", "needs OAuth — configure in Admin", true],
+                ["slack", "💬", "Slack", "needs OAuth — configure in Admin", true],
+                ["s3", "🪣", "Amazon S3", "needs credentials — configure in Admin", true],
+                ["dropbox", "🗂️", "Dropbox", "needs OAuth — configure in Admin", true],
+              ];
+              const cur = CONNECTORS.find((c) => c[0] === srcConn) || CONNECTORS[0];
+              return (
+                <div style={{ marginBottom: 16, position: "relative", display: "inline-block" }}>
+                  <label className="fld">Source connector</label>
+                  <button className="btn ghost" onClick={() => setConnectorOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 260 }}>
+                    <span style={{ fontSize: 16 }}>{cur[1]}</span><b style={{ fontSize: 13 }}>{cur[2]}</b><span style={{ marginLeft: "auto", color: "var(--faint)" }}>▾</span>
+                  </button>
+                  {connectorOpen && <>
+                    <div onClick={() => setConnectorOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                    <div style={{ position: "absolute", top: "100%", left: 0, zIndex: 50, width: 340, marginTop: 6, background: "var(--surface)", border: "1px solid var(--border-strong)", borderRadius: 12, boxShadow: "0 16px 40px rgba(0,0,0,.45)", overflow: "hidden" }}>
+                      <div className="note" style={{ padding: "9px 12px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--border)" }}>Available connectors</div>
+                      <div style={{ maxHeight: 300, overflowY: "auto", padding: 6 }}>
+                        {CONNECTORS.map(([k, ic, title, sub, soon]) => (
+                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); if (k === "kb") loadKbList(); if (k === "datasets") loadSampleList(); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
+                            <span style={{ width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: srcConn === k ? "var(--accent)" : "var(--panel-2)", color: srcConn === k ? "#fff" : "var(--muted)" }}>{ic}</span>
+                            <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{title}</span><span className="note" style={{ fontSize: 10 }}>{sub}</span></span>
+                            {soon ? <span style={{ fontSize: 8.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em", padding: "2px 6px", borderRadius: 5, background: "var(--panel-2)", color: "var(--faint)", border: "1px solid var(--border)", flex: "0 0 auto" }}>soon</span>
+                              : srcConn === k ? <span style={{ color: "var(--accent)", fontSize: 14, flex: "0 0 auto" }}>✓</span> : null}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>}
                 </div>
-              </div>
-              <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
-                <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--sky)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Fetch a web page</span></div>
-                <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" style={{ marginBottom: 10 }} />
-                <button className="btn block" onClick={fetchUrl} disabled={fetching}>{fetching ? <><span className="busy-dot" />Fetching…</> : "Fetch & scrape URL"}</button>
-                <div className="note" style={{ marginTop: "auto", paddingTop: 10 }}>Extracts the readable article text and adds it as a document.</div>
-              </div>
+              );
+            })()}
+
+            <div style={{ marginBottom: 20 }}>
+              {srcConn === "file" && storageOn && (
+                <div className="note" style={{ marginBottom: 8, fontSize: 11 }}>
+                  {storageOn.configured
+                    ? <>☁ Original files are archived to storage (<b>{storageOn.backend}</b>) — you&apos;ll see a “stored” link per doc.</>
+                    : <>⚠ File storage is <b>off</b> — docs are parsed to text but originals aren&apos;t archived. Admin: create a Vercel Blob store, then <b>redeploy</b>.</>}
+                </div>
+              )}
+              {srcConn === "file" && (
+                <div onClick={() => fileRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files; if (f && f.length) onFiles({ target: { files: f, value: "" } } as unknown as React.ChangeEvent<HTMLInputElement>); }} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 14, padding: "26px 18px", textAlign: "center", cursor: "pointer", background: "var(--panel)" }}>
+                  <div style={{ fontSize: 26, marginBottom: 8 }}>{uploading ? <span className="busy-dot" /> : "⬆"}</div>
+                  <b style={{ fontSize: 13.5 }}>{uploading ? "Parsing…" : "Drop files here or click to upload"}</b>
+                  <div className="note" style={{ marginTop: 5 }}>multiple files · parsed in-browser or on the server</div>
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center", marginTop: 12 }}>
+                    {([["txt", false], ["md", false], ["csv", false], ["json", false], ["html", false], ["pdf", true], ["docx", true], ["xlsx", true]] as [string, boolean][]).map(([f, hot]) => <span key={f} style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".03em", padding: "2px 7px", borderRadius: 5, background: hot ? "rgba(91,124,255,.1)" : "var(--panel-2)", border: `1px solid ${hot ? "rgba(91,124,255,.4)" : "var(--border)"}`, color: hot ? "var(--accent)" : "var(--muted)" }}>{f}</span>)}
+                  </div>
+                </div>
+              )}
+              {srcConn === "url" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--sky)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Fetch a web page</span></div>
+                  <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" style={{ marginBottom: 10 }} />
+                  <button className="btn block" onClick={fetchUrl} disabled={fetching}>{fetching ? <><span className="busy-dot" />Fetching…</> : "Fetch & scrape URL"}</button>
+                  <div className="note" style={{ marginTop: 10 }}>Extracts the readable article text and adds it as a document.</div>
+                </div>
+              )}
+              {srcConn === "github" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Import from GitHub</span></div>
+                  <input type="text" value={ghUrl} onChange={(e) => setGhUrl(e.target.value)} placeholder="owner/repo · or a github.com file / folder URL" style={{ marginBottom: 10 }} onKeyDown={(e) => { if (e.key === "Enter") fetchGithub(); }} />
+                  <button className="btn block" onClick={fetchGithub} disabled={ghBusy}>{ghBusy ? <><span className="busy-dot" />Importing…</> : "🐙 Import from GitHub"}</button>
+                  <div className="note" style={{ marginTop: 10, lineHeight: 1.55 }}>Public repos only. <b>owner/repo</b> → imports the README; a <b>/blob/…</b> URL → that one file; a <b>/tree/…</b> folder URL → up to 12 text files in it. Uses the GitHub API (no key needed; a <code>GITHUB_TOKEN</code> env var lifts the rate limit).</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                    {["vercel/next.js", "facebook/react/tree/main/packages/react/src", "openai/openai-cookbook"].map((ex) => <button key={ex} onClick={() => setGhUrl(ex)} style={{ fontSize: 10, fontFamily: "var(--mono)", padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--muted)", cursor: "pointer" }}>{ex}</button>)}
+                  </div>
+                </div>
+              )}
+              {srcConn === "gdrive" && (
+                <div style={{ ...pnl, padding: 16, display: "flex", flexDirection: "column" }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#f9ab00" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Google Drive — public link</span></div>
+                  <input type="text" value={gdUrl} onChange={(e) => setGdUrl(e.target.value)} placeholder="https://docs.google.com/document/d/…  or  /spreadsheets/d/…" style={{ marginBottom: 10 }} onKeyDown={(e) => { if (e.key === "Enter") fetchGDrive(); }} />
+                  <button className="btn block" onClick={fetchGDrive} disabled={gdBusy}>{gdBusy ? <><span className="busy-dot" />Importing…</> : "📁 Import from Google Drive"}</button>
+                  <div className="note" style={{ marginTop: 10, lineHeight: 1.55 }}>Paste a <b>Google Doc</b> or <b>Sheet</b> link that&apos;s shared as <b>“Anyone with the link”</b> — it&apos;s exported to text/CSV and added as a document. Private files (which need OAuth) aren&apos;t supported here.</div>
+                </div>
+              )}
+              {srcConn === "datasets" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Shared practice datasets</span><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadSampleList} disabled={sampleLoading}>↻ Refresh</button></div>
+                  <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Ready-made corpora bundled with the platform — pick one to experiment with. <b>No upload, no storage used</b>: one shared copy serves everyone, and only your experiment settings are saved. Loading a dataset replaces the current documents and seeds a suggested question.</div>
+                  {sampleLoading ? <div className="note"><span className="busy-dot" /> loading…</div>
+                    : sampleList.length === 0 ? <div className="note">No datasets available.</div>
+                    : <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+                        {sampleList.map((s) => (
+                          <div key={s.id} className="row" style={{ gap: 10, alignItems: "center", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", background: "var(--surface)" }}>
+                            <span style={{ fontSize: 18 }}>{s.emoji}</span>
+                            <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontWeight: 600, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span><span className="note" style={{ fontSize: 10, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.description}</span><span className="note" style={{ fontSize: 9.5 }}>{s.words} words · {s.questions.length} sample questions</span></span>
+                            <button className="btn sm" onClick={() => pullSample(s)} disabled={sampleBusy === s.id}>{sampleBusy === s.id ? "loading…" : "Use →"}</button>
+                          </div>
+                        ))}
+                      </div>}
+                </div>
+              )}
+              {srcConn === "sample" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good)" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Sample corpus</span></div>
+                  <div className="note" style={{ marginBottom: 10 }}>A built-in returns-policy document — great for trying the pipeline with no upload.</div>
+                  <button className="btn sm" onClick={addSample}>📚 Load sample corpus</button>
+                </div>
+              )}
+              {srcConn === "kb" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Your knowledge bases</span><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadKbList} disabled={kbLoading}>↻ Refresh</button></div>
+                  <div className="note" style={{ marginBottom: 10 }}>Pull the documents from a KB you built in <b>Studio → Knowledge bases</b> into this pipeline.</div>
+                  {kbLoading ? <div className="note"><span className="busy-dot" /> loading…</div>
+                    : kbList.length === 0 ? <div className="note">No knowledge bases yet — create one under <b>Studio → Knowledge bases</b>, then refresh.</div>
+                    : <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 240, overflowY: "auto" }}>
+                        {kbList.map((kb) => (
+                          <div key={kb.id} className="row" style={{ gap: 10, alignItems: "center", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", background: "var(--surface)" }}>
+                            <span style={{ fontSize: 16 }}>🧠</span>
+                            <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontWeight: 600, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kb.name}</span><span className="note" style={{ fontSize: 10 }}>{kb.docCount} docs · {kb.chunkCount} chunks</span></span>
+                            <button className="btn sm" onClick={() => pullKb(kb)} disabled={kbBusy === kb.id}>{kbBusy === kb.id ? "loading…" : "Use →"}</button>
+                          </div>
+                        ))}
+                      </div>}
+                </div>
+              )}
             </div>
 
             <label className="fld">Loaded documents — preview before chunking</label>
@@ -526,6 +908,7 @@ export default function RagLab() {
                       <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
                       <div className="note" style={{ marginTop: 2 }}>{words.toLocaleString()} words · {d.text.length.toLocaleString()} chars</div>
                     </div>
+                    {d.r2Url && <a href={d.r2Url} target="_blank" rel="noreferrer" title="original file stored in R2" style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color: "var(--good)", background: "color-mix(in srgb, var(--good) 12%, transparent)", flex: "0 0 auto", textDecoration: "none" }}>☁ stored</a>}
                     <span style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color, background: `color-mix(in srgb, ${color} 12%, transparent)`, flex: "0 0 auto" }}>{d.kind}</span>
                     <button className="btn ghost sm" onClick={toggle}>{open ? "Hide" : "Preview"}</button>
                     <button onClick={() => removeDoc(d.id)} title="Remove" style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 17, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
@@ -560,8 +943,8 @@ export default function RagLab() {
               {kgHead("var(--accent)", "Chunking controls")}
               <div style={{ padding: 15 }}>
                 <div className="row" style={{ flexWrap: "wrap", gap: 20, alignItems: "flex-end" }}>
-                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={120} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
-                  <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={40} step={2} value={overlap} onChange={(e) => setOverlap(+e.target.value)} /></div>
+                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={1000} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
+                  <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={500} step={2} value={Math.min(overlap, size - 1)} onChange={(e) => setOverlap(Math.min(+e.target.value, size - 1))} /></div>
                   <button className="btn" onClick={runChunking} disabled={chunking}>▶ Run chunking</button>
                 </div>
                 <div style={{ marginTop: 12, fontFamily: "var(--mono)", fontSize: 11, color: "var(--faint)", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 11px" }}>sliding window: <b style={{ color: "var(--accent)" }}>{size}</b>-word window · advances <b style={{ color: "var(--accent)" }}>{stepWords}</b> words each step · <b style={{ color: "var(--accent)" }}>{overlap}</b>w shared{chunks.length ? <> → {totalWords.toLocaleString()} words split into <b style={{ color: "var(--accent)" }}>{chunks.length}</b> chunks</> : null}</div>
@@ -574,16 +957,23 @@ export default function RagLab() {
                   {kgHead("var(--sky)", "How the text splits", <span className="note" style={{ fontSize: 10 }}>{totalWords.toLocaleString()} words → {chunks.length} chunks</span>)}
                   <div style={{ padding: 15 }}>
                     <div className="flow" key={`cf-${chunkPlayKey}`} style={{ ["--sweepdur"]: `${(chunks.length * 0.35 + 0.6).toFixed(1)}s`, border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 } as React.CSSProperties}>
-                      <div className="flow-label">extracted text · {totalWords} words</div>
-                      <div className="doc-track">
-                        <div className="readhead" />
-                        {chunks.map((c, i) => (
-                          <div key={i} className="cwin" style={{ left: `${Math.min(98, (i * stepWords / Math.max(1, totalWords)) * 100)}%`, width: `${Math.min(60, (size / Math.max(1, totalWords)) * 100)}%`, background: i % 2 ? "var(--sky)" : "var(--accent)", animationDelay: `${(i * 0.35).toFixed(2)}s` }}>c{i + 1}</div>
-                        ))}
-                      </div>
-                      <div className="flow-arrow">↓ splits into {chunks.length} chunks</div>
-                      <div className="flow-chunks">
-                        {chunks.map((c, i) => <div key={i} className="fchunk" style={{ animationDelay: `${(i * 0.35 + 0.2).toFixed(2)}s` }}>chunk {i + 1}</div>)}
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div className="flow-label">extracted text · {totalWords} words · 10 windows / row</div>
+                          <div style={{ maxHeight: 250, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 5 }}>
+                              {chunks.map((c, i) => <div key={i} title={`chunk ${i + 1}`} style={{ height: 30, borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--mono)", fontSize: 9, fontWeight: 700, color: "#fff", background: i % 2 ? "var(--sky)" : "var(--accent)", opacity: 0, animation: "popIn .4s ease forwards", animationDelay: `${(i * 0.02).toFixed(2)}s` }}>c{i + 1}</div>)}
+                            </div>
+                          </div>
+                        </div>
+                        <div style={{ minWidth: 0, borderLeft: "1px solid var(--border)", paddingLeft: 14 }}>
+                          <div className="flow-label">→ {chunks.length} chunks · 5 / row</div>
+                          <div style={{ maxHeight: 250, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 7 }}>
+                              {chunks.map((c, i) => <div key={i} className="fchunk" style={{ margin: 0, padding: "7px 8px", animationDelay: `${(i * 0.02 + 0.1).toFixed(2)}s` }}>chunk {i + 1}<span style={{ display: "block", color: "var(--faint)", fontSize: 9, marginTop: 2 }}>{c.text.split(/\s+/).filter(Boolean).length}w · {overlap}w ov</span></div>)}
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                     <div className="row" style={{ marginTop: 12 }}><button className="btn ghost sm" onClick={() => setChunkPlayKey((k) => k + 1)}>↻ Replay animation</button></div>
@@ -699,7 +1089,7 @@ export default function RagLab() {
 
             {backend !== "kg" && (<>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 16 }}>
-              {([[String(chunks.length), "chunks"], [String(index ? index.vectors.length : 0), "vectors stored"], [String(vocab), embedMode === "neural" && embedInfo ? "dimensions" : "vocabulary (dims)"], ["cosine", "similarity"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
+              {([[String(chunks.length), "chunks"], [String(index ? index.vectors.length : 0), "vectors stored"], [String(vocab), embedMode === "neural" && embedInfo ? "dimensions" : "vocabulary (dims)"], [METRIC_LABEL[metric], "similarity"]] as [string, string][]).map(([v, k]) => <div key={k} style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 15px" }}><div style={{ fontFamily: "var(--mono)", fontSize: 22, fontWeight: 600, letterSpacing: "-.02em", lineHeight: 1.1 }}>{v}</div><div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--faint)", marginTop: 3 }}>{k}</div></div>)}
             </div>
 
             <div style={{ ...pnl, marginBottom: 16 }}>
@@ -708,20 +1098,58 @@ export default function RagLab() {
                 <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <div className="chips">
                     <button className={`chip ${embedMode === "tfidf" ? "on" : ""}`} onClick={() => setEmbedMode("tfidf")}>TF-IDF · lexical</button>
-                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { if (denseVecs) setEmbedMode("neural"); else runNeuralEmbed(); }} disabled={provider === null && provKnown}>Neural · semantic</button>
+                    <button className={`chip ${embedMode === "neural" ? "on" : ""}`} onClick={() => { setEmbedMode("neural"); if (!embModel) setEmbModel(pickDefaultEmb(providerId)); }}>Neural · semantic</button>
                   </div>
-                  {embedMode === "neural" && !denseVecs && <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || (provider === null && provKnown)}>{embedding ? "embedding…" : "▶ Embed with neural model"}</button>}
-                  <button className="btn sm" onClick={runEmbedding} disabled={embedding} style={{ marginLeft: "auto" }}>{embedding ? "…" : "▶ Run embedding"}</button>
+                  <label className="note" style={{ display: "inline-flex", gap: 6, alignItems: "center", marginLeft: "auto" }}>similarity
+                    <select value={metric} onChange={(e) => setMetric(e.target.value as Metric)} style={{ width: 148 }} title="Distance metric used to score chunks">
+                      {(["cosine", "dot", "euclidean"] as Metric[]).map((m) => <option key={m} value={m}>{METRIC_LABEL[m]}</option>)}
+                    </select>
+                  </label>
+                  <button className="btn" onClick={runEmbedding} disabled={embedding}>{embedding ? "vectorizing…" : index ? "↻ Re-run embedding" : "▶ Run embedding"}</button>
                 </div>
+                <div className="note" style={{ marginTop: 8 }}>Metric — <b>{METRIC_LABEL[metric]}</b>: {metric === "cosine" ? "angle between vectors (length-independent) — the usual default for text." : metric === "dot" ? "raw inner product (IP) — rewards magnitude, so longer/denser chunks can score higher." : "L2 distance mapped to 1/(1+d) — closeness in vector space. Maps to Milvus " + METRIC_MILVUS[metric] + "."} Applies to both TF-IDF and neural vectors; retrieval re-ranks on the next Ask.</div>
+
+                {/* Neural setup — pick a provider + embedding model, then embed. Shown until dense vectors exist. */}
+                {embedMode === "neural" && !denseVecs && (
+                  providers.length === 0 && provKnown ? (
+                    <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
+                      <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>Neural embeddings need a provider</div>
+                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>gemini-embedding-001</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
+                      <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+                        {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
+                          <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
+                        <div style={{ width: 240 }}><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched · type to search` : "· none fetched"}</label>
+                          <ModelPicker models={embModelOptions(providerId)} value={embModel} onChange={setEmbModel} placeholder="e.g. mistral-embed" openKey={embOpenKey} />
+                        </div>
+                        <button className="btn ghost sm" onClick={async () => { await loadModels(providerId || undefined); setEmbOpenKey((k) => k + 1); }} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
+                        <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
+                      </div>
+                      {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
+                      {models.length > 0 && !models.some((m) => /embed/i.test(m)) && <div className="note" style={{ marginTop: 8, color: "var(--warn)" }}>⚠ This provider&apos;s model list has no embedding model (only chat models). A <code>404</code> means the name isn&apos;t served — for Gemini try <code>gemini-embedding-001</code>, or use a provider that offers embeddings.</div>}
+                      <div className="note" style={{ marginTop: 8 }}>Pick from the <b>{models.length} model(s) fetched</b> from {provType(providerId) || "the provider"} (embedding models listed first), or type one. Free key: <b>Gemini</b> — try <code>gemini-embedding-001</code>. On <code>404</code> the name isn&apos;t served; use ↻ Fetch models to see valid names.</div>
+                    </div>
+                  )
+                )}
                 {embedMode === "neural" && denseVecs && embedInfo && <div className="note" style={{ marginTop: 8 }}>real embeddings · <b>{embedInfo.model}</b> · {embedInfo.dim} dims — vector search is now <b>semantic</b>, not lexical</div>}
                 {embedMode === "tfidf" && <div className="note" style={{ marginTop: 8 }}>TF-IDF weights each term by rarity. Switch to Neural for real semantic embeddings{provider === null && provKnown ? " (needs a provider — TF-IDF works without one)" : ""} — the pipeline is identical.</div>}
-                {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
-                  const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
-                  const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
-                  return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
-                })()}
+                {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (
+                  <EmbeddingExplorer vectors={denseVecs} chunks={chunks} dim={embedInfo?.dim ?? (denseVecs[0]?.length ?? 0)} metric={metric} clusterAssign={clusters?.assign} />
+                )}
               </div>
             </div>
+
+            {!index && !embedding && (
+              <div style={{ ...pnl, marginBottom: 16, borderStyle: "dashed", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: "34px 20px", textAlign: "center" }}>
+                <div style={{ fontSize: 26, opacity: .7 }}>◆</div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>Vectors not built yet</div>
+                <div className="note" style={{ maxWidth: 440, lineHeight: 1.55 }}>Nothing runs automatically. Click below to turn your <b>{chunks.length} chunk{chunks.length === 1 ? "" : "s"}</b> into <b>{METRIC_LABEL[metric]}</b>-searchable <b>{embedMode === "neural" ? "neural" : "TF-IDF"}</b> vectors, then the store, heatmap and Milvus view appear.</div>
+                <button className="btn" onClick={embedMode === "neural" ? runNeuralEmbed : runEmbedding} disabled={embedMode === "neural" && !embModel.trim()} style={{ marginTop: 2, padding: "11px 22px", fontSize: 14 }}>▶ Run embedding</button>
+                {embedMode === "neural" && !embModel.trim() && <div className="note">pick an embedding model above first</div>}
+              </div>
+            )}
 
             {index && (() => {
               const ei = Math.min(embIdx, chunks.length - 1);
@@ -736,13 +1164,14 @@ export default function RagLab() {
               index.vectors.forEach((v) => Object.entries(v).forEach(([t, w]) => { totals[t] = (totals[t] || 0) + w; }));
               const mTerms = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 10).map((e) => e[0]);
               let mMax = 0; index.vectors.forEach((v) => mTerms.forEach((t) => { if ((v[t] || 0) > mMax) mMax = v[t] || 0; })); mMax = mMax || 1;
-              const nlist = clusters?.nlist ?? Math.min(4, chunks.length);
+              const nlist = clusters?.nlist ?? Math.max(1, Math.min(12, chunks.length < 4 ? chunks.length : Math.round(Math.sqrt(chunks.length))));
               const buckets = clusters?.buckets ?? [];
               return (
                 <>
                   <div style={{ ...pnl, marginBottom: 16 }}>
-                    {kgHead("var(--good)", "Watch one chunk become a vector", <span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span>)}
+                    {kgHead("var(--good)", "Watch one chunk become a vector", <div className="row" style={{ gap: 8, alignItems: "center" }}>{vecSimBadges()}<span className="note" style={{ fontSize: 10 }}>chunk {ei + 1} / {chunks.length}</span></div>)}
                     <div style={{ padding: 15 }}>
+                  {embedMode === "neural" && denseVecs && <div className="note" style={{ marginBottom: 10 }}>Active retrieval uses your <b>{embedInfo?.dim}-d neural vectors</b> with <b>{METRIC_LABEL[metric]}</b> similarity. The term weights below are the TF-IDF view — kept because dense dimensions aren&apos;t human-readable.</div>}
                   <div className="chunk-inspect" style={{ border: "none", background: "transparent", padding: 0, margin: 0, borderRadius: 0 }}>
                     <div className="pp-player" style={{ margin: "0 0 8px" }}>
                       <button className="pp-ctrl" title="First" onClick={() => { setEmbPlaying(false); setEmbIdx(0); }}>⏮</button>
@@ -788,7 +1217,7 @@ export default function RagLab() {
                       ...mTerms.map((t) => { const w = index.vectors[r][t] || 0; return <div key={`${r}-${t}`} className={`vs-cell ${r === ei ? "on" : ""}`} style={{ background: "var(--accent)", opacity: w ? 0.12 + 0.88 * (w / mMax) : 0 }} title={`c${r + 1} · ${t}: ${w.toFixed(3)}`} />; }),
                     ])}
                   </div>
-                  <div className="note" style={{ marginTop: 8 }}>Darker = that term matters more to that chunk. A question is embedded the exact same way; retrieval scores chunks whose strong terms <b>overlap</b> the question (cosine similarity).</div>
+                  <div className="note" style={{ marginTop: 8 }}>Darker = that term matters more to that chunk. A question is embedded the exact same way; retrieval scores chunks whose strong terms <b>overlap</b> the question ({METRIC_LABEL[metric]} similarity).</div>
                     </div>
                   </div>
 
@@ -799,7 +1228,7 @@ export default function RagLab() {
                   <div className="milvus">
                     <div className="mv-schema">
                       <div className="mv-line"><b>Collection</b><span>rag_chunks</span></div>
-                      <div className="mv-badges"><span className="mv-b">metric: COSINE</span><span className="mv-b">index: IVF_FLAT</span><span className="mv-b">nlist: {nlist}</span><span className="mv-b">dim: {vocab}</span><span className="mv-b">entities: {chunks.length}</span></div>
+                      <div className="mv-badges"><span className="mv-b">metric: {METRIC_MILVUS[metric]}</span><span className="mv-b">index: IVF_FLAT</span><span className="mv-b">nlist: {nlist}</span><span className="mv-b">dim: {vocab}</span><span className="mv-b">entities: {chunks.length}</span></div>
                       <div className="mv-fields">
                         <div className="mv-f"><span className="mv-fn">id</span><span className="mv-ft">INT64</span><span className="mv-fk">primary key</span></div>
                         <div className="mv-f"><span className="mv-fn">embedding</span><span className="mv-ft">FLOAT_VECTOR</span><span className="mv-fk">dim = {vocab}</span></div>
@@ -811,8 +1240,8 @@ export default function RagLab() {
                     <div className="chunk-scroll" style={{ maxHeight: 220, padding: 0 }}>
                       <table className="dtable"><tbody>
                         <tr><th>id</th><th>embedding (first dims)</th><th>text</th><th>source</th></tr>
-                        {chunks.map((c, i) => { const preview = mTerms.slice(0, 6).map((t) => (index.vectors[i][t] || 0).toFixed(2)).join(", "); return (
-                          <tr key={i} className={i === ei ? "mv-on" : ""}><td>{i}</td><td className="mv-vec">[{preview}, …]</td><td style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.text.slice(0, 64)}…</td><td>{c.docName.length > 18 ? c.docName.slice(0, 18) + "…" : c.docName}</td></tr>
+                        {chunks.map((c, i) => { const preview = mTerms.slice(0, 6).map((t) => (index.vectors[i][t] || 0).toFixed(2)).join(", "); const open = mvOpen === i; return (
+                          <tr key={i} className={i === ei ? "mv-on" : ""}><td>{i}</td><td className="mv-vec">[{preview}, …]</td><td onClick={() => setMvOpen(open ? null : i)} title={open ? "click to collapse" : "click to read full text"} style={{ cursor: "pointer", maxWidth: open ? undefined : 260, ...(open ? { whiteSpace: "normal", color: "var(--text)" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{open ? c.text : c.text.slice(0, 64) + "…"}<span style={{ color: "var(--accent)", marginLeft: 6, fontSize: 10 }}>{open ? "▲" : "▾"}</span></td><td>{c.docName.length > 18 ? c.docName.slice(0, 18) + "…" : c.docName}</td></tr>
                         ); })}
                       </tbody></table>
                     </div>
@@ -825,7 +1254,7 @@ export default function RagLab() {
                         </div>
                       ))}
                     </div>
-                    <div className="note" style={{ marginTop: 8 }}>Milvus stores each chunk as an <b>entity</b> (id + float vector + metadata) inside a <b>collection</b>, then builds an ANN index — IVF_FLAT clusters vectors into <b>nlist</b> buckets so a query only compares against the closest few (nprobe), staying fast at millions of vectors. Our in-browser store uses the same shape (TF-IDF vectors + cosine); swap in a neural embedder and it maps 1:1 to Milvus.</div>
+                    <div className="note" style={{ marginTop: 8 }}>Milvus stores each chunk as an <b>entity</b> (id + float vector + metadata) inside a <b>collection</b>, then builds an ANN index — IVF_FLAT clusters vectors into <b>nlist</b> buckets so a query only compares against the closest few (nprobe), staying fast at millions of vectors. <b>Why {nlist} buckets?</b> nlist scales with your data (≈ √N, so {chunks.length} chunks → {nlist}); more chunks would build more buckets. Our in-browser store uses the same shape (TF-IDF vectors + cosine); swap in a neural embedder and it maps 1:1 to Milvus.</div>
                   </div>
                     </div>
                   </div>
@@ -855,6 +1284,50 @@ export default function RagLab() {
 
       {/* STEP 4 — QUERY */}
       {step === "query" && (
+        <>
+        <div className="row" style={{ alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span className="note" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>Answering mode</span>
+          <div style={{ display: "inline-flex", border: "1px solid var(--border-strong)", borderRadius: 9, overflow: "hidden" }}>
+            <button onClick={() => setAnswerMode("direct")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", background: answerMode === "direct" ? "var(--accent)" : "var(--surface)", color: answerMode === "direct" ? "#fff" : "var(--muted)", fontWeight: answerMode === "direct" ? 600 : 400 }}>Direct</button>
+            <button onClick={() => setAnswerMode("agentic")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", display: "inline-flex", alignItems: "center", gap: 5, background: answerMode === "agentic" ? "#a855f7" : "var(--surface)", color: answerMode === "agentic" ? "#fff" : "var(--muted)", fontWeight: answerMode === "agentic" ? 600 : 400 }}>🤖 Agentic</button>
+          </div>
+          <span className="note" style={{ fontSize: 11 }}>{answerMode === "direct" ? "single-shot retrieve → answer" : "the agent plans, retrieves, self-checks, and re-retrieves until it can answer"}</span>
+        </div>
+
+        {answerMode === "agentic" && (
+          <div className="card">
+            <div className="card-h"><span className="t">🤖 Agentic answer</span><span className="mono r">{agentTools.length} tools</span></div>
+            <div className="card-b">
+              {!canQuery && <div className="warnbar">Build the index first (step 3).</div>}
+              <AgenticAnswer
+                chunks={chunks.map((c) => ({ text: c.text, docName: c.docName, docKind: c.docKind }))}
+                tools={agentTools}
+                retrieve={agentRetrieve}
+                chat={agentChat}
+                chatStream={agentChatStream}
+                fetchWeb={agentFetchWeb}
+                defaultQuestion={question}
+                disabled={!canQuery}
+                config={agentCfg}
+                onConfigChange={setAgentCfg}
+                note={!graph ? <div className="note" style={{ fontSize: 10.5, lineHeight: 1.5 }}>🕸 <b>Knowledge graph</b> appears here once you build one — go to the <b>Index</b> step and pick the <b>Knowledge graph</b> or <b>Hybrid</b> backend, then Build graph.</div> : undefined}
+                modelPicker={
+                  <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    {providers.length > 1 && <select value={providerId} onChange={(e) => { setProviderId(e.target.value); loadModels(e.target.value); }} style={{ width: 176 }} title="Provider">{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>}
+                    <select value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 244 }} disabled={modelsLoading || !models.length} title="Model">
+                      {modelsLoading ? <option>loading…</option> : models.length ? models.map((m) => <option key={m} value={m}>{m}</option>) : <option value="">no models available</option>}
+                    </select>
+                    <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Refresh model list">↻ Fetch models</button>
+                    {provider && <span className="note">{providers.length > 1 ? provider + " · " : ""}{models.length} model{models.length === 1 ? "" : "s"}</span>}
+                    {provKnown && !provider && <span className="note" style={{ color: "var(--warn)" }}>no provider configured — add one under Admin → Providers</span>}
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        {answerMode === "direct" && (
         <div className="split col-2">
           <div className="card">
             <div className="card-h"><span className="t">Retrieve &amp; ask</span></div>
@@ -903,7 +1376,7 @@ export default function RagLab() {
                 const qTerms = Array.from(new Set(tokenize(question)));
                 const qv = queryVector(index, question);
                 let probed = 0, bs = -Infinity;
-                if (clusters) clusters.centroids.forEach((ct, c) => { const s = cosine(qv, ct); if (s > bs) { bs = s; probed = c; } });
+                if (clusters) clusters.centroids.forEach((ct, c) => { const s = simSparse(qv, ct, metric); if (s > bs) { bs = s; probed = c; } });
                 return (
                   <>
                     <label className="fld" style={{ marginTop: 16 }}>Query → tokens (matched against the {backend === "kg" ? "graph entities" : "chunk vectors"})</label>
@@ -920,7 +1393,7 @@ export default function RagLab() {
                             </div>
                           ))}
                         </div>
-                        <div className="note" style={{ marginTop: 6 }}>Milvus compares the query only against vectors in the closest bucket(s) (nprobe), not all {chunks.length}, then ranks them by cosine — green chips are the chunks that were retrieved.</div>
+                        <div className="note" style={{ marginTop: 6 }}>Milvus compares the query only against vectors in the closest bucket(s) (nprobe), not all {chunks.length}, then ranks them by {METRIC_LABEL[metric]} — green chips are the chunks that were retrieved.</div>
                       </>
                     )}
 
@@ -973,9 +1446,11 @@ export default function RagLab() {
             </div>
           </div>
         </div>
+        )}
+        </>
       )}
 
-      {step === "query" && index && (
+      {step === "query" && index && answerMode === "direct" && (
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-h"><span className="t">Compare chunking</span><span className="mono r">{strategy} · top-{topK}</span></div>
           <div className="card-b">
@@ -1005,6 +1480,88 @@ export default function RagLab() {
             })()}
           </div>
         </div>
+      )}
+
+      {/* RAG DEBUGGER — every candidate chunk ranked, with the top-k cutoff made explicit */}
+      {step === "query" && answerMode === "direct" && backend !== "kg" && debugRank.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">🐛 Retrieval debugger</span><span className="mono r">top-{topK} of {debugRank.length} candidates</span>
+            <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => setDbgOpen((o) => !o)}>{dbgOpen ? "Hide" : "Show"}</button>
+          </div>
+          {dbgOpen && <div className="card-b">
+            {(() => {
+              const selSet = new Set(selectedIdx);
+              const scoreOf = new Map(debugRank.map((h) => [h.i, h.score]));
+              const cutoff = selectedIdx.length ? Math.min(...selectedIdx.map((i) => scoreOf.get(i) ?? 0)) : 0;
+              const maxScore = Math.max(...debugRank.map((h) => h.score), 0.0001);
+              const shown = debugRank.slice(0, 20);
+              return (<>
+                <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Every chunk ranked by similarity for “{question}”. <b style={{ color: "var(--good)" }}>Green</b> chunks made the top-{topK} context; the rest were cut. Cutoff (lowest selected score) = <b>{cutoff.toFixed(3)}</b>.</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {shown.map((h, rank) => {
+                    const on = selSet.has(h.i);
+                    return (
+                      <div key={h.i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="mono" style={{ width: 30, flex: "0 0 auto", fontSize: 11, color: "var(--faint)" }}>#{rank + 1}</span>
+                        <span className="mono" style={{ width: 40, flex: "0 0 auto", fontSize: 11, fontWeight: 600, color: on ? "var(--good)" : "var(--muted)" }}>c{h.i + 1}</span>
+                        <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 5, height: 16, position: "relative", overflow: "hidden" }}>
+                          <div style={{ width: `${Math.max(3, (h.score / maxScore) * 100)}%`, height: "100%", background: on ? "var(--good)" : "var(--border-strong)", borderRadius: 5 }} />
+                        </div>
+                        <span className="mono" style={{ width: 50, flex: "0 0 auto", textAlign: "right", fontSize: 11, color: "var(--muted)" }}>{h.score.toFixed(3)}</span>
+                        <span style={{ width: 112, flex: "0 0 auto", fontSize: 10 }}>
+                          {on ? <span style={{ color: "var(--good)", fontWeight: 600 }}>✓ selected</span>
+                              : <span className="note" title={`score ${h.score.toFixed(3)} < cutoff ${cutoff.toFixed(3)}`}>✕ below cutoff</span>}
+                        </span>
+                        <span className="note" style={{ flex: 1, minWidth: 0, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chunks[h.i]?.text.slice(0, 90)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {debugRank.length > 20 && <div className="note" style={{ marginTop: 6 }}>Showing the top 20 of {debugRank.length} candidates.</div>}
+                <div className="note" style={{ marginTop: 8, lineHeight: 1.5 }}>The core RAG debugging skill: if a chunk you expected is missing from the answer, find it here. A low score means the retriever didn&apos;t rate it relevant — try a bigger chunk size, neural embeddings, or a higher top-K.</div>
+              </>);
+            })()}
+          </div>}
+        </div>
+      )}
+
+      {/* RAG vs NO-RAG — same question answered with vs without retrieval */}
+      {step === "query" && index && answerMode === "direct" && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">⚖️ RAG vs no-RAG</span><span className="mono r">same question · with vs without retrieval</span></div>
+          <div className="card-b">
+            <div className="note" style={{ marginBottom: 10, lineHeight: 1.5 }}>Answers “{question}” twice — grounded on your retrieved chunks vs the model&apos;s own knowledge. Shows exactly what retrieval adds (and exposes hallucinations when the model has to guess).</div>
+            <button className="btn sm" onClick={askCompareRag} disabled={!!vs?.running || !hits.length}>{vs?.running ? "running…" : hits.length ? "▶ Compare RAG vs no-RAG" : "Ask first, then compare"}</button>
+            {vs?.running && <div className="note" style={{ marginTop: 10 }}><span className="busy-dot" /> generating both answers…</div>}
+            {vs && !vs.running && (vs.withCtx || vs.without) && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+                <div style={pnl}>
+                  {kgHead("var(--good)", "✅ With RAG (grounded)")}
+                  <div style={{ padding: 12, fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--text)", maxHeight: 320, overflow: "auto" }}>{vs.withCtx || "—"}</div>
+                </div>
+                <div style={pnl}>
+                  {kgHead("var(--warn)", "⚠️ No RAG (model only)")}
+                  <div style={{ padding: 12, fontSize: 12.5, lineHeight: 1.55, whiteSpace: "pre-wrap", color: "var(--muted)", maxHeight: 320, overflow: "auto" }}>{vs.without || "—"}</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* EXPERIMENT HISTORY + SIDE-BY-SIDE COMPARISON (config + metrics only — storage-cheap) */}
+      {step === "query" && answerMode === "direct" && (
+        <RagExperiments
+          current={{
+            config: { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops },
+            metrics: currentMetrics,
+            question,
+            dataset: docs[0]?.name || "",
+            chunkCount: chunks.length,
+            latencyMs: lastLatency,
+          }}
+          onLoad={applyExpConfig}
+        />
       )}
     </div>
   );

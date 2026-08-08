@@ -12,7 +12,7 @@ export default async function McpPage() {
     <Shell user={user} title="MCP servers">
       <div className="eyebrow">Studio</div>
       <h2 className="page-h">MCP servers</h2>
-      <p className="page-sub">Give your agents tools. Free web, research &amp; memory servers connect in one click; connect your own database to chat with your data. Keys are encrypted and never shown again.</p>
+      <p className="page-sub">Give your agents tools. Web search, Wikipedia, arXiv and memory are built into the Agent Lab already; here you connect what&apos;s yours — your database (works free) and hosted integrations like GitHub. Keys are encrypted and never shown again.</p>
       <McpManager />
     </Shell>
   );

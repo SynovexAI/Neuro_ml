@@ -3,6 +3,7 @@ import { getSessionUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_BYTES = 15 * 1024 * 1024; // 15 MB
 

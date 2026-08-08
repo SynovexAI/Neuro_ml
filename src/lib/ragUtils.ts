@@ -70,6 +70,30 @@ export function cosine(a: Vec, b: Vec): number {
   return dot / ((Math.sqrt(na) * Math.sqrt(nb)) || 1);
 }
 
+// ── selectable similarity metric (the same three Milvus exposes) ──
+// cosine = angle · dot = inner product (IP) · euclidean = L2 distance → 1/(1+d) so higher is better.
+export type Metric = "cosine" | "dot" | "euclidean";
+export const METRIC_LABEL: Record<Metric, string> = { cosine: "cosine", dot: "dot (IP)", euclidean: "euclidean (L2)" };
+export const METRIC_MILVUS: Record<Metric, string> = { cosine: "COSINE", dot: "IP", euclidean: "L2" };
+
+// Similarity over sparse TF-IDF vectors. Distance metrics are mapped to a similarity (higher = better).
+export function simSparse(a: Vec, b: Vec, metric: Metric = "cosine"): number {
+  if (metric === "cosine") return cosine(a, b);
+  if (metric === "dot") { let d = 0; for (const k in a) if (b[k]) d += a[k] * b[k]; return d; }
+  let s = 0; // euclidean over the union of keys
+  for (const k in a) { const diff = a[k] - (b[k] || 0); s += diff * diff; }
+  for (const k in b) if (!(k in a)) s += b[k] * b[k];
+  return 1 / (1 + Math.sqrt(s));
+}
+// Similarity over dense (neural) vectors, same three metrics.
+export function simDense(a: number[], b: number[], metric: Metric = "cosine"): number {
+  if (metric === "cosine") return denseCos(a, b);
+  const n = Math.min(a.length, b.length);
+  if (metric === "dot") { let d = 0; for (let i = 0; i < n; i++) d += a[i] * b[i]; return d; }
+  let s = 0; for (let i = 0; i < n; i++) { const diff = a[i] - b[i]; s += diff * diff; }
+  return 1 / (1 + Math.sqrt(s));
+}
+
 // Normalize a score array to 0..1 for display / hybrid blending.
 function norm(arr: number[]): number[] {
   const max = Math.max(...arr, 1e-9);
@@ -78,10 +102,10 @@ function norm(arr: number[]): number[] {
 
 export type Strategy = "vector" | "keyword" | "hybrid";
 
-export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: number): { i: number; score: number }[] {
+export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: number, metric: Metric = "cosine"): { i: number; score: number }[] {
   const bm = norm(bm25Scores(idx, query));
   const qv = queryVector(idx, query);
-  const vec = idx.vectors.map((v) => cosine(qv, v));
+  const vec = norm(idx.vectors.map((v) => simSparse(qv, v, metric)));
   let scores: number[];
   if (strategy === "keyword") scores = bm;
   else if (strategy === "vector") scores = vec;
@@ -99,9 +123,9 @@ export function denseCos(a: number[], b: number[]): number {
   return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 // Retrieve on dense vectors: keyword = BM25, vector = cosine on neural embeddings, hybrid = blend.
-export function retrieveDense(idx: RagIndex, query: string, qVec: number[], chunkVecs: number[][], strategy: Strategy, k: number): { i: number; score: number }[] {
+export function retrieveDense(idx: RagIndex, query: string, qVec: number[], chunkVecs: number[][], strategy: Strategy, k: number, metric: Metric = "cosine"): { i: number; score: number }[] {
   const bm = norm(bm25Scores(idx, query));
-  const vec = norm(chunkVecs.map((v) => denseCos(qVec, v)));
+  const vec = norm(chunkVecs.map((v) => simDense(qVec, v, metric)));
   let scores: number[];
   if (strategy === "keyword") scores = bm;
   else if (strategy === "vector") scores = vec;

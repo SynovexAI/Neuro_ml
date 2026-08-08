@@ -81,7 +81,7 @@ export default function Compose() {
       <div className="lab-head">
         <div><div className="eyebrow">Studio · Compose</div><h2 className="page-h">Compose</h2><p className="page-sub" style={{ margin: 0 }}>Chain your builds into one system — here, an <b>Agent</b> that uses a saved <b>RAG</b> bot as a tool, grounded in your documents.</p></div>
       </div>
-      {provReady && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before running.</div>}
+      {provReady && !hasProvider && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin) before running.</div>}
       {msg && <div className="err">{msg}</div>}
 
       {rags.length === 0 ? (
