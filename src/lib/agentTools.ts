@@ -222,6 +222,26 @@ export function buildKnowledge(text: string): { index: RagIndex; chunks: string[
 }
 
 // ── ReAct prompt + parse ──
+export function formatFinalAnswer(text: string): string {
+  if (!text) return "";
+  const formatted = text
+    .replace(/^#{1,6}\s*(.*)$/gm, "// $1")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/(?<!\S)\*(.*?)\*(?!\S)/g, "$1")
+    .replace(/^\s*[\*\-]\s+/gm, "• ")
+    .replace(/^\s*[\$\&\#]\s*/gm, "// ");
+
+  const lines = formatted.split("\n").map((line) => {
+    const trimmed = line.trim();
+    if (trimmed.endsWith(":") && !trimmed.startsWith("//") && !trimmed.startsWith("http") && !trimmed.startsWith("•")) {
+      return `// ${trimmed.slice(0, -1)}`;
+    }
+    return line;
+  });
+
+  return lines.join("\n");
+}
+
 export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
   const list = tools.map((t) => `- ${t.name}: ${t.desc} (example input: ${t.example})`).join("\n");
   return `You are a ReAct agent that solves tasks by reasoning and using tools.${goal ? `\nYour goal / role: ${goal}` : ""}
@@ -239,6 +259,12 @@ When you have enough information, instead output:
 
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
+
+Formatting rules for Final Answer:
+- Output clean line-by-line plain text ready to copy-paste directly.
+- Use // at the start of section headers, command lines, or step labels (e.g. // Summary, // Command, // Step 1).
+- Do NOT use markdown symbols like *, #, $, &, or bold markdown markup.
+- Keep output clear, clean, and line-exact.
 
 Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
 }
