@@ -1259,7 +1259,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     try {
       const r = await fetch("/api/projects?lab=rag");
       const j = await r.json();
-      const list = (j.projects || []).filter((p: any) => p.published);
+      const list = (j.projects || []).filter((p: { published?: boolean }) => p.published);
       setDeployedRags(list);
     } catch {
       setDeployedRags([]);
@@ -1280,7 +1280,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       .then((r) => (r.ok ? r.json() : { servers: [] }))
       .then((j) => {
         const servers = j.servers || [];
-        const enabledServers = servers.filter((s: any) => s.enabled);
+        const enabledServers = servers.filter((s: { name: string; enabled?: boolean }) => s.enabled);
         const catalogMap: Record<string, { icon: string; label: string; example: string }> = {
           database: { icon: "🐘", label: "Database", example: "select * from users limit 5" },
           github: { icon: "🐙", label: "GitHub", example: '{"tool":"search_repositories","args":{"query":"nextjs"}}' },
@@ -1297,7 +1297,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
         };
         const newMcpMeta: Record<string, { icon: string; label: string }> = {};
         const newTools: AgentTool[] = [];
-        enabledServers.forEach((s: any) => {
+        enabledServers.forEach((s: { name: string; enabled?: boolean }) => {
           if (AGENT_TOOLS.some((t) => t.id === s.name)) return;
           const meta = catalogMap[s.name] || { icon: "🔌", label: s.name, example: '{"tool":"some_tool","args":{}}' };
           newMcpMeta[s.name] = { icon: meta.icon, label: meta.label };
@@ -2197,7 +2197,7 @@ if __name__ == "__main__":
                       </select>
                     ) : (
                       <div className="note" style={{ color: "var(--warn)" }}>
-                        No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click "Deploy" first!
+                        No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click &quot;Deploy&quot; first!
                       </div>
                     )}
                   </div>
@@ -2477,7 +2477,7 @@ if __name__ == "__main__":
                     </select>
                   ) : (
                     <div className="note" style={{ color: "var(--warn)" }}>
-                      No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click "Deploy" first!
+                      No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click &quot;Deploy&quot; first!
                     </div>
                   )}
                 </>

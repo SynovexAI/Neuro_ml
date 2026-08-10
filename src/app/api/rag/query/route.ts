@@ -4,7 +4,7 @@ import { db } from "@/lib/db";
 import { projects } from "@/lib/db/schema";
 import { getSessionUser } from "@/lib/auth";
 import { getActiveProvider, getProviderById } from "@/lib/providers";
-import { chunkBy, buildIndex, retrieve, retrieveDense } from "@/lib/ragUtils";
+import { chunkBy, buildIndex, retrieve, retrieveDense, type Strategy, type Metric } from "@/lib/ragUtils";
 import { embedTexts } from "@/lib/kb";
 
 export const runtime = "nodejs";
@@ -26,7 +26,18 @@ export async function POST(req: Request) {
     .where(and(eq(projects.id, projectId), eq(projects.userId, user.id)));
   if (!project || project.lab !== "rag") return NextResponse.json({ error: "RAG project not found" }, { status: 404 });
 
-  const c = project.config as any;
+  const c = project.config as {
+    docs?: { text?: string }[];
+    size?: number;
+    overlap?: number;
+    strategy?: Strategy;
+    metric?: Metric;
+    topK?: number;
+    providerId?: string;
+    model?: string;
+    embedMode?: string;
+    embModel?: string;
+  };
   if (!c || !Array.isArray(c.docs) || !c.docs.length) {
     return NextResponse.json({ error: "RAG model has no documents" }, { status: 400 });
   }
