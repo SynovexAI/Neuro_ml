@@ -1,5 +1,6 @@
 "use client";
 import { useMemo } from "react";
+import A2UI, { parseA2UI, type UINode } from "@/components/A2UI";
 
 // Adaptive renderer for agent / tool output — used everywhere a tool or agent
 // result is shown so every result renders consistently and readably:
@@ -10,6 +11,7 @@ import { useMemo } from "react";
 //                                 **bold**, *italic*, `code`, [links](url)
 
 type Block =
+  | { kind: "ui"; spec: UINode[] }                              // explicit ```ui structured components (A2UI)
   | { kind: "table"; header: string[]; rows: string[][] }
   | { kind: "kv"; items: { label: string; value: string }[] }   // "label: value" list → 2-col table
   | { kind: "chart"; items: { label: string; value: number }[] } // ONLY from an explicit ```chart block
@@ -35,6 +37,10 @@ function parse(text: string): Block[] {
       const body: string[] = [];
       while (i < lines.length && !fenceRe.test(lines[i])) { body.push(lines[i]); i++; }
       i++; // closing fence
+      if (lang === "ui" || lang === "a2ui") {
+        const spec = parseA2UI(body.join("\n"));
+        if (spec) { blocks.push({ kind: "ui", spec }); continue; }
+      }
       if (lang === "chart") {
         try {
           const arr = JSON.parse(body.join("\n"));
@@ -142,6 +148,7 @@ export default function AgentOutput({ text }: { text: string }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 13 }}>
       {blocks.map((b, bi) => {
+        if (b.kind === "ui") return <A2UI key={bi} spec={b.spec} />;
         if (b.kind === "code") return (
           <pre key={bi} style={{ margin: 0, fontFamily: "var(--mono)", fontSize: 12, lineHeight: 1.55, background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px", overflowX: "auto", color: "var(--text)" }}>{b.code}</pre>
         );

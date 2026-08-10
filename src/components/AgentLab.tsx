@@ -1241,7 +1241,8 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [goal, setGoal] = useState("You are a helpful support agent. Use the connected tools when you need fresh facts, and cite what you use.");
   const [temperature, setTemperature] = useState(0.4);
   const [maxTokens, setMaxTokens] = useState(600);
-  const [maxIters, setMaxIters] = useState(10);
+  const [maxIters, setMaxIters] = useState(20);
+  const [a2ui, setA2ui] = useState(false); // A2UI: let the agent/tools emit structured ```ui components
   const [enabledTools, setEnabledTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [placedTools, setPlacedTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [knowledgeText, setKnowledgeText] = useState("Returns policy: damaged items may be returned within 30 days of delivery for a full refund. Shipping is free on orders over $50, otherwise a flat $6 fee applies. Gift cards are non-refundable.");
@@ -1679,7 +1680,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       if (react) {
         if (cfg.goal) setGoal(String(cfg.goal));
         if (Array.isArray(cfg.tools)) { const picked = new Set<string>(cfg.tools); setEnabledTools(picked); setPlacedTools(new Set(picked)); }
-        if (cfg.maxIters) setMaxIters(Math.max(1, Math.min(10, Number(cfg.maxIters) || 6)));
+        if (cfg.maxIters) setMaxIters(Math.max(1, Math.min(20, Number(cfg.maxIters) || 6)));
         setBuildMode("visual");
       } else if (Array.isArray(cfg.steps)) setSteps(cfg.steps.slice(0, 6).map((s: { name?: string; instruction?: string }, i: number) => ({ id: `s${i + 1}`, name: String(s.name || `Step ${i + 1}`), instruction: String(s.instruction || "") })));
     } catch (e) { setMsg("Could not generate config: " + (e as Error).message); }
@@ -1693,6 +1694,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     const ctx: ToolCtx = {
       requestApproval: (q) => new Promise<string>((resolve) => setPendingApproval({ q, resolve })),
       selectedRagId: selectedRagId || undefined,
+      a2ui,
     };
     if (enabledTools.has("knowledge")) { const kb = buildKnowledge(knowledgeText); if (kb) { ctx.knowledgeIndex = kb.index as RagIndex; ctx.knowledgeChunks = kb.chunks; } }
     if ((enabledTools.has("db_query") || enabledTools.has("db_schema")) && dbDataText.trim()) {
@@ -1703,7 +1705,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       ctx.dbCustomSchema = dbCustomSchema.trim();
     }
     const tools: AgentTool[] = toolList;
-    const messages: { role: string; content: string }[] = [{ role: "system", content: reactSystemPrompt(tools, goal) }, { role: "user", content: task }];
+    const messages: { role: string; content: string }[] = [{ role: "system", content: reactSystemPrompt(tools, goal, { a2ui }) }, { role: "user", content: task }];
     const push = (t: TraceItem) => setTrace((tr) => [...tr, t]);
     const est = (s: string) => Math.round(s.length / 4);
     let calls = 0, toolsUsed = 0, tokens = 0; const t0 = performance.now();
@@ -2012,7 +2014,7 @@ if __name__ == "__main__":
     if (cfg.provider) { setProviderId(String(cfg.provider)); fetch(`/api/models?providerId=${cfg.provider}`).then((r) => r.json()).then((j) => setModelList(j.models || [])).catch(() => {}); }
     if (cfg.model) setModel(String(cfg.model));
     if (typeof cfg.temperature === "number") setTemperature(cfg.temperature);
-    if (cfg.maxIterations) setMaxIters(Math.max(1, Math.min(10, Number(cfg.maxIterations))));
+    if (cfg.maxIterations) setMaxIters(Math.max(1, Math.min(20, Number(cfg.maxIterations))));
     if (cfg.selectedRagId) setSelectedRagId(cfg.selectedRagId);
     if (Array.isArray(cfg.tools)) { const s = new Set<string>(cfg.tools); setEnabledTools(s); setPlacedTools(new Set(s)); }
     if (cfg.knowledge) setKnowledgeText(String(cfg.knowledge));
@@ -2160,7 +2162,20 @@ if __name__ == "__main__":
               <div className="card-b" style={{ maxHeight: CANVAS_H, overflow: "auto" }}>
                 {!selNode && <div className="note">Click a node to configure it.</div>}
                 {selNode?.type === "trigger" && <div className="note">This is where the user&apos;s task enters the agent. You&apos;ll type the actual task on the Run step.</div>}
-                {selNode?.type === "output" && <div className="note">The agent&apos;s Final Answer is returned here after the reasoning loop finishes.</div>}
+                {selNode?.type === "output" && <>
+                  <div className="note" style={{ marginBottom: 12 }}>The agent&apos;s Final Answer is returned here after the reasoning loop finishes.</div>
+                  <div className="insp-field">
+                    <label className="row" style={{ gap: 8, alignItems: "center", cursor: "pointer" }}>
+                      <input type="checkbox" checked={a2ui} onChange={(e) => setA2ui(e.target.checked)} />
+                      <span><b style={{ fontSize: 12.5 }}>✨ Rich UI (A2UI)</b></span>
+                    </label>
+                    <div className="note" style={{ marginTop: 6, lineHeight: 1.5 }}>
+                      {a2ui
+                        ? "On — the agent and tools may return structured components (tables, stats, charts, callouts) rendered as real UI. Tables always render; charts only when you ask to chart/plot."
+                        : "Off — answers render as clean text (tables/lists still auto-format). Turn on to let the agent emit structured UI blocks."}
+                    </div>
+                  </div>
+                </>}
                 {selNode?.type === "agent" && (<>
                   <div className="insp-field"><div className="k">Agent name</div><input type="text" value={name} onChange={(e) => setName(e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Description</div><input type="text" value={description} onChange={(e) => setDescription(e.target.value)} /></div>
@@ -2482,7 +2497,7 @@ if __name__ == "__main__":
                 <div><label className="fld">Provider</label><select value={providerId} onChange={(e) => loadModels(e.target.value)}>{providers.length ? providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>) : <option>none</option>}</select></div>
                 <div><label className="fld">Model</label>{modelList.length ? <select value={model} onChange={(e) => setModel(e.target.value)}>{modelList.map((m) => <option key={m}>{m}</option>)}</select> : <input type="text" value={model} onChange={(e) => setModel(e.target.value)} />}</div>
               </div>
-              <div className="split col-2e" style={{ marginTop: 12 }}><div><label className="fld">Temperature · {temperature}</label><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div><div><label className="fld">Max reasoning steps · {maxIters}</label><input type="range" min={1} max={10} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div></div>
+              <div className="split col-2e" style={{ marginTop: 12 }}><div><label className="fld">Temperature · {temperature}</label><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div><div><label className="fld">Max reasoning steps · {maxIters}</label><input type="range" min={1} max={20} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div></div>
               <label className="fld" style={{ marginTop: 12 }}>Tools</label>
               <div className="checklist">{availableTools.map((t) => <span key={t.id} className={`chk ${enabledTools.has(t.id) ? "on" : ""}`} onClick={() => toggleManual(t.id)} title={t.desc}>{t.name}</span>)}</div>
               {enabledTools.has("knowledge") && (<>
@@ -2569,21 +2584,37 @@ if __name__ == "__main__":
             </div>
           )}
           {metrics && !running && <div className="ag-metrics"><span className="m"><b>{metrics.calls}</b> LLM calls</span><span className="m"><b>{metrics.tools}</b> tool calls</span><span className="m"><b>{(metrics.ms / 1000).toFixed(1)}s</b> latency</span><span className="m"><b>~{metrics.tokens >= 1000 ? (metrics.tokens / 1000).toFixed(1) + "k" : metrics.tokens}</b> tokens</span></div>}
-          <div className="split col-2">
+          <div className="split col-2" style={{ alignItems: "stretch" }}>
             <div className="card"><div className="card-h"><span className="t">Task</span></div>
               <div className="card-b">
                 <label className="fld">What should {name} do?</label><textarea rows={3} value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!running && hasProvider && task.trim()) runReact(); } }} placeholder="Type your prompt and press Enter to run…" />
                 <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={runReact} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run agent"}</button><span className="note">{toolList.length} tools · {model || providerLabel} · max {maxIters} steps</span></div>
-                {finalOut && <><label className="fld" style={{ marginTop: 16 }}>Final answer</label><div className="out" style={{ position: "relative" }}><CopyBtn text={formatFinalAnswer(finalOut)} /><div style={{ paddingRight: 36 }}><AgentOutput text={formatFinalAnswer(finalOut)} /></div></div></>}
               </div>
             </div>
             <div className="card"><div className="card-h"><span className="t">Reasoning trace</span><span className="mono r">{trace.length} steps</span></div>
               <div className="card-b" ref={scrollRef} style={{ maxHeight: 460, overflow: "auto" }}>
                 {trace.length === 0 && <div className="note">Run the agent to watch the Thought → Action → Observation loop.</div>}
-                {trace.map((t, i) => (<div key={i} className={`ag-step ${t.kind} ${t.state}`}><div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div><div className="ag-t">{t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</> : (t.kind === "observation" || t.kind === "final") ? <AgentOutput text={t.text} /> : t.text}</div></div>))}
+                {trace.map((t, i) => (<div key={i} className={`ag-step ${t.kind} ${t.state}`}><div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div><div className="ag-t">
+                  {t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</>
+                    : t.kind === "observation" ? <div style={{ maxHeight: 260, overflow: "auto" }}><AgentOutput text={t.text} /></div>
+                    : t.kind === "final" ? <div className="note" style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{t.text.split("\n").filter((l) => l.trim())[0]?.slice(0, 140) || "Done."}{t.text.length > 140 ? " …" : ""}<span style={{ color: "var(--accent)" }}> — full answer in the Final answer panel →</span></div>
+                    : t.text}
+                </div></div>))}
               </div>
             </div>
           </div>
+          {finalOut && (
+            <div className="card" style={{ marginTop: 16, borderColor: "color-mix(in srgb, var(--good) 35%, var(--border))" }}>
+              <div className="card-h" style={{ background: "color-mix(in srgb, var(--good) 8%, transparent)", borderBottom: "1px solid var(--border)" }}>
+                <span className="t" style={{ color: "var(--good)" }}>✅ Final answer</span>
+                <span className="r"><span className="note">{model || providerLabel}</span></span>
+              </div>
+              <div className="card-b" style={{ position: "relative", maxHeight: 520, overflow: "auto" }}>
+                <CopyBtn text={formatFinalAnswer(finalOut)} />
+                <div style={{ paddingRight: 40 }}><AgentOutput text={finalOut} /></div>
+              </div>
+            </div>
+          )}
         </>)}
         {agentType === "workflow" && (<>
           <div className="card" style={{ marginBottom: 16 }}>
@@ -2594,7 +2625,7 @@ if __name__ == "__main__":
             <div className="card-b" ref={scrollRef} style={{ maxHeight: 560, overflow: "auto" }}>
               <label className="fld">Input</label><textarea rows={2} value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!running && hasProvider && task.trim()) runWorkflow(); } }} placeholder="Type your prompt and press Enter to run…" />
               <div className="row" style={{ margin: "12px 0" }}><button className="btn" onClick={runWorkflow} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run workflow"}</button></div>
-              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8, position: "relative" }}><CopyBtn text={formatFinalAnswer(o.text)} /><div style={{ paddingRight: 36 }}><AgentOutput text={formatFinalAnswer(o.text)} /></div></div>}</div>))}
+              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8, position: "relative" }}><CopyBtn text={formatFinalAnswer(o.text)} /><div style={{ paddingRight: 36 }}><AgentOutput text={o.text} /></div></div>}</div>))}
             </div>
           </div>
         </>)}
