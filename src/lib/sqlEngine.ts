@@ -1,4 +1,4 @@
-import type { Table, Cell, Rec } from "./etlUtils";
+import { pipelineToSql, type EtlOp, type Table, type Cell, type Rec } from "./etlUtils";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -46,4 +46,10 @@ export async function runSql(sql: string, raw: Table, b?: Table | null, extra?: 
   out.forEach((r) => Object.keys(r).forEach((k) => { if (!cols.includes(k)) cols.push(k); }));
   const rows: Rec[] = out.map((r) => { const o: Rec = {}; cols.forEach((c) => (o[c] = cell(r[c]))); return o; });
   return { cols, rows };
+}
+
+export async function runPushdownPipeline(raw: Table, ops: EtlOp[], b?: Table | null): Promise<{ sql: string; result: Table }> {
+  const sql = pipelineToSql("raw", ops);
+  const result = await runSql(sql, raw, b);
+  return { sql, result };
 }

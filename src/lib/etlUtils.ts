@@ -135,7 +135,8 @@ export type OpType =
   | "filter" | "select" | "derive" | "aggregate" | "sort" | "dedupe" | "clean"
   | "rename" | "limit" | "sample" | "map" | "fillna" | "bucket"
   | "join" | "union" | "pivot" | "unpivot" | "window" | "regex" | "dateparse"
-  | "lookup" | "merge" | "append";
+  | "lookup" | "merge" | "append"
+  | "scd2" | "fuzzydedupe" | "quality";
 export interface EtlOp {
   id: string; type: OpType;
   col?: string; op?: string; value?: string;                 // filter / limit / sample / fillna / bucket / regex
@@ -146,6 +147,9 @@ export interface EtlOp {
   mode?: string;                                              // clean / union (all|distinct)
   fn?: string;                                                // map / window / dateparse
   joinType?: string; rightKey?: string;                       // join
+  businessKey?: string; trackCols?: string[];                 // scd2
+  threshold?: number;                                         // fuzzydedupe (0.0 to 1.0 similarity)
+  rule?: string; qualityCol?: string;                         // quality / reject
 }
 export const OP_META: Record<OpType, { label: string; icon: string; hint: string; needsB?: boolean }> = {
   filter: { label: "Filter", icon: "🔻", hint: "keep only rows matching a condition (WHERE)" },
@@ -171,6 +175,9 @@ export const OP_META: Record<OpType, { label: string; icon: string; hint: string
   window: { label: "Window", icon: "🪟", hint: "running total, rank, row number, lag or lead" },
   regex: { label: "Regex extract", icon: "🔍", hint: "extract the first match/group of a pattern into a new column" },
   dateparse: { label: "Parse date", icon: "📅", hint: "pull year/month/day/weekday or days-since from a date column" },
+  scd2: { label: "SCD Type 2", icon: "🕰", hint: "track historical changes with effective dates and current flag" },
+  fuzzydedupe: { label: "Fuzzy Dedupe", icon: "🔍", hint: "deduplicate near-matching strings using Levenshtein distance" },
+  quality: { label: "Quality Check", icon: "🛡", hint: "flag invalid rows failing quality rules" },
 };
 
 const numify = (v: Cell): number => {
@@ -193,6 +200,29 @@ function compare(a: Cell, op: string, raw: string): boolean {
   if (numeric) { if (op === ">") return an > bn; if (op === "<") return an < bn; if (op === ">=") return an >= bn; if (op === "<=") return an <= bn; }
   const as = String(a ?? ""); if (op === ">") return as > raw; if (op === "<") return as < raw; if (op === ">=") return as >= raw; if (op === "<=") return as <= raw;
   return false;
+}
+
+export function levenshteinDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1].toLowerCase() === b[j - 1].toLowerCase() ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+export function stringSimilarity(a: string, b: string): number {
+  if (!a && !b) return 1.0;
+  if (!a || !b) return 0.0;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1.0;
+  const dist = levenshteinDistance(a, b);
+  return 1 - dist / maxLen;
 }
 
 export interface OpCtx { secondary?: Table | null; }
@@ -293,16 +323,12 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols, rows: out };
     }
     case "lookup": {
-        // Lookup is essentially a left join – bring in matching columns without duplicating primary rows.
         const lookupOp: EtlOp = { ...op, type: "join", joinType: "left" };
         return applyOp(t, lookupOp, ctx);
       }
       case "merge": {
-        // Merge updates primary rows with fields from secondary based on a key.
-        // Perform a left join first.
         const mergeOp: EtlOp = { ...op, type: "join", joinType: "left" };
         const joined = applyOp(t, mergeOp, ctx);
-        // Overwrite primary columns with secondary values where they share the same name.
         const bPrefix = "b_";
         const mergedCols = new Set<string>();
         const resultRows = joined.rows.map((r) => {
@@ -323,7 +349,6 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
         return { cols: joined.cols.filter((c) => !mergedCols.has(c)), rows: resultRows };
       }
       case "append": {
-        // Append is equivalent to union (stack rows from secondary).
         const appendOp: EtlOp = { ...op, type: "union" };
         return applyOp(t, appendOp, ctx);
       }
@@ -351,7 +376,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
     }
     case "window": {
       const part = op.groupBy && op.groupBy !== "(none)" ? op.groupBy : ""; const col = op.col || t.cols[0]; const fn = op.fn || "running_sum"; const name = op.name || fn;
-      const partsMap = new Map<string, number[]>(); // partition key → row indices
+      const partsMap = new Map<string, number[]>();
       rows.forEach((_, i) => { const k = part ? String(rows[i][part] ?? "∅") : "_"; if (!partsMap.has(k)) partsMap.set(k, []); partsMap.get(k)!.push(i); });
       const outVal = new Array<Cell>(rows.length).fill(null);
       for (const idxs of partsMap.values()) {
@@ -384,6 +409,65 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
         return { ...r, [name]: v };
       }) };
     }
+    case "scd2": {
+      const bKey = op.businessKey || op.col || t.cols[0];
+      const cols = Array.from(new Set([...t.cols, "effective_start", "effective_end", "is_current"]));
+      const groups = new Map<string, Rec[]>();
+      rows.forEach((r) => {
+        const k = String(r[bKey] ?? "∅");
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k)!.push(r);
+      });
+      const outRows: Rec[] = [];
+      const baseYear = 2024;
+      for (const [, groupRows] of groups.entries()) {
+        groupRows.forEach((r, idx) => {
+          const startYear = baseYear + idx;
+          const isLast = idx === groupRows.length - 1;
+          outRows.push({
+            ...r,
+            effective_start: `${startYear}-01-01`,
+            effective_end: isLast ? null : `${startYear + 1}-01-01`,
+            is_current: isLast ? 1 : 0,
+          });
+        });
+      }
+      return { cols, rows: outRows };
+    }
+    case "fuzzydedupe": {
+      const col = op.col || t.cols[0];
+      const thresh = op.threshold ?? 0.8;
+      const keepRows: Rec[] = [];
+      for (const r of rows) {
+        const val = String(r[col] ?? "");
+        const isFuzzyDuplicate = keepRows.some((kRow) => {
+          const kVal = String(kRow[col] ?? "");
+          return stringSimilarity(val, kVal) >= thresh;
+        });
+        if (!isFuzzyDuplicate) {
+          keepRows.push(r);
+        }
+      }
+      return { cols: t.cols, rows: keepRows };
+    }
+    case "quality": {
+      const col = op.qualityCol || op.col || t.cols[0];
+      const rule = op.rule || "not_null";
+      const qCol = op.name || "_quality_status";
+      const cols = Array.from(new Set([...t.cols, qCol]));
+      const outRows = rows.map((r) => {
+        const val = r[col];
+        let isValid = true;
+        if (rule === "not_null") isValid = val != null && val !== "";
+        else if (rule === "positive") isValid = numify(val) > 0;
+        else if (rule === "numeric") isValid = !isNaN(numify(val));
+        return {
+          ...r,
+          [qCol]: isValid ? "VALID" : "REJECT",
+        };
+      });
+      return { cols, rows: outRows };
+    }
   }
 }
 
@@ -392,6 +476,55 @@ export function runPipeline(src: Table, ops: EtlOp[], ctx?: OpCtx): { stages: { 
   let cur = src;
   for (const op of ops) { cur = applyOp(cur, op, ctx); stages.push({ op, table: cur }); }
   return { stages, final: cur };
+}
+
+export function pipelineToSql(srcTable: string, ops: EtlOp[]): string {
+  let selectClause = "*";
+  const fromClause = srcTable;
+  const whereClauses: string[] = [];
+  const groupClauses: string[] = [];
+  let orderClause = "";
+  let limitClause = "";
+
+  for (const op of ops) {
+    if (op.type === "filter") {
+      const col = op.col || "col";
+      const oper = op.op || "==";
+      const val = op.value ?? "";
+      const sqlOp = oper === "==" ? "=" : oper === "contains" ? "LIKE" : oper;
+      const sqlVal = oper === "contains" ? `'${val}'` : isNaN(Number(val)) ? `'${val}'` : val;
+      whereClauses.push(`${col} ${sqlOp} ${sqlVal}`);
+    } else if (op.type === "select") {
+      if (op.cols && op.cols.length) selectClause = op.cols.join(", ");
+    } else if (op.type === "sort") {
+      const col = op.col || "col";
+      const dir = op.dir === "desc" ? "DESC" : "ASC";
+      orderClause = `ORDER BY ${col} ${dir}`;
+    } else if (op.type === "limit") {
+      limitClause = `LIMIT ${op.value || 10}`;
+    } else if (op.type === "aggregate") {
+      const gb = op.groupBy || "id";
+      const agg = (op.agg || "COUNT").toUpperCase();
+      const ac = op.aggCol || "*";
+      selectClause = `${gb}, ${agg}(${ac}) AS ${op.agg === "count" ? "count" : `${op.agg}_${ac}`}`;
+      groupClauses.push(gb);
+    } else if (op.type === "quality") {
+      const col = op.qualityCol || op.col || "col";
+      const rule = op.rule || "not_null";
+      if (rule === "not_null") whereClauses.push(`${col} IS NOT NULL`);
+      else if (rule === "positive") whereClauses.push(`${col} > 0`);
+    } else if (op.type === "scd2") {
+      const bKey = op.businessKey || op.col || "id";
+      selectClause += `, ROW_NUMBER() OVER (PARTITION BY ${bKey} ORDER BY 1) AS version`;
+    }
+  }
+
+  let sql = `SELECT ${selectClause} FROM ${fromClause}`;
+  if (whereClauses.length) sql += `\nWHERE ${whereClauses.join(" AND ")}`;
+  if (groupClauses.length) sql += `\nGROUP BY ${groupClauses.join(", ")}`;
+  if (orderClause) sql += `\n${orderClause}`;
+  if (limitClause) sql += `\n${limitClause}`;
+  return sql;
 }
 
 // ── Data-quality expectations (Great-Expectations-style) with remediation ──

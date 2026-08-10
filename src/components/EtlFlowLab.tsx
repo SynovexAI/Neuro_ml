@@ -184,6 +184,9 @@ function makeOp(type: OpType, cols: string[], rows: Record<string, unknown>[], b
   else if (type === "window") a(base, { groupBy: "(none)", col: numCol, fn: "running_sum", name: "running_sum" });
   else if (type === "regex") a(base, { col: cols[0], value: "(\\d+)", name: (cols[0] || "col") + "_match" });
   else if (type === "dateparse") a(base, { col: cols[0], fn: "year", name: (cols[0] || "col") + "_year" });
+  else if (type === "scd2") a(base, { businessKey: cols[0] });
+  else if (type === "fuzzydedupe") a(base, { col: cols[0], threshold: 0.8 });
+  else if (type === "quality") a(base, { qualityCol: cols[0], rule: "not_null", name: "_quality_status" });
   return base;
 }
 function opSummary(o: EtlOp): string {
@@ -260,6 +263,38 @@ function FlowNode({ id, data, selected }: NodeProps<FNode>) {
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
+      {/* Row count badge (Extract -> Transform -> Load) */}
+      {data.count != null && (
+        <div
+          className="node-count-badge"
+          title={`${data.count.toLocaleString()} rows in node output`}
+          style={{
+            position: "absolute",
+            top: -9,
+            right: hover ? 18 : -6,
+            minWidth: 20,
+            height: 19,
+            padding: "0 6px",
+            borderRadius: 10,
+            background: done ? "rgba(16,185,129,0.25)" : "var(--surface)",
+            border: `1px solid ${done ? "#10b981" : "var(--border-strong)"}`,
+            color: done ? "#3ecf7f" : "var(--text)",
+            fontSize: 10,
+            fontFamily: "var(--mono)",
+            fontWeight: 700,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9,
+            boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            transition: "all 0.15s cubic-bezier(0.4, 0, 0.2, 1)",
+            pointerEvents: "none",
+          }}
+        >
+          {data.count.toLocaleString()}
+        </div>
+      )}
+
       {data.kind !== "source" && <Handle type="target" position={Position.Left} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       {data.kind !== "analytics" && <Handle type="source" position={Position.Right} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
@@ -380,11 +415,22 @@ function Inner() {
   // counts per node id, for the badge
   const counts = useMemo(() => {
     const m: Record<string, number> = {};
-    sources.forEach((s) => { m[s.id] = s.data.table!.rows.length; });
-    opNodes.forEach((n, i) => { m[n.id] = pipe?.stages[i + 1]?.table.rows.length ?? 0; });
-    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => { m[n.id] = n.data.table?.rows.length ?? finalTable?.rows.length ?? 0; });
+    sources.forEach((s) => { if (s.data.table) m[s.id] = s.data.table.rows.length; });
+    opNodes.forEach((n, i) => { if (pipe?.stages[i + 1]?.table) m[n.id] = pipe.stages[i + 1].table.rows.length; });
+    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => {
+      if (n.data.table) {
+        m[n.id] = n.data.table.rows.length;
+      } else {
+        const inEdge = edges.find((e) => e.target === n.id);
+        if (inEdge && m[inEdge.source] != null) {
+          m[n.id] = m[inEdge.source];
+        } else if (finalTable) {
+          m[n.id] = finalTable.rows.length;
+        }
+      }
+    });
     return m;
-  }, [sources, opNodes, pipe, nodes, finalTable]);
+  }, [sources, opNodes, pipe, nodes, finalTable, edges]);
 
   const displayNodes = useMemo(() => nodes.map((n) => ({ ...n, data: { ...n.data, count: counts[n.id] ?? null, run: runStatus[n.id] } })), [nodes, counts, runStatus]);
   const sel = nodes.find((n) => n.id === selId) || null;
