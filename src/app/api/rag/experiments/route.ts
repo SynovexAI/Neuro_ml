@@ -43,6 +43,9 @@ export async function POST(req: Request) {
     embedMode: str(cfg.embedMode, 16) || "tfidf",
     embModel: str(cfg.embModel, 120),
     kgHops: num(cfg.kgHops, 10),
+    alpha: Math.max(0, Math.min(1, Number(cfg.alpha) || 0.5)),
+    chunkStrategy: str(cfg.chunkStrategy, 16) || "fixed",
+    queryMode: str(cfg.queryMode, 16) || "none",
   };
   const m = b.metrics && typeof b.metrics === "object" ? b.metrics : null;
   const metrics = m ? { p: Number(m.p) || 0, r: Number(m.r) || 0, mrr: Number(m.mrr) || 0, ndcg: Number(m.ndcg) || 0 } : null;
