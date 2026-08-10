@@ -2,21 +2,23 @@
 
 import { useEffect, useState } from "react";
 
-// Light/dark toggle. First visit follows the OS (via the CSS media query);
-// once toggled, the explicit choice is stored and wins.
+type ThemeMode = "light" | "dark" | "cosmic";
+
 export default function ThemeToggle() {
-  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [theme, setTheme] = useState<ThemeMode>("light");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const stored = localStorage.getItem("awb_theme");
+    const stored = localStorage.getItem("awb_theme") as ThemeMode | null;
     const sys = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    setTheme(stored === "light" || stored === "dark" ? stored : sys);
+    const next = stored === "light" || stored === "dark" || stored === "cosmic" ? stored : sys;
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
     setReady(true);
   }, []);
 
   function toggle() {
-    const next = theme === "dark" ? "light" : "dark";
+    const next: ThemeMode = theme === "light" ? "dark" : theme === "dark" ? "cosmic" : "light";
     setTheme(next);
     document.documentElement.setAttribute("data-theme", next);
     localStorage.setItem("awb_theme", next);
@@ -24,8 +26,8 @@ export default function ThemeToggle() {
 
   if (!ready) return <span className="iconbtn" aria-hidden style={{ opacity: 0 }} />;
   return (
-    <button className="iconbtn" onClick={toggle} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} aria-label="Toggle color theme">
-      {theme === "dark" ? "☀" : "☾"}
+    <button className="iconbtn" onClick={toggle} title={`Switch to ${theme === "light" ? "dark" : theme === "dark" ? "cosmic" : "light"} mode`} aria-label="Toggle color theme">
+      {theme === "light" ? "☾" : theme === "dark" ? "✦" : "☀"}
     </button>
   );
 }

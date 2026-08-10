@@ -76,7 +76,14 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
 
   const [focus, setFocus] = useState(false);
   const [menu, setMenu] = useState(false);
-  useEffect(() => { setFocus(localStorage.getItem("awb_focus") === "1"); }, []);
+
+  useEffect(() => {
+    setFocus(localStorage.getItem("awb_focus") === "1");
+    
+    // Cursor glow tracking removed for a cleaner look
+
+  }, []);
+
   const toggleFocus = () => setFocus((f) => { const n = !f; localStorage.setItem("awb_focus", n ? "1" : "0"); return n; });
 
   const zones = ZONES.filter((z) => !z.adminOnly || user.role === "admin");
@@ -84,8 +91,16 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
 
   return (
     <div className={`app${focus ? " focus" : ""}`}>
+
       <aside className="side">
-        <div className="brand"><div className="logo">◆</div><div><b>AI Workbench</b><small>build · not read</small></div></div>
+        <div className="brand">
+          <div className="logo">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2L22 12L12 22L2 12L12 2Z" fill="currentColor"/>
+            </svg>
+          </div>
+          <div><b>AI Workbench</b><small>BUILD &bull; NOT READ</small></div>
+        </div>
 
         <div className="zone-switch">
           <button className="zone-btn" onClick={() => setMenu((m) => !m)} aria-expanded={menu}>
@@ -119,9 +134,12 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
       <div className="main">
         <header className="top">
           <button className="iconbtn" onClick={toggleFocus} title={focus ? "Show sidebar" : "Focus mode — full-screen view"} aria-label="Toggle focus mode">{focus ? "☰" : "⛶"}</button>
-          <h1>{title}</h1>
+          <div>
+            <p className="eyebrow">Futuristic AI lab</p>
+            <h1>{title}</h1>
+          </div>
           <div className="spacer" />
-          <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
+          <span className="badge accent">{zone.label}</span>
           <ThemeToggle />
         </header>
         <div className="work"><TrackPageView /><AddKeyBanner />{user.role === "admin" && <StorageAlertBanner />}{children}</div>

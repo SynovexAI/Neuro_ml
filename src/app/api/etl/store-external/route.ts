@@ -5,6 +5,7 @@ import { getSessionUser } from "@/lib/auth";
 import { resolvesToPrivate } from "@/lib/net";
 import { rateLimitDb } from "@/lib/ratelimit";
 import { audit } from "@/lib/monitor";
+import { MongoClient } from "mongodb";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,12 +36,13 @@ export async function POST(req: Request) {
   const keyCol = String(b.keyCol || "");
   const typeOverrides: Record<string, string> = b.types && typeof b.types === "object" ? b.types : {};
 
-  const isPg = /^postgres(ql)?:\/\//i.test(url);
+  const isPg = /^(postgres(ql)?|redshift):\/\//i.test(url);
   const isMy = /^mysql:\/\//i.test(url);
   const isLibsql = /^libsql:\/\//i.test(url) || /\.turso\.io/i.test(url);
-  if (!isPg && !isMy && !isLibsql) return NextResponse.json({ error: "Provide a mysql://, postgres://, or libsql:// (Turso) connection URL." }, { status: 400 });
+  const isMongo = /^mongodb(\+srv)?:\/\//i.test(url);
+  if (!isPg && !isMy && !isLibsql && !isMongo) return NextResponse.json({ error: "Provide a valid mysql://, postgres://, redshift://, libsql:// (Turso), or mongodb:// connection URL." }, { status: 400 });
   if (!ident(table)) return NextResponse.json({ error: "Table name must be letters/digits/underscore and start with a letter." }, { status: 400 });
-  if (!cols.length || !cols.every(ident)) return NextResponse.json({ error: "Column names must be valid SQL identifiers (letters/digits/underscore)." }, { status: 400 });
+  if (!cols.length || (!isMongo && !cols.every(ident))) return NextResponse.json({ error: "Column names must be valid SQL identifiers." }, { status: 400 });
   if (mode === "upsert" && (!keyCol || !cols.includes(keyCol))) return NextResponse.json({ error: "Upsert needs a key column that exists in the output." }, { status: 400 });
   if (!rows.length) return NextResponse.json({ error: "Nothing to store — the output is empty." }, { status: 400 });
   if (rows.length > MAX_ROWS) return NextResponse.json({ error: `Too many rows (${rows.length}). Cap is ${MAX_ROWS} — add a Limit first.` }, { status: 413 });
@@ -90,6 +92,27 @@ export async function POST(req: Request) {
 
     const u = new URL(url);
     if (await resolvesToPrivate(u.hostname)) return NextResponse.json({ error: "That host is blocked (internal / private address)." }, { status: 400 });
+
+    if (isMongo) {
+      const dbName = String(b.db || "").trim();
+      if (!dbName) return NextResponse.json({ error: "Database name is required for MongoDB." }, { status: 400 });
+      const client = new MongoClient(url, { serverSelectionTimeoutMS: 5000 });
+      try {
+        await client.connect();
+        const db = client.db(dbName);
+        const coll = db.collection(table);
+        if (mode === "upsert") {
+          const bulkOps = rows.map((r) => {
+            const filter: Record<string, unknown> = {}; filter[keyCol] = r[keyCol];
+            return { updateOne: { filter, update: { $set: r }, upsert: true } };
+          });
+          await coll.bulkWrite(bulkOps);
+        } else {
+          await coll.insertMany(rows as Record<string, unknown>[]);
+        }
+        return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: false });
+      } finally { await client.close(); }
+    }
 
     // ── Postgres path (double-quoted idents, $n params, ON CONFLICT upsert) ──
     if (isPg) {
