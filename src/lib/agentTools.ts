@@ -162,18 +162,68 @@ async function mcpPost(body: object): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
-// Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
-// JSON {"tool":"…","args":{…}} calls one.
+// In-memory cache: server → real tool names (populated on first use, avoids re-listing)
+const mcpToolCache: Record<string, string[]> = {};
+
+function fixCommonArgMismatches(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  // Exa web_fetch_exa expects urls[] not url string
+  if ("url" in args && !("urls" in args) && typeof args.url === "string") {
+    const { url, ...rest } = args;
+    return { ...rest, urls: [url] };
+  }
+  return args;
+}
+
+function fuzzyMatchTool(requested: string, available: string[]): string | null {
+  // Exact match first
+  if (available.includes(requested)) return requested;
+  const req = requested.toLowerCase();
+  // Contains check (e.g. "search" → "web_search_exa")
+  const contains = available.find((t) => t.toLowerCase().includes(req) || req.includes(t.toLowerCase().replace(/^.*_/, "")));
+  if (contains) return contains;
+  // Suffix match (e.g. "fetch" → "web_fetch_exa")
+  const suffix = available.find((t) => t.toLowerCase().endsWith(req) || t.toLowerCase().includes("_" + req));
+  return suffix || null;
+}
+
 export async function mcpTool(server: string, input: string): Promise<string> {
   const s = (input || "").trim();
-  if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
+  if (!s || /^list$/i.test(s)) {
+    const result = await mcpPost({ server, action: "list" });
+    // Cache the tool names for future calls
+    const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+    if (names.length) mcpToolCache[server] = names;
+    return result;
+  }
   if (s.startsWith("{")) {
     try {
-      const p = JSON.parse(s) as { tool?: string; args?: unknown };
+      const p = JSON.parse(s) as { tool?: string; args?: Record<string, unknown> };
       if (p.tool === "list" || p.tool === "tools/list") {
-        return mcpPost({ server, action: "list" });
+        const result = await mcpPost({ server, action: "list" });
+        const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+        if (names.length) mcpToolCache[server] = names;
+        return result;
       }
-      return mcpPost({ server, action: "call", tool: p.tool, args: p.args });
+      const args = p.args ? fixCommonArgMismatches(p.tool || "", p.args) : p.args;
+      const result = await mcpPost({ server, action: "call", tool: p.tool, args });
+      // Auto-retry: if tool not found, discover real names and retry with best match
+      if (result.includes("-32602") && result.toLowerCase().includes("not found") && p.tool) {
+        // Fetch and cache tool list if not already cached
+        if (!mcpToolCache[server]) {
+          const listResult = await mcpPost({ server, action: "list" });
+          const names = [...listResult.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+          if (names.length) mcpToolCache[server] = names;
+          else return `${result}\n\nAvailable tools:\n${listResult}`;
+        }
+        const bestMatch = fuzzyMatchTool(p.tool, mcpToolCache[server]);
+        if (bestMatch && bestMatch !== p.tool) {
+          const retryArgs = args ? fixCommonArgMismatches(bestMatch, args) : args;
+          const retryResult = await mcpPost({ server, action: "call", tool: bestMatch, args: retryArgs });
+          return retryResult;
+        }
+        return `${result}\n\nAvailable tools on "${server}": ${mcpToolCache[server].join(", ")}`;
+      }
+      return result;
     }
     catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
   }

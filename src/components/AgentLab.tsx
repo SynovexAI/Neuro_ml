@@ -1240,7 +1240,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [goal, setGoal] = useState("You are a helpful support agent. Use the connected tools when you need fresh facts, and cite what you use.");
   const [temperature, setTemperature] = useState(0.4);
   const [maxTokens, setMaxTokens] = useState(600);
-  const [maxIters, setMaxIters] = useState(6);
+  const [maxIters, setMaxIters] = useState(10);
   const [enabledTools, setEnabledTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [placedTools, setPlacedTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [knowledgeText, setKnowledgeText] = useState("Returns policy: damaged items may be returned within 30 days of delivery for a full refund. Shipping is free on orders over $50, otherwise a flat $6 fee applies. Gift cards are non-refundable.");
@@ -2153,7 +2153,7 @@ if __name__ == "__main__":
                   <div className="insp-field"><div className="k">Agent name</div><input type="text" value={name} onChange={(e) => setName(e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Description</div><input type="text" value={description} onChange={(e) => setDescription(e.target.value)} /></div>
                   <div className="insp-field"><div className="k">System prompt (role & goal)</div><textarea rows={4} value={goal} onChange={(e) => setGoal(e.target.value)} /></div>
-                  <div className="insp-field"><div className="k">Max reasoning steps · {maxIters}</div><input type="range" min={1} max={10} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div>
+                  <div className="insp-field"><div className="k">Max reasoning steps · {maxIters}</div><input type="range" min={1} max={20} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Connected</div><div className="chip-row"><span className="c">{model || providerLabel}</span>{[...enabledTools].map((t) => <span key={t} className="c">{TOOL_META[t]?.label}</span>)}</div></div>
                 </>)}
                 {selNode?.type === "model" && (<>
