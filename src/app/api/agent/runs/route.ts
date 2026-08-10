@@ -7,6 +7,7 @@ import { rateLimitDb } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const num = (v: unknown, cap = 10_000_000) => Math.max(0, Math.min(cap, Math.floor(Number(v) || 0)));
 

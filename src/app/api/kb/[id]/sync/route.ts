@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { knowledgeBases, kbChunks } from "@/lib/db/schema";
+import { knowledgeBases, kbChunks, kbDocs } from "@/lib/db/schema";
 import { getSessionUser, uid } from "@/lib/auth";
 import { getActiveProvider, getProviderById } from "@/lib/providers";
 import { rateLimitDb } from "@/lib/ratelimit";
@@ -10,6 +10,7 @@ import { captureError } from "@/lib/monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_CHUNKS = 1500;
 
@@ -64,6 +65,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         id: uid(), kbId: id, docName: c.docName, idx: (replaceAll ? 0 : baseIdx) + i + j, text: c.text, embedding: c.vec,
       })));
     }
+    // Keep the exact original text (best-effort — table may not exist on older DBs).
+    try { await db.insert(kbDocs).values(docs.map((d) => ({ id: uid(), kbId: id, name: d.name, text: d.text }))); } catch { /* kb_docs missing */ }
     const docCount = (kb.docCount || 0) + docs.length;
     const chunkCount = replaceAll ? rows.length : (kb.chunkCount || 0) + rows.length;
     await db.update(knowledgeBases).set({ status: "ready", docCount, chunkCount, embModel, embMeta }).where(eq(knowledgeBases.id, id));

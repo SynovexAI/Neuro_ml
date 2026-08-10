@@ -108,7 +108,8 @@ s2,north,61.3,1` },
 export type OpType =
   | "filter" | "select" | "derive" | "aggregate" | "sort" | "dedupe" | "clean"
   | "rename" | "limit" | "sample" | "map" | "fillna" | "bucket"
-  | "join" | "union" | "pivot" | "unpivot" | "window" | "regex" | "dateparse";
+  | "join" | "union" | "pivot" | "unpivot" | "window" | "regex" | "dateparse"
+  | "lookup" | "merge" | "append";
 export interface EtlOp {
   id: string; type: OpType;
   col?: string; op?: string; value?: string;                 // filter / limit / sample / fillna / bucket / regex
@@ -134,16 +135,24 @@ export const OP_META: Record<OpType, { label: string; icon: string; hint: string
   map: { label: "Map column", icon: "🔧", hint: "apply a function to one column (upper / round / …)" },
   fillna: { label: "Fill nulls", icon: "🩹", hint: "replace nulls in a column with a value" },
   bucket: { label: "Bucketize", icon: "🪣", hint: "bin a numeric column into N buckets" },
+  pivot: { label: "Pivot", icon: "📊", hint: "reshape data by turning rows into columns", needsB: true },
   join: { label: "Join", icon: "🔗", hint: "join with Source B on a key (inner / left / right)", needsB: true },
   union: { label: "Union", icon: "⧉", hint: "stack Source B's rows under this table", needsB: true },
-  pivot: { label: "Pivot", icon: "🔀", hint: "spread a column's values into new columns (wide)" },
+  lookup: { label: "Lookup", icon: "🔎", hint: "lookup matching rows from secondary table (left join)", needsB: true },
+  merge: { label: "Merge", icon: "🔀", hint: "merge fields from secondary into primary based on key", needsB: true },
+  append: { label: "Append", icon: "➕", hint: "append rows from secondary table (union)", needsB: true },
   unpivot: { label: "Unpivot", icon: "🔃", hint: "melt several columns into variable/value rows (long)" },
   window: { label: "Window", icon: "🪟", hint: "running total, rank, row number, lag or lead" },
   regex: { label: "Regex extract", icon: "🔍", hint: "extract the first match/group of a pattern into a new column" },
   dateparse: { label: "Parse date", icon: "📅", hint: "pull year/month/day/weekday or days-since from a date column" },
 };
 
-const numify = (v: Cell): number => (v == null ? NaN : Number(v));
+const numify = (v: Cell): number => {
+  if (v == null || v === "") return NaN;
+  if (typeof v === "number") return v;
+  const s = String(v).replace(/[$,\s]/g, "");
+  return s === "" ? NaN : Number(s);
+};
 function aggNums(nums: number[], agg: string): number {
   const sum = nums.reduce((a, b) => a + b, 0);
   const v = agg === "sum" ? sum : agg === "avg" ? sum / (nums.length || 1) : agg === "min" ? (nums.length ? Math.min(...nums) : 0) : agg === "max" ? (nums.length ? Math.max(...nums) : 0) : nums.length;
@@ -170,12 +179,12 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols: t.cols, rows: rows.filter((r) => compare(r[col], op.op || "==", op.value ?? "")) };
     }
     case "select": {
-      const cols = (op.cols && op.cols.length ? op.cols : t.cols).filter((c) => t.cols.includes(c));
+      const cols = op.cols ? op.cols.filter((c) => t.cols.includes(c)) : t.cols;
       return { cols, rows: rows.map((r) => { const o: Rec = {}; cols.forEach((c) => (o[c] = r[c])); return o; }) };
     }
     case "derive": {
       const name = op.name || "derived"; const arith = op.arith || "+";
-      const val = (r: Rec, k?: string) => { if (k == null) return NaN; return t.cols.includes(k) ? numify(r[k]) : Number(k); };
+      const val = (r: Rec, k?: string) => { if (k == null) return NaN; return t.cols.includes(k) ? numify(r[k]) : numify(k); };
       const cols = [...t.cols, name];
       return { cols, rows: rows.map((r) => { const l = val(r, op.left), rr = val(r, op.right); let v: number = NaN; if (arith === "+") v = l + rr; else if (arith === "-") v = l - rr; else if (arith === "*") v = l * rr; else if (arith === "/") v = rr ? l / rr : NaN; return { ...r, [name]: isNaN(v) ? null : Math.round(v * 1000) / 1000 }; }) };
     }
@@ -216,7 +225,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       const ap = (x: Cell): Cell => {
         if (x == null) return null;
         if (fn === "upper") return String(x).toUpperCase(); if (fn === "lower") return String(x).toLowerCase(); if (fn === "trim") return String(x).trim(); if (fn === "length") return String(x).length;
-        const n = Number(x); if (isNaN(n)) return x;
+        const n = numify(x); if (isNaN(n)) return x;
         if (fn === "round") return Math.round(n); if (fn === "abs") return Math.abs(n); if (fn === "floor") return Math.floor(n); if (fn === "ceil") return Math.ceil(n); return x;
       };
       return { cols: t.cols, rows: rows.map((r) => ({ ...r, [col]: ap(r[col]) })) };
@@ -257,6 +266,41 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       if (op.mode === "distinct") { const seen = new Set<string>(); out = out.filter((r) => { const k = cols.map((c) => String(r[c])).join("¦"); if (seen.has(k)) return false; seen.add(k); return true; }); }
       return { cols, rows: out };
     }
+    case "lookup": {
+        // Lookup is essentially a left join – bring in matching columns without duplicating primary rows.
+        const lookupOp: EtlOp = { ...op, type: "join", joinType: "left" };
+        return applyOp(t, lookupOp, ctx);
+      }
+      case "merge": {
+        // Merge updates primary rows with fields from secondary based on a key.
+        // Perform a left join first.
+        const mergeOp: EtlOp = { ...op, type: "join", joinType: "left" };
+        const joined = applyOp(t, mergeOp, ctx);
+        // Overwrite primary columns with secondary values where they share the same name.
+        const bPrefix = "b_";
+        const mergedCols = new Set<string>();
+        const resultRows = joined.rows.map((r) => {
+          const out: Rec = { ...r };
+          for (const col of Object.keys(r)) {
+            if (col.startsWith(bPrefix)) {
+              const primaryName = col.slice(bPrefix.length);
+              if (t.cols.includes(primaryName)) {
+                const val = r[col];
+                if (val !== null && val !== undefined && val !== "") out[primaryName] = val as Cell;
+                delete out[col];
+                mergedCols.add(col);
+              }
+            }
+          }
+          return out;
+        });
+        return { cols: joined.cols.filter((c) => !mergedCols.has(c)), rows: resultRows };
+      }
+      case "append": {
+        // Append is equivalent to union (stack rows from secondary).
+        const appendOp: EtlOp = { ...op, type: "union" };
+        return applyOp(t, appendOp, ctx);
+      }
     case "pivot": {
       const idxCol = op.groupBy || t.cols[0]; const pivCol = op.col || t.cols[1] || t.cols[0]; const agg = op.agg || "sum"; const ac = op.aggCol || t.cols[t.cols.length - 1];
       const pivVals = Array.from(new Set(rows.map((r) => String(r[pivCol] ?? "∅"))));
@@ -271,7 +315,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols, rows: out };
     }
     case "unpivot": {
-      const melt = (op.cols && op.cols.length ? op.cols : t.cols).filter((c) => t.cols.includes(c));
+      const melt = op.cols ? op.cols.filter((c) => t.cols.includes(c)) : [];
       const keep = t.cols.filter((c) => !melt.includes(c));
       const varName = op.name || "variable"; const valName = op.value || "value";
       const cols = [...keep, varName, valName];
@@ -301,11 +345,15 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       const col = op.col || t.cols[0]; const fn = op.fn || "year"; const name = op.name || `${col}_${fn}`;
       const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
       return { cols: [...t.cols, name], rows: rows.map((r) => {
-        const d = new Date(String(r[col] ?? "")); let v: Cell = null;
+        let d = new Date(String(r[col] ?? "")); let v: Cell = null;
+        if (isNaN(d.getTime())) {
+          const m = String(r[col] ?? "").trim().match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+          if (m) d = new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00Z`);
+        }
         if (!isNaN(d.getTime())) {
           if (fn === "year") v = d.getUTCFullYear(); else if (fn === "month") v = d.getUTCMonth() + 1; else if (fn === "day") v = d.getUTCDate();
           else if (fn === "weekday") v = days[d.getUTCDay()]; else if (fn === "iso") v = d.toISOString().slice(0, 10);
-          else if (fn === "days_since") v = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(d.toISOString().slice(0, 10))) / 86_400_000);
+          else if (fn === "days_since") v = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - d.getTime()) / 86_400_000);
         }
         return { ...r, [name]: v };
       }) };

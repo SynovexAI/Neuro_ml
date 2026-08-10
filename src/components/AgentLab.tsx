@@ -85,6 +85,14 @@ export default function AgentLab() {
   const [placedTools, setPlacedTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [knowledgeText, setKnowledgeText] = useState("Returns policy: damaged items may be returned within 30 days of delivery for a full refund. Shipping is free on orders over $50, otherwise a flat $6 fee applies. Gift cards are non-refundable.");
   const [uploading, setUploading] = useState(false);
+  // Saved Studio knowledge bases the user can ground this agent on (loaded into the knowledge index).
+  const [kbs, setKbs] = useState<{ id: string; name: string }[]>([]);
+  const [kbLoad, setKbLoad] = useState(false);
+  useEffect(() => { fetch("/api/kb").then((r) => (r.ok ? r.json() : { kbs: [] })).then((j) => setKbs(j.kbs || [])).catch(() => {}); }, []);
+  async function loadKbIntoKnowledge(id: string) {
+    setKbLoad(true);
+    try { const r = await fetch(`/api/kb/${id}/docs`); const j = await r.json(); if (r.ok) { const text = (j.docs || []).map((d: { text: string }) => d.text).join("\n\n").trim(); if (text) setKnowledgeText(text); } } catch { /* ignore */ } finally { setKbLoad(false); }
+  }
   const fileRef = useRef<HTMLInputElement>(null);
 
   // workflow config
@@ -625,7 +633,7 @@ if __name__ == "__main__":
         </div>
       </div>
       {runtime === "nat" ? <NatAgentPanel /> : <>
-      {provKnown && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before you can run an agent.</div>}
+      {provKnown && !hasProvider && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin) before you can run an agent.</div>}
       <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>To attach <b>MCP servers</b> or <b>knowledge bases</b> to an agent, switch to the <b>NVIDIA NAT</b> runtime above — the in-browser runtime uses built-in tools only.</span></div>
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
@@ -736,6 +744,13 @@ if __name__ == "__main__":
                   <div className="note" style={{ marginTop: 8 }}>Drag its top dot to the Agent to wire it, or click a wire and press <b>Delete</b>. {enabledTools.has(selNode.toolId!) ? "" : "Unconnected tools aren't used at run."}</div>
                 </>)}
                 {selNode?.type === "tool" && selNode.toolId === "knowledge" && (<>
+                  {kbs.length > 0 && <div className="insp-field"><div className="k">Load from a saved Knowledge base</div>
+                    <select defaultValue="" onChange={(e) => { if (e.target.value) loadKbIntoKnowledge(e.target.value); }} disabled={kbLoad}>
+                      <option value="">— or paste text below —</option>
+                      {kbs.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+                    </select>
+                    <div className="note" style={{ marginTop: 4 }}>{kbLoad ? "loading KB…" : "Pulls a Studio KB's docs into the box below — the agent grounds on it."}</div>
+                  </div>}
                   <div className="insp-field"><div className="k">Knowledge base (the agent searches this)</div><textarea rows={5} value={knowledgeText} onChange={(e) => setKnowledgeText(e.target.value)} /></div>
                   <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                     <button className="btn ghost sm" onClick={() => fileRef.current?.click()} disabled={uploading}>{uploading ? "Parsing…" : "Upload doc"}</button>

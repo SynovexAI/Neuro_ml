@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
-import { getEnabledProviders, fetchModels } from "@/lib/providers";
+import { getEnabledProviders, getProviderById, fetchModels } from "@/lib/providers";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
-// GET  /api/models               → returns all enabled providers
+// GET  /api/models               → all providers available to this user (own first, then global)
 // GET  /api/models?providerId=x  → also returns models for that specific provider
 export async function GET(req: Request) {
   const user = await getSessionUser();
@@ -12,36 +13,28 @@ export async function GET(req: Request) {
 
   let allProviders: Awaited<ReturnType<typeof getEnabledProviders>>;
   try {
-    allProviders = await getEnabledProviders();
+    allProviders = await getEnabledProviders(user.id);
   } catch {
     return NextResponse.json({ providers: [], models: [], provider: null, default: "" });
   }
-
   if (allProviders.length === 0) {
     return NextResponse.json({ providers: [], models: [], provider: null, default: "" });
   }
 
-  // If the caller requests models for a specific provider, fetch them live.
   const { searchParams } = new URL(req.url);
   const requestedId = searchParams.get("providerId");
 
-  // Find the target provider (requested one, or the first enabled).
-  const { db } = await import("@/lib/db");
-  const { providers: provTable } = await import("@/lib/db/schema");
-  const { eq } = await import("drizzle-orm");
-  const { decrypt } = await import("@/lib/crypto");
-
-  const targetId = requestedId ?? allProviders[0].id;
-  const rows = await db.select().from(provTable).where(eq(provTable.id, targetId)).limit(1);
-  const p = rows[0];
+  // Resolve the target provider via getProviderById (checks the user's own keys AND global);
+  // fall back to the first available one if the requested id is stale.
+  let p = requestedId ? await getProviderById(requestedId, user.id) : null;
+  if (!p) p = await getProviderById(allProviders[0].id, user.id);
   if (!p) return NextResponse.json({ providers: allProviders, models: [], provider: null, default: "" });
 
-  const apiKey = p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "";
   let models: string[];
   try {
-    models = await fetchModels(p.baseUrl, apiKey);
+    models = await fetchModels(p.baseUrl, p.apiKey);
   } catch {
-    models = p.defaultModel ? [p.defaultModel] : [];
+    models = p.model ? [p.model] : [];
   }
 
   return NextResponse.json({
@@ -49,6 +42,6 @@ export async function GET(req: Request) {
     provider: p.provider,
     providerId: p.id,
     models,
-    default: p.defaultModel || models[0] || "",
+    default: p.model || models[0] || "",
   });
 }

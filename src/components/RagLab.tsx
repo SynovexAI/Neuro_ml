@@ -5,8 +5,22 @@ import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mm
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
+import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "@/components/AgenticAnswer";
+import ModelPicker from "@/components/ModelPicker";
 
-type Doc = { id: string; name: string; kind: string; text: string };
+type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
+
+// Best-effort: also store the original file in R2 (returns its URL). No-ops (returns null) if
+// storage isn't configured — the RAG flow works either way since we already keep the parsed text.
+async function uploadToR2(f: File): Promise<string | null> {
+  try {
+    const fd = new FormData(); fd.append("file", f);
+    const r = await fetch("/api/storage/upload", { method: "POST", body: fd });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return typeof j.url === "string" ? j.url : null;
+  } catch { return null; }
+}
 type Chunk = { text: string; docName: string; docKind: string };
 type Step = "source" | "chunk" | "embed" | "query";
 type Backend = "vector" | "kg" | "hybrid";
@@ -18,9 +32,13 @@ const rid = () => Math.random().toString(36).slice(2, 10);
 // Suggested embedding models per provider family (typeable — these are just hints).
 // Gemini + Ollama are the free-friendly picks; Groq/Cerebras don't serve /embeddings.
 const EMB_SUGGEST: Record<string, string[]> = {
-  gemini: ["text-embedding-004", "gemini-embedding-001"],
+  gemini: ["gemini-embedding-001", "text-embedding-004"],
   ollama: ["nomic-embed-text", "bge-m3", "mxbai-embed-large"],
   openai: ["text-embedding-3-small", "text-embedding-3-large"],
+  mistral: ["mistral-embed"],
+  cohere: ["embed-english-v3.0", "embed-multilingual-v3.0"],
+  github: ["text-embedding-3-small", "text-embedding-3-large", "cohere-embed-v3-english"],
+  nvidia: ["nvidia/nv-embedqa-e5-v5", "nvidia/nv-embed-v1"],
   custom: ["text-embedding-3-small", "bge-small-en-v1.5"],
 };
 const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
@@ -84,6 +102,7 @@ export default function RagLab() {
   const [embPlaying, setEmbPlaying] = useState(false);
   const [embSpeed, setEmbSpeed] = useState(1400);
   const [mvOpen, setMvOpen] = useState<number | null>(null); // entity row whose full text is expanded
+  const [embOpenKey, setEmbOpenKey] = useState(0); // bumped after "Fetch models" to auto-open the embed-model picker
 
   // ── knowledge-graph backend ──
   const [backend, setBackend] = useState<Backend>("vector");
@@ -114,8 +133,11 @@ export default function RagLab() {
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
   const [question, setQuestion] = useState("What is the refund policy for damaged items?");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
-  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive">("file");
+  const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "github" | "gdrive" | "kb">("file");
   const [connectorOpen, setConnectorOpen] = useState(false);
+  const [kbList, setKbList] = useState<{ id: string; name: string; docCount: number; chunkCount: number }[]>([]);
+  const [kbLoading, setKbLoading] = useState(false);
+  const [kbBusy, setKbBusy] = useState("");
   const [ghUrl, setGhUrl] = useState("");
   const [ghBusy, setGhBusy] = useState(false);
   const [gdUrl, setGdUrl] = useState("");
@@ -132,6 +154,8 @@ export default function RagLab() {
   const [trace, setTrace] = useState<{ who: string; what: string; state: string }[]>([]);
   const [hits, setHits] = useState<{ i: number; score: number }[]>([]);
   const [running, setRunning] = useState(false);
+  const [answerMode, setAnswerMode] = useState<"direct" | "agentic">("direct"); // Direct = current single-shot; Agentic = ReAct loop (AgenticAnswer)
+  const [agentCfg, setAgentCfg] = useState<AgentConfig>({ enabled: ["vector", "keyword", "hybrid"], maxSteps: 5, topK: 4, selfCheck: true, maxTokens: 1024 });
   const [compareRows, setCompareRows] = useState<{ size: number; overlap: number; chunks: number; top: number; avg: number; best: string }[]>([]);
   const [provider, setProvider] = useState<string | null>(null);
   const [provKnown, setProvKnown] = useState(false);
@@ -157,6 +181,8 @@ export default function RagLab() {
       if (c.metric) setMetric(c.metric);
       if (c.topK != null) setTopK(c.topK);
       if (c.question) setQuestion(c.question);
+      if (c.answerMode === "agentic" || c.answerMode === "direct") setAnswerMode(c.answerMode);
+      if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
     }).catch(() => {});
   }, []);
 
@@ -189,12 +215,14 @@ export default function RagLab() {
   // then the static hints. Lets you pick a model your key actually serves (fixes 404s).
   const provType = (id: string) => providers.find((p) => p.id === id)?.provider;
   const embModelOptions = (id: string) => Array.from(new Set([...models.filter((m) => /embed/i.test(m)), ...embSuggestFor(provType(id)), ...models]));
-  const pickDefaultEmb = (id: string) => models.find((m) => /embed/i.test(m)) || embSuggestFor(provType(id))[0];
+  // Prefer the provider's own suggested embedding model (avoids carrying a stale embed model
+  // from a previously-selected provider); fall back to a fetched embedding-named model.
+  const pickDefaultEmb = (id: string) => embSuggestFor(provType(id))[0] || models.find((m) => /embed/i.test(m)) || "";
   const vecSimBadges = () => <div className="row" style={{ gap: 6, alignItems: "center", flexWrap: "wrap" }}>
     {embedMode === "neural" && denseVecs ? pill("#a855f7", <>🧠 neural{embedInfo ? ` · ${embedInfo.dim}d` : ""}</>) : pill("#5b7cff", <>🔤 tf-idf · lexical</>)}
     {pill("#3ecf7f", <>◆ {METRIC_LABEL[metric]}</>)}
   </div>;
-  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; return { ic: "📄", color: "#5b7cff" }; };
+  const docIcon = (kind: string): { ic: string; color: string } => { const k = kind.toLowerCase(); if (k === "pdf") return { ic: "📕", color: "#f0616d" }; if (k === "docx" || k === "doc") return { ic: "📘", color: "#5b7cff" }; if (k === "xlsx" || k === "xls" || k === "xlsm") return { ic: "📊", color: "#3ecf7f" }; if (k === "csv" || k === "tsv") return { ic: "📑", color: "#22b8cf" }; if (k === "json") return { ic: "🧾", color: "#f59e0b" }; if (k === "html" || k === "url") return { ic: "🌐", color: "#22b8cf" }; if (k === "md") return { ic: "📝", color: "#a855f7" }; if (k === "github") return { ic: "🐙", color: "#a855f7" }; if (k === "gdrive") return { ic: "📁", color: "#f9ab00" }; if (k === "kb") return { ic: "🧠", color: "#a855f7" }; return { ic: "📄", color: "#5b7cff" }; };
   const backendSel = (
     <div style={{ marginBottom: 16 }}>
       <label className="fld">Index backend — how the knowledge is stored &amp; searched</label>
@@ -269,15 +297,19 @@ export default function RagLab() {
       const ext = (f.name.split(".").pop() || "txt").toLowerCase();
       const binary = ["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext);
       try {
+        // Parse text + (best-effort) archive the original file to R2 in parallel.
+        const r2p = uploadToR2(f);
         if (binary) {
           const fd = new FormData(); fd.append("file", f);
           const r = await fetch("/api/rag/extract", { method: "POST", body: fd });
           const j = await r.json();
           if (!r.ok) throw new Error(j.error || "parse failed");
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text }]);
+          const r2Url = await r2p;
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text: j.text, r2Url: r2Url || undefined }]);
         } else {
           const text = await f.text();
-          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text }]);
+          const r2Url = await r2p;
+          setDocs((d) => [...d, { id: rid(), name: f.name, kind: ext, text, r2Url: r2Url || undefined }]);
         }
       } catch (err) { setMsg(`Could not read ${f.name}: ${(err as Error).message}`); }
     }
@@ -328,6 +360,22 @@ export default function RagLab() {
       setDocs((d) => [...d, { id: rid(), name: (doc ? "Google Doc" : sheet ? "Google Sheet" : j.title) + ` · ${(doc || sheet || ["", "drive"])[1].slice(0, 8)}`, kind: "gdrive", text: j.text }]);
       invalidate();
     } catch (e) { setMsg((e as Error).message); } finally { setGdBusy(false); }
+  }
+  async function loadKbList() {
+    setKbLoading(true);
+    try { const r = await fetch("/api/kb"); const j = await r.json(); if (r.ok) setKbList(j.kbs || []); } catch { /* ignore */ } finally { setKbLoading(false); }
+  }
+  async function pullKb(kb: { id: string; name: string }) {
+    setKbBusy(kb.id); setMsg("");
+    try {
+      const r = await fetch(`/api/kb/${kb.id}/docs`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "failed");
+      const incoming: Doc[] = (j.docs || []).filter((d: { text?: string }) => d.text && d.text.trim()).map((d: { name: string; text: string }) => ({ id: rid(), name: `${kb.name} · ${d.name}`, kind: "kb", text: d.text }));
+      if (!incoming.length) throw new Error("This knowledge base has no text yet.");
+      setDocs((d) => [...d, ...incoming]);
+      invalidate();
+    } catch (e) { setMsg((e as Error).message); } finally { setKbBusy(""); }
   }
   const removeDoc = (id: string) => { setDocs((d) => d.filter((x) => x.id !== id)); invalidate(); };
   function invalidate() { setChunks([]); setIndex(null); }
@@ -396,7 +444,7 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg };
     try {
       const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
@@ -413,6 +461,9 @@ export default function RagLab() {
   }
   async function runNeuralEmbed() {
     if (!chunks.length) return; setEmbedding(true); setMsg("");
+    // Always build the sparse index too: retrieval (keyword/hybrid) and canQuery/the store views
+    // all key off `index`; the dense vectors add the semantic layer on top of it.
+    if (!index) setIndex(buildIndex(chunks.map((c) => c.text)));
     try {
       const res = await fetch("/api/rag/embed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ texts: chunks.map((c) => c.text), ...(providerId ? { providerId } : {}), ...(embModel ? { model: embModel } : {}) }) });
       const j = await res.json(); if (!res.ok) throw new Error(j.error || "embed failed");
@@ -474,6 +525,41 @@ export default function RagLab() {
     const rows = strats.map((s) => { const ranked = fullRank(s, qv); const order = applyRerank(ranked, chunks.length); const m = retrievalMetrics(order, relevant, topK); return { name: rerank === "mmr" ? `${s}+mmr` : s, ...m }; });
     setMetricRows(rows);
   }
+  // ── Agentic mode plumbing — reuses the existing engine (retrieve/retrieveGraph + /api/chat), read-only ──
+  const agentTools: AgentTool[] = index ? (graph ? ["vector", "keyword", "hybrid", "kg", "web"] : ["vector", "keyword", "hybrid", "web"]) : [];
+  async function agentRetrieve(query: string, tool: AgentTool, k: number): Promise<AgentHit[]> {
+    if (!index) return [];
+    if (tool === "kg" && graph) {
+      const r = retrieveGraph(graph, query, Math.max(k, 4), kgHops);
+      return r.chunkIds.slice(0, k).map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
+    }
+    const strat: Strategy = tool === "hybrid" ? "hybrid" : tool === "keyword" ? "keyword" : "vector";
+    let qv: number[] | null = null;
+    if (embedMode === "neural" && denseVecs) { try { qv = (await embedViaApi([query]))[0] || null; } catch { qv = null; } }
+    const ranked = (embedMode === "neural" && denseVecs && qv)
+      ? retrieveDense(index, query, qv, denseVecs, strat, chunks.length, metric)
+      : retrieve(index, query, strat, chunks.length, metric);
+    return ranked.slice(0, k).map((h) => ({ i: h.i, score: h.score }));
+  }
+  async function agentChat(messages: { role: "system" | "user" | "assistant"; content: string }[], opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; text += dec.decode(value, { stream: true }); }
+    return text;
+  }
+  // Streaming variant for the agent's final answer — emits tokens as they arrive.
+  async function agentChatStream(messages: { role: "system" | "user" | "assistant"; content: string }[], onToken: (t: string) => void, opts?: { maxTokens?: number }): Promise<string> {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature: 0.2, lab: "rag", ...(opts?.maxTokens ? { maxTokens: opts.maxTokens } : {}), ...(providerId ? { providerId } : {}), ...(model ? { model } : {}) }) });
+    if (!res.ok || !res.body) { const j = await res.json().catch(() => ({ error: "failed" })); throw new Error(j.error || "chat failed"); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let text = "";
+    for (; ;) { const { done, value } = await reader.read(); if (done) break; const chunk = dec.decode(value, { stream: true }); text += chunk; onToken(chunk); }
+    return text;
+  }
+  async function agentFetchWeb(url: string): Promise<{ title: string; text: string } | null> {
+    try { const r = await fetch("/api/rag/fetch-url", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) }); const j = await r.json(); if (!r.ok) return null; return { title: j.title || url, text: j.text || "" }; } catch { return null; }
+  }
+
   async function ask() {
     if (chunks.length === 0 || !canQuery) { setAnswer("Build the index first (step 3)."); return; }
     setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
@@ -541,7 +627,7 @@ export default function RagLab() {
         <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button></div>
       </div>
 
-      {provKnown && provider === null && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before the answer step (source/chunk/embed still work).</div>}
+      {provKnown && provider === null && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin for a shared one) before the answer step (source/chunk/embed still work).</div>}
 
       <div className="stepper">
         {stepBtn("source", 1, "Source", true)}
@@ -567,6 +653,7 @@ export default function RagLab() {
               type Row = [typeof srcConn | string, string, string, string, boolean?];
               const CONNECTORS: Row[] = [
                 ["file", "📄", "Upload file", "PDF · DOCX · TXT · CSV · XLSX"],
+                ["kb", "🧠", "Knowledge base", "use a saved KB from Studio"],
                 ["url", "🌐", "Web page", "scrape article text from a URL"],
                 ["github", "🐙", "GitHub", "README · file · folder from a public repo"],
                 ["gdrive", "📁", "Google Drive", "public Google Doc / Sheet link"],
@@ -590,7 +677,7 @@ export default function RagLab() {
                       <div className="note" style={{ padding: "9px 12px", fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", borderBottom: "1px solid var(--border)" }}>Available connectors</div>
                       <div style={{ maxHeight: 300, overflowY: "auto", padding: 6 }}>
                         {CONNECTORS.map(([k, ic, title, sub, soon]) => (
-                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
+                          <button key={k} className="etl-load-row" disabled={soon} onClick={() => { if (soon) return; setSrcConn(k as typeof srcConn); setConnectorOpen(false); if (k === "kb") loadKbList(); }} title={soon ? "Not configured yet — needs an OAuth/credential connection" : ""} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 11, padding: "9px 10px", borderRadius: 9, cursor: soon ? "not-allowed" : "pointer", opacity: soon ? 0.5 : 1, border: `1px solid ${srcConn === k ? "var(--accent)" : "transparent"}`, background: srcConn === k ? "var(--accent-weak)" : undefined, marginBottom: 2 }}>
                             <span style={{ width: 32, height: 32, borderRadius: 8, display: "grid", placeItems: "center", fontSize: 16, flex: "0 0 auto", background: srcConn === k ? "var(--accent)" : "var(--panel-2)", color: srcConn === k ? "#fff" : "var(--muted)" }}>{ic}</span>
                             <span style={{ minWidth: 0, flex: 1 }}><span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{title}</span><span className="note" style={{ fontSize: 10 }}>{sub}</span></span>
                             {soon ? <span style={{ fontSize: 8.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em", padding: "2px 6px", borderRadius: 5, background: "var(--panel-2)", color: "var(--faint)", border: "1px solid var(--border)", flex: "0 0 auto" }}>soon</span>
@@ -649,6 +736,23 @@ export default function RagLab() {
                   <button className="btn sm" onClick={addSample}>📚 Load sample corpus</button>
                 </div>
               )}
+              {srcConn === "kb" && (
+                <div style={{ ...pnl, padding: 16 }}>
+                  <div className="row" style={{ gap: 7, alignItems: "center", marginBottom: 10 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#a855f7" }} /><span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--muted)" }}>Your knowledge bases</span><button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={loadKbList} disabled={kbLoading}>↻ Refresh</button></div>
+                  <div className="note" style={{ marginBottom: 10 }}>Pull the documents from a KB you built in <b>Studio → Knowledge bases</b> into this pipeline.</div>
+                  {kbLoading ? <div className="note"><span className="busy-dot" /> loading…</div>
+                    : kbList.length === 0 ? <div className="note">No knowledge bases yet — create one under <b>Studio → Knowledge bases</b>, then refresh.</div>
+                    : <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 240, overflowY: "auto" }}>
+                        {kbList.map((kb) => (
+                          <div key={kb.id} className="row" style={{ gap: 10, alignItems: "center", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", background: "var(--surface)" }}>
+                            <span style={{ fontSize: 16 }}>🧠</span>
+                            <span style={{ flex: 1, minWidth: 0 }}><span style={{ display: "block", fontWeight: 600, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kb.name}</span><span className="note" style={{ fontSize: 10 }}>{kb.docCount} docs · {kb.chunkCount} chunks</span></span>
+                            <button className="btn sm" onClick={() => pullKb(kb)} disabled={kbBusy === kb.id}>{kbBusy === kb.id ? "loading…" : "Use →"}</button>
+                          </div>
+                        ))}
+                      </div>}
+                </div>
+              )}
             </div>
 
             <label className="fld">Loaded documents — preview before chunking</label>
@@ -665,6 +769,7 @@ export default function RagLab() {
                       <div style={{ fontWeight: 500, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
                       <div className="note" style={{ marginTop: 2 }}>{words.toLocaleString()} words · {d.text.length.toLocaleString()} chars</div>
                     </div>
+                    {d.r2Url && <a href={d.r2Url} target="_blank" rel="noreferrer" title="original file stored in R2" style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color: "var(--good)", background: "color-mix(in srgb, var(--good) 12%, transparent)", flex: "0 0 auto", textDecoration: "none" }}>☁ stored</a>}
                     <span style={{ fontSize: 9, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".04em", padding: "2px 7px", borderRadius: 5, color, background: `color-mix(in srgb, ${color} 12%, transparent)`, flex: "0 0 auto" }}>{d.kind}</span>
                     <button className="btn ghost sm" onClick={toggle}>{open ? "Hide" : "Preview"}</button>
                     <button onClick={() => removeDoc(d.id)} title="Remove" style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 17, cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
@@ -870,18 +975,17 @@ export default function RagLab() {
                   providers.length === 0 && provKnown ? (
                     <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
                       <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>Neural embeddings need a provider</div>
-                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>text-embedding-004</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
+                      <div className="note" style={{ lineHeight: 1.55 }}>Add one under <b>Admin → Providers</b> (an API key is required — it can&apos;t run in-browser). Free-friendly picks: <b>Google Gemini</b> → <code>gemini-embedding-001</code> (free API key), or <b>Ollama</b> local → <code>nomic-embed-text</code> (no key). Meanwhile <b>TF-IDF · lexical</b> works with no setup.</div>
                     </div>
                   ) : (
                     <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: 10, background: "var(--panel-2)", padding: "12px 14px" }}>
                       <div className="row" style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
                         {providers.length > 1 && <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Provider</label>
                           <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setEmbModel(pickDefaultEmb(e.target.value)); loadModels(e.target.value); }} style={{ width: 180 }}>{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select></div>}
-                        <div><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched` : "· none fetched"}</label>
-                          <input list="emb-models" value={embModel} onChange={(e) => setEmbModel(e.target.value)} placeholder="text-embedding-004" style={{ width: 220 }} />
-                          <datalist id="emb-models">{embModelOptions(providerId).map((m) => <option key={m} value={m} />)}</datalist>
+                        <div style={{ width: 240 }}><label className="note" style={{ display: "block", marginBottom: 4 }}>Embedding model {modelsLoading ? "· loading…" : models.length ? `· ${models.length} fetched · type to search` : "· none fetched"}</label>
+                          <ModelPicker models={embModelOptions(providerId)} value={embModel} onChange={setEmbModel} placeholder="e.g. mistral-embed" openKey={embOpenKey} />
                         </div>
-                        <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
+                        <button className="btn ghost sm" onClick={async () => { await loadModels(providerId || undefined); setEmbOpenKey((k) => k + 1); }} disabled={modelsLoading} title="Re-fetch the provider's model list">↻ Fetch models</button>
                         <button className="btn sm" onClick={runNeuralEmbed} disabled={embedding || !embModel.trim()}>{embedding ? "embedding…" : "▶ Embed chunks"}</button>
                       </div>
                       {msg && <div className="err" style={{ marginTop: 10 }}>{msg}</div>}
@@ -1043,6 +1147,50 @@ export default function RagLab() {
 
       {/* STEP 4 — QUERY */}
       {step === "query" && (
+        <>
+        <div className="row" style={{ alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span className="note" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em" }}>Answering mode</span>
+          <div style={{ display: "inline-flex", border: "1px solid var(--border-strong)", borderRadius: 9, overflow: "hidden" }}>
+            <button onClick={() => setAnswerMode("direct")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", background: answerMode === "direct" ? "var(--accent)" : "var(--surface)", color: answerMode === "direct" ? "#fff" : "var(--muted)", fontWeight: answerMode === "direct" ? 600 : 400 }}>Direct</button>
+            <button onClick={() => setAnswerMode("agentic")} style={{ fontSize: 12.5, padding: "7px 15px", cursor: "pointer", border: "none", display: "inline-flex", alignItems: "center", gap: 5, background: answerMode === "agentic" ? "#a855f7" : "var(--surface)", color: answerMode === "agentic" ? "#fff" : "var(--muted)", fontWeight: answerMode === "agentic" ? 600 : 400 }}>🤖 Agentic</button>
+          </div>
+          <span className="note" style={{ fontSize: 11 }}>{answerMode === "direct" ? "single-shot retrieve → answer" : "the agent plans, retrieves, self-checks, and re-retrieves until it can answer"}</span>
+        </div>
+
+        {answerMode === "agentic" && (
+          <div className="card">
+            <div className="card-h"><span className="t">🤖 Agentic answer</span><span className="mono r">{agentTools.length} tools</span></div>
+            <div className="card-b">
+              {!canQuery && <div className="warnbar">Build the index first (step 3).</div>}
+              <AgenticAnswer
+                chunks={chunks.map((c) => ({ text: c.text, docName: c.docName, docKind: c.docKind }))}
+                tools={agentTools}
+                retrieve={agentRetrieve}
+                chat={agentChat}
+                chatStream={agentChatStream}
+                fetchWeb={agentFetchWeb}
+                defaultQuestion={question}
+                disabled={!canQuery}
+                config={agentCfg}
+                onConfigChange={setAgentCfg}
+                note={!graph ? <div className="note" style={{ fontSize: 10.5, lineHeight: 1.5 }}>🕸 <b>Knowledge graph</b> appears here once you build one — go to the <b>Index</b> step and pick the <b>Knowledge graph</b> or <b>Hybrid</b> backend, then Build graph.</div> : undefined}
+                modelPicker={
+                  <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    {providers.length > 1 && <select value={providerId} onChange={(e) => { setProviderId(e.target.value); loadModels(e.target.value); }} style={{ width: 176 }} title="Provider">{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>}
+                    <select value={model} onChange={(e) => setModel(e.target.value)} style={{ width: 244 }} disabled={modelsLoading || !models.length} title="Model">
+                      {modelsLoading ? <option>loading…</option> : models.length ? models.map((m) => <option key={m} value={m}>{m}</option>) : <option value="">no models available</option>}
+                    </select>
+                    <button className="btn ghost sm" onClick={() => loadModels(providerId || undefined)} disabled={modelsLoading} title="Refresh model list">↻ Fetch models</button>
+                    {provider && <span className="note">{providers.length > 1 ? provider + " · " : ""}{models.length} model{models.length === 1 ? "" : "s"}</span>}
+                    {provKnown && !provider && <span className="note" style={{ color: "var(--warn)" }}>no provider configured — add one under Admin → Providers</span>}
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        )}
+
+        {answerMode === "direct" && (
         <div className="split col-2">
           <div className="card">
             <div className="card-h"><span className="t">Retrieve &amp; ask</span></div>
@@ -1161,9 +1309,11 @@ export default function RagLab() {
             </div>
           </div>
         </div>
+        )}
+        </>
       )}
 
-      {step === "query" && index && (
+      {step === "query" && index && answerMode === "direct" && (
         <div className="card" style={{ marginTop: 16 }}>
           <div className="card-h"><span className="t">Compare chunking</span><span className="mono r">{strategy} · top-{topK}</span></div>
           <div className="card-b">

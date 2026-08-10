@@ -3,6 +3,7 @@ import { getSessionUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // Real GitHub connector — pulls file/README/folder text from PUBLIC repos via the
 // GitHub REST API (no auth needed; set GITHUB_TOKEN in env to raise the rate limit).
