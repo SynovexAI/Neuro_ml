@@ -9,6 +9,7 @@ import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "
 import ModelPicker from "@/components/ModelPicker";
 import RagExperiments, { type ExpConfig } from "@/components/RagExperiments";
 import EmbeddingExplorer from "@/components/EmbeddingExplorer";
+import { toast } from "@/lib/toast";
 
 type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
 
@@ -88,6 +89,9 @@ function ivfCluster(vectors: Vec[], k: number): number[] {
 
 export default function RagLab() {
   const [step, setStep] = useState<Step>("source");
+  const [projectId, setProjectId] = useState("");
+  const [published, setPublished] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [docs, setDocs] = useState<Doc[]>([{ id: "sample", name: "sample-returns-policy.txt", kind: "txt", text: SAMPLE }]);
   const [size, setSize] = useState(40);
   const [overlap, setOverlap] = useState(8);
@@ -200,7 +204,9 @@ export default function RagLab() {
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("project");
     if (!id) return;
+    setProjectId(id);
     fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => {
+      if (project?.published) setPublished(true);
       const c = project?.config; if (!c) return;
       if (Array.isArray(c.docs) && c.docs.length) setDocs(c.docs.map((d: { name: string; kind?: string; text?: string }) => ({ id: rid(), name: d.name, kind: d.kind || "txt", text: d.text || "" })));
       if (c.size != null) setSize(c.size);
@@ -211,6 +217,10 @@ export default function RagLab() {
       if (c.question) setQuestion(c.question);
       if (c.answerMode === "agentic" || c.answerMode === "direct") setAnswerMode(c.answerMode);
       if (c.agentCfg && Array.isArray(c.agentCfg.enabled)) setAgentCfg({ enabled: c.agentCfg.enabled, maxSteps: c.agentCfg.maxSteps ?? 5, topK: c.agentCfg.topK ?? 4, selfCheck: c.agentCfg.selfCheck ?? true, maxTokens: c.agentCfg.maxTokens ?? 1024 });
+      if (c.providerId) { setProviderId(c.providerId); loadModels(c.providerId); }
+      if (c.model) setModel(c.model);
+      if (c.embedMode) setEmbedMode(c.embedMode);
+      if (c.embModel) setEmbModel(c.embModel);
     }).catch(() => {});
   }, []);
 
@@ -535,13 +545,64 @@ export default function RagLab() {
       return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
     });
     const trimmed = savedDocs.some((d) => d.truncated);
-    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg };
+    const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg, providerId, model, embedMode, embModel };
     try {
-      const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
+      let r;
+      if (projectId) {
+        r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: projectId, name: docs[0]?.name || "RAG build", config }) });
+      } else {
+        r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
+        const j = await r.json().catch(() => null);
+        if (r.ok && j?.id) { setProjectId(j.id); }
+      }
       setSaved(r.ok ? (trimmed ? "Saved (text trimmed)" : "Saved ✓") : "Save failed");
     }
     catch { setSaved("Save failed"); }
     setTimeout(() => setSaved(""), 2500);
+  }
+
+  async function publishProject() {
+    setPublishing(true);
+    try {
+      let id = projectId;
+      const MAX = 600_000;
+      let used = 0;
+      const savedDocs = docs.map((d) => {
+        const room = Math.max(0, MAX - used);
+        const text = d.text.length > room ? d.text.slice(0, room) : d.text;
+        used += text.length;
+        return { name: d.name, kind: d.kind, text, truncated: text.length < d.text.length };
+      });
+      const config = { docs: savedDocs, size, overlap, strategy, metric, topK, question, answerMode, agentCfg, providerId, model, embedMode, embModel };
+      if (!id) {
+        const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "rag", name: docs[0]?.name || "RAG build", config }) });
+        const j = await r.json().catch(() => null);
+        if (r.ok && j?.id) {
+          id = j.id;
+          setProjectId(j.id);
+        }
+      } else {
+        await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, config }) });
+      }
+      if (!id) { toast("Deploy failed", "error"); return; }
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      if (r.ok) setPublished(true);
+      toast(r.ok ? `Deployed RAG model — now available in Agent Lab` : "Deploy failed", r.ok ? "success" : "error");
+    } catch {
+      toast("Deploy failed", "error");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function undeployProject() {
+    if (!projectId) { setPublished(false); return; }
+    setPublishing(true);
+    try {
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: projectId, published: false }) });
+      if (r.ok) { setPublished(false); toast("Undeployed successfully", "success"); } else toast("Could not undeploy", "error");
+    } catch { toast("Could not undeploy", "error"); }
+    finally { setPublishing(false); }
   }
   // ── neural embeddings (real, via the provider's /embeddings endpoint) ──
   async function embedViaApi(texts: string[]): Promise<number[][]> {
@@ -878,7 +939,19 @@ export default function RagLab() {
           <h2 className="page-h">RAG Lab</h2>
           <p className="page-sub" style={{ margin: 0 }}>Add sources, chunk them, then index into a <b>vector store</b>, a <b>knowledge graph</b>, or both (hybrid) — ask, and the answer is grounded with citations.</p>
         </div>
-        <div className="acts"><button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button></div>
+        <div className="acts" style={{ display: "flex", gap: 8 }}>
+          <button className="btn ghost sm" onClick={saveProject}>{saved || "💾 Save"}</button>
+          {published ? (
+            <>
+              <button className="btn ghost sm" style={{ color: "#3b9e5f" }} disabled={true}>● Deployed</button>
+              <button className="btn ghost sm" onClick={undeployProject} disabled={publishing}>Undeploy</button>
+            </>
+          ) : (
+            <button className="btn sm" onClick={publishProject} disabled={publishing || !providerId || !model}>
+              {publishing ? "Deploying..." : "🚀 Deploy"}
+            </button>
+          )}
+        </div>
       </div>
 
       {provKnown && provider === null && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin for a shared one) before the answer step (source/chunk/embed still work).</div>}

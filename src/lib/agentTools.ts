@@ -7,6 +7,7 @@ export interface ToolCtx {
   knowledgeIndex?: RagIndex | null;
   knowledgeChunks?: string[];
   requestApproval?: (question: string) => Promise<string>;
+  selectedRagId?: string;
 }
 export interface AgentTool {
   id: string;
@@ -159,11 +160,17 @@ async function mcpPost(body: object): Promise<string> {
 }
 // Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
 // JSON {"tool":"…","args":{…}} calls one.
-async function mcpTool(server: string, input: string): Promise<string> {
+export async function mcpTool(server: string, input: string): Promise<string> {
   const s = (input || "").trim();
   if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
   if (s.startsWith("{")) {
-    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; return mcpPost({ server, action: "call", tool: p.tool, args: p.args }); }
+    try {
+      const p = JSON.parse(s) as { tool?: string; args?: unknown };
+      if (p.tool === "list" || p.tool === "tools/list") {
+        return mcpPost({ server, action: "list" });
+      }
+      return mcpPost({ server, action: "call", tool: p.tool, args: p.args });
+    }
     catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
   }
   return mcpPost({ server, action: "call", tool: s });
@@ -192,6 +199,24 @@ function memoryTool(input: string): string {
   return 'Use: "set key: value", "get key", "list", or "delete key".';
 }
 
+async function ragTool(input: string, ctx: ToolCtx): Promise<string> {
+  if (!ctx.selectedRagId) {
+    return "Error: No RAG model is connected to the RAG tool. Click on the RAG tool node and select a deployed RAG model.";
+  }
+  try {
+    const res = await fetch("/api/rag/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: ctx.selectedRagId, query: input }),
+    });
+    const j = await res.json();
+    if (!res.ok) return "Error: " + (j.error || "RAG query failed");
+    return j.answer || "(no response)";
+  } catch (e) {
+    return "Error: " + (e as Error).message;
+  }
+}
+
 export const AGENT_TOOLS: AgentTool[] = [
   { id: "calculator", name: "calculator", desc: "evaluate an arithmetic / math expression", example: "2*(3+4)^2  or  sqrt(144)+pi", run: async (input) => { try { return String(safeCalc(input)); } catch (e) { return "Error: " + (e as Error).message; } } },
   { id: "datetime", name: "datetime", desc: "current date/time, or days until/since a date", example: "now  |  days until 2026-12-25", run: async (input) => dateTool(input) },
@@ -210,6 +235,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
+  { id: "rag", name: "rag", desc: "query a deployed RAG model for grounded answers", example: "what is the product return policy?", run: async (input, ctx) => ragTool(input, ctx) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
@@ -240,11 +266,34 @@ When you have enough information, instead output:
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
+Example of a tool call block:
+Thought: I need to query the exa tool to search.
+Action: exa
+Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
+
 Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
 }
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
 export function parseReAct(text: string): ReActParse {
+  const cleanText = text.trim();
+  if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
+    try {
+      const j = JSON.parse(cleanText);
+      if (j && typeof j === "object") {
+        const act = j.action || j.tool;
+        const inp = j.input || j.args || j.action_input;
+        if (act && typeof act === "string") {
+          return {
+            thought: j.thought || "(JSON tool call fallback)",
+            action: act,
+            input: typeof inp === "object" ? JSON.stringify(inp) : String(inp || "")
+          };
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   const thought = text.match(/Thought:\s*([\s\S]*?)(?=\n\s*(?:Action|Final Answer)\s*:|$)/i)?.[1]?.trim();
   const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
   if (final) return { thought, final };
