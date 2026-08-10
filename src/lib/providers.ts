@@ -1,8 +1,27 @@
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "./db";
-import { providers } from "./db/schema";
+import { providers, userProviders } from "./db/schema";
 import { decrypt } from "./crypto";
+
+export type ResolvedProvider = { id: string; baseUrl: string; apiKey: string; model: string; provider: string; label: string | null; own?: boolean };
+
+// A user's own providers. Wrapped so a missing user_providers table (before the migration
+// is applied) degrades gracefully to "no personal providers" — the app then uses global ones.
+async function myProviders(userId: string) {
+  try {
+    return await db.select().from(userProviders).where(and(eq(userProviders.userId, userId), eq(userProviders.enabled, true)));
+  } catch { return []; }
+}
+async function myProviderById(userId: string, id: string) {
+  try {
+    const rows = await db.select().from(userProviders).where(and(eq(userProviders.id, id), eq(userProviders.userId, userId))).limit(1);
+    return rows[0] ?? null;
+  } catch { return null; }
+}
+const shape = (p: { id: string; provider: string; label: string | null; baseUrl: string; apiKeyEnc: string | null; defaultModel: string | null }, own: boolean): ResolvedProvider => ({
+  id: p.id, provider: p.provider, label: p.label ?? null, baseUrl: p.baseUrl, apiKey: p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "", model: p.defaultModel || "", own,
+});
 
 // OpenAI-compatible endpoints for every provider — single source of truth in providerCatalog.
 export { PROVIDER_CATALOG } from "./providerCatalog";
@@ -40,38 +59,42 @@ export async function fetchModels(baseUrl: string, apiKey: string): Promise<stri
   }
 }
 
-// The provider used to serve LLM calls (first enabled one). Returns a decrypted key.
-export async function getActiveProvider(): Promise<{ id: string; baseUrl: string; apiKey: string; model: string; provider: string; label: string | null } | null> {
+// The provider used to serve LLM calls. Prefers the user's OWN enabled provider (their key),
+// then falls back to the first enabled global/admin provider. Returns a decrypted key.
+export async function getActiveProvider(userId?: string, includeGlobal = true): Promise<ResolvedProvider | null> {
+  if (userId) {
+    const mine = await myProviders(userId);
+    if (mine[0]) return shape(mine[0], true);
+  }
+  if (!includeGlobal) return null;
   const rows = await db.select().from(providers).where(eq(providers.enabled, true)).limit(1);
-  const p = rows[0];
-  if (!p) return null;
-  return {
-    id: p.id,
-    provider: p.provider,
-    label: p.label ?? null,
-    baseUrl: p.baseUrl,
-    apiKey: p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "",
-    model: p.defaultModel || "",
-  };
+  return rows[0] ? shape(rows[0], false) : null;
 }
 
-// Fetch one enabled provider by id (used when the user picks a specific provider in the UI).
-export async function getProviderById(id: string): Promise<{ id: string; baseUrl: string; apiKey: string; model: string; provider: string; label: string | null } | null> {
+// Fetch one provider by id (used when the user picks a specific provider in the UI).
+// Checks the user's own providers first (ownership-scoped), then global providers.
+export async function getProviderById(id: string, userId?: string, includeGlobal = true): Promise<ResolvedProvider | null> {
+  if (userId) {
+    const mine = await myProviderById(userId, id);
+    if (mine && mine.enabled) return shape(mine, true);
+  }
+  if (!includeGlobal) return null;
   const rows = await db.select().from(providers).where(eq(providers.id, id)).limit(1);
   const p = rows[0];
   if (!p || !p.enabled) return null;
-  return {
-    id: p.id,
-    provider: p.provider,
-    label: p.label ?? null,
-    baseUrl: p.baseUrl,
-    apiKey: p.apiKeyEnc ? decrypt(p.apiKeyEnc) : "",
-    model: p.defaultModel || "",
-  };
+  return shape(p, false);
 }
 
-// All enabled providers (id + label for the UI selector, no keys).
-export async function getEnabledProviders(): Promise<{ id: string; provider: string; label: string | null; defaultModel: string }[]> {
-  const rows = await db.select().from(providers).where(eq(providers.enabled, true));
-  return rows.map((p) => ({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "" }));
+// All enabled providers for the UI selector (no keys): the user's own first, then global.
+export async function getEnabledProviders(userId?: string, includeGlobal = true): Promise<{ id: string; provider: string; label: string | null; defaultModel: string; own: boolean }[]> {
+  const out: { id: string; provider: string; label: string | null; defaultModel: string; own: boolean }[] = [];
+  if (userId) {
+    const mine = await myProviders(userId);
+    for (const p of mine) out.push({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "", own: true });
+  }
+  if (includeGlobal) {
+    const rows = await db.select().from(providers).where(eq(providers.enabled, true));
+    for (const p of rows) out.push({ id: p.id, provider: p.provider, label: p.label ?? null, defaultModel: p.defaultModel || "", own: false });
+  }
+  return out;
 }

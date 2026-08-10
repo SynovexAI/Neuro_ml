@@ -8,6 +8,7 @@ export interface ToolCtx {
   knowledgeIndex?: RagIndex | null;
   knowledgeChunks?: string[];
   requestApproval?: (question: string) => Promise<string>;
+  selectedRagId?: string;
   dbTable?: Table | null;
   dbTableName?: string;
   dbCustomSchema?: string;
@@ -161,13 +162,69 @@ async function mcpPost(body: object): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
-// Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
-// JSON {"tool":"…","args":{…}} calls one.
-async function mcpTool(server: string, input: string): Promise<string> {
+// In-memory cache: server → real tool names (populated on first use, avoids re-listing)
+const mcpToolCache: Record<string, string[]> = {};
+
+function fixCommonArgMismatches(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  // Exa web_fetch_exa expects urls[] not url string
+  if ("url" in args && !("urls" in args) && typeof args.url === "string") {
+    const { url, ...rest } = args;
+    return { ...rest, urls: [url] };
+  }
+  return args;
+}
+
+function fuzzyMatchTool(requested: string, available: string[]): string | null {
+  // Exact match first
+  if (available.includes(requested)) return requested;
+  const req = requested.toLowerCase();
+  // Contains check (e.g. "search" → "web_search_exa")
+  const contains = available.find((t) => t.toLowerCase().includes(req) || req.includes(t.toLowerCase().replace(/^.*_/, "")));
+  if (contains) return contains;
+  // Suffix match (e.g. "fetch" → "web_fetch_exa")
+  const suffix = available.find((t) => t.toLowerCase().endsWith(req) || t.toLowerCase().includes("_" + req));
+  return suffix || null;
+}
+
+export async function mcpTool(server: string, input: string): Promise<string> {
   const s = (input || "").trim();
-  if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
+  if (!s || /^list$/i.test(s)) {
+    const result = await mcpPost({ server, action: "list" });
+    // Cache the tool names for future calls
+    const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+    if (names.length) mcpToolCache[server] = names;
+    return result;
+  }
   if (s.startsWith("{")) {
-    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; return mcpPost({ server, action: "call", tool: p.tool, args: p.args }); }
+    try {
+      const p = JSON.parse(s) as { tool?: string; args?: Record<string, unknown> };
+      if (p.tool === "list" || p.tool === "tools/list") {
+        const result = await mcpPost({ server, action: "list" });
+        const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+        if (names.length) mcpToolCache[server] = names;
+        return result;
+      }
+      const args = p.args ? fixCommonArgMismatches(p.tool || "", p.args) : p.args;
+      const result = await mcpPost({ server, action: "call", tool: p.tool, args });
+      // Auto-retry: if tool not found, discover real names and retry with best match
+      if (result.includes("-32602") && result.toLowerCase().includes("not found") && p.tool) {
+        // Fetch and cache tool list if not already cached
+        if (!mcpToolCache[server]) {
+          const listResult = await mcpPost({ server, action: "list" });
+          const names = [...listResult.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+          if (names.length) mcpToolCache[server] = names;
+          else return `${result}\n\nAvailable tools:\n${listResult}`;
+        }
+        const bestMatch = fuzzyMatchTool(p.tool, mcpToolCache[server]);
+        if (bestMatch && bestMatch !== p.tool) {
+          const retryArgs = args ? fixCommonArgMismatches(bestMatch, args) : args;
+          const retryResult = await mcpPost({ server, action: "call", tool: bestMatch, args: retryArgs });
+          return retryResult;
+        }
+        return `${result}\n\nAvailable tools on "${server}": ${mcpToolCache[server].join(", ")}`;
+      }
+      return result;
+    }
     catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
   }
   return mcpPost({ server, action: "call", tool: s });
@@ -194,6 +251,24 @@ function memoryTool(input: string): string {
   const delM = s.match(/^(?:delete|del|forget)\s+(.+)$/i); if (delM) { localStorage.removeItem(NS + delM[1].trim()); return `Forgot "${delM[1].trim()}".`; }
   if (/^list\b/i.test(s) || !s) { const o = all(); const ks = Object.keys(o); return ks.length ? ks.map((k) => `${k} = ${o[k]}`).join("\n") : "Memory is empty."; }
   return 'Use: "set key: value", "get key", "list", or "delete key".';
+}
+
+async function ragTool(input: string, ctx: ToolCtx): Promise<string> {
+  if (!ctx.selectedRagId) {
+    return "Error: No RAG model is connected to the RAG tool. Click on the RAG tool node and select a deployed RAG model.";
+  }
+  try {
+    const res = await fetch("/api/rag/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: ctx.selectedRagId, query: input }),
+    });
+    const j = await res.json();
+    if (!res.ok) return "Error: " + (j.error || "RAG query failed");
+    return j.answer || "(no response)";
+  } catch (e) {
+    return "Error: " + (e as Error).message;
+  }
 }
 
 export const AGENT_TOOLS: AgentTool[] = [
@@ -241,6 +316,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
+  { id: "rag", name: "rag", desc: "query a deployed RAG model for grounded answers", example: "what is the product return policy?", run: async (input, ctx) => ragTool(input, ctx) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
@@ -291,6 +367,11 @@ When you have enough information, instead output:
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
+Example of a tool call block:
+Thought: I need to query the exa tool to search.
+Action: exa
+Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
+
 Formatting rules for Final Answer:
 - Output clean line-by-line plain text ready to copy-paste directly.
 - Use // at the start of section headers, command lines, or step labels (e.g. // Summary, // Command, // Step 1).
@@ -302,6 +383,24 @@ Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
 export function parseReAct(text: string): ReActParse {
+  const cleanText = text.trim();
+  if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
+    try {
+      const j = JSON.parse(cleanText);
+      if (j && typeof j === "object") {
+        const act = j.action || j.tool;
+        const inp = j.input || j.args || j.action_input;
+        if (act && typeof act === "string") {
+          return {
+            thought: j.thought || "(JSON tool call fallback)",
+            action: act,
+            input: typeof inp === "object" ? JSON.stringify(inp) : String(inp || "")
+          };
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   const thought = text.match(/Thought:\s*([\s\S]*?)(?=\n\s*(?:Action|Final Answer)\s*:|$)/i)?.[1]?.trim();
   const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
   if (final) return { thought, final };

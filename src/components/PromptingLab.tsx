@@ -418,7 +418,7 @@ for chunk in r:
 
       {saved && <div className="ok">{saved}</div>}
       {noProviders && (
-        <div className="warnbar">No provider is configured yet — an admin needs to add one under Admin → Providers before generation works.</div>
+        <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin for a shared one) before generation works.</div>
       )}
 
       {/* ── Top row: Prompt editor | Knobs A | Knobs B ── */}

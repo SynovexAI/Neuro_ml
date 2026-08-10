@@ -7,6 +7,7 @@ import { rateLimitDb } from "@/lib/ratelimit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const toCsv = (rows: Record<string, unknown>[]): string => {
   const cols = Object.keys(rows[0]);
@@ -22,12 +23,31 @@ export async function POST(req: Request) {
   const { url, query } = await req.json().catch(() => ({}));
   const isPg = /^postgres(ql)?:\/\//i.test(url || "");
   const isMy = /^mysql:\/\//i.test(url || "");
-  if (!isPg && !isMy) return NextResponse.json({ error: "Provide a mysql:// or postgres:// connection URL." }, { status: 400 });
+  const isLibsql = /^libsql:\/\//i.test(url || "") || /\.turso\.io/i.test(url || "");
+  if (!isPg && !isMy && !isLibsql) return NextResponse.json({ error: "Provide a mysql://, postgres://, or libsql:// (Turso) connection URL." }, { status: 400 });
   if (!/^\s*select\b/i.test(query || "")) return NextResponse.json({ error: "Only SELECT queries are allowed here." }, { status: 400 });
   if (/\b(into\s+outfile|load_file|information_schema|mysql\.|pg_|;\s*\S)/i.test(query)) return NextResponse.json({ error: "Query rejected (only a single, plain SELECT is allowed)." }, { status: 400 });
   const capped = /limit\s+\d+/i.test(query) ? query : query.replace(/;?\s*$/, " LIMIT 2000");
 
   try {
+    // Turso / libSQL (SQLite-compatible over HTTP)
+    if (isLibsql) {
+      const host = (url.match(/\/\/(?:[^/?@]+@)?([^/?:]+)/) || [])[1] || "";
+      if (host && await resolvesToPrivate(host)) return NextResponse.json({ error: "That host is blocked (internal / private address)." }, { status: 400 });
+      const m = url.match(/[?&]authToken=([^&]+)/i);
+      const authToken = m ? decodeURIComponent(m[1]) : undefined;
+      const clean = url.replace(/([?&])authToken=[^&]+/i, "$1").replace(/[?&]+$/, "");
+      const { createClient } = await import("@libsql/client");
+      const client = createClient({ url: clean, authToken });
+      try {
+        const res = await client.execute(capped);
+        if (!res.rows.length) return NextResponse.json({ error: "Query returned no rows." }, { status: 400 });
+        const cols = res.columns ?? [];
+        const rows = res.rows.map((r) => cols.reduce((o, c) => { o[c] = (r as unknown as Record<string, unknown>)[c]; return o; }, {} as Record<string, unknown>));
+        return NextResponse.json({ csv: toCsv(rows), rows: rows.length });
+      } finally { client.close(); }
+    }
+
     const u = new URL(url);
     if (await resolvesToPrivate(u.hostname)) return NextResponse.json({ error: "That host is blocked (internal / private address)." }, { status: 400 });
 

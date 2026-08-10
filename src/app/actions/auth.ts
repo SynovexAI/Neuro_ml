@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
-import { hashPassword, verifyPassword, createSession, destroySession, uid, userCount } from "@/lib/auth";
+import { hashPassword, verifyPassword, createSession, destroySession, uid, userCount, getSessionUser } from "@/lib/auth";
 import { audit } from "@/lib/monitor";
 
 type State = { error?: string } | undefined;
@@ -27,6 +27,7 @@ export async function signupAction(_prev: State, form: FormData): Promise<State>
     role: first ? "admin" : "student",
     status: first ? "active" : "pending",
   });
+  await audit("signup", id, { email, role: first ? "admin" : "student" }).catch(() => {});
 
   if (first) { await createSession(id); redirect("/dashboard"); }
   redirect("/pending");
@@ -49,6 +50,7 @@ export async function loginAction(_prev: State, form: FormData): Promise<State> 
 }
 
 export async function logoutAction(): Promise<void> {
+  try { const me = await getSessionUser(); if (me) await audit("logout", me.id, {}); } catch { /* ignore */ }
   await destroySession();
   redirect("/login");
 }

@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
-  AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, formatFinalAnswer,
+  AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, mcpTool, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
 import { parseRecords, sampleSources } from "@/lib/etlUtils";
@@ -870,6 +870,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   datetime: { icon: "🕐", label: "Date & time" },
   web_fetch: { icon: "🌐", label: "Web fetch" },
   knowledge: { icon: "📚", label: "Knowledge base" },
+  rag: { icon: "❖", label: "RAG" },
   http_request: { icon: "🔌", label: "HTTP request" },
   human_approval: { icon: "🙋", label: "Human approval" },
   statistics: { icon: "📊", label: "Statistics" },
@@ -1239,11 +1240,85 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [goal, setGoal] = useState("You are a helpful support agent. Use the connected tools when you need fresh facts, and cite what you use.");
   const [temperature, setTemperature] = useState(0.4);
   const [maxTokens, setMaxTokens] = useState(600);
-  const [maxIters, setMaxIters] = useState(6);
+  const [maxIters, setMaxIters] = useState(10);
   const [enabledTools, setEnabledTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [placedTools, setPlacedTools] = useState<Set<string>>(new Set(["calculator", "datetime", "knowledge"]));
   const [knowledgeText, setKnowledgeText] = useState("Returns policy: damaged items may be returned within 30 days of delivery for a full refund. Shipping is free on orders over $50, otherwise a flat $6 fee applies. Gift cards are non-refundable.");
   const [uploading, setUploading] = useState(false);
+  // Saved Studio knowledge bases the user can ground this agent on (loaded into the knowledge index).
+  const [kbs, setKbs] = useState<{ id: string; name: string }[]>([]);
+  const [kbLoad, setKbLoad] = useState(false);
+  useEffect(() => { fetch("/api/kb").then((r) => (r.ok ? r.json() : { kbs: [] })).then((j) => setKbs(j.kbs || [])).catch(() => {}); }, []);
+  
+  const [selectedRagId, setSelectedRagId] = useState("");
+  const [deployedRags, setDeployedRags] = useState<{ id: string; name: string }[]>([]);
+  const [ragLoading, setRagLoading] = useState(false);
+
+  async function loadDeployedRags() {
+    setRagLoading(true);
+    try {
+      const r = await fetch("/api/projects?lab=rag");
+      const j = await r.json();
+      const list = (j.projects || []).filter((p: { published?: boolean }) => p.published);
+      setDeployedRags(list);
+    } catch {
+      setDeployedRags([]);
+    } finally {
+      setRagLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadDeployedRags();
+  }, []);
+
+  const [availableTools, setAvailableTools] = useState<AgentTool[]>(AGENT_TOOLS);
+  const [dynamicMcpMeta, setDynamicMcpMeta] = useState<Record<string, { icon: string; label: string }>>({});
+
+  useEffect(() => {
+    fetch("/api/admin/mcp")
+      .then((r) => (r.ok ? r.json() : { servers: [] }))
+      .then((j) => {
+        const servers = j.servers || [];
+        const enabledServers = servers.filter((s: { name: string; enabled?: boolean }) => s.enabled);
+        const catalogMap: Record<string, { icon: string; label: string; example: string }> = {
+          database: { icon: "🐘", label: "Database", example: "select * from users limit 5" },
+          github: { icon: "🐙", label: "GitHub", example: '{"tool":"search_repositories","args":{"query":"nextjs"}}' },
+          deepwiki: { icon: "📘", label: "DeepWiki", example: '{"tool":"ask_question","args":{"question":"what is nextjs?"}}' },
+          context7: { icon: "📗", label: "Context7", example: '{"tool":"search_docs","args":{"query":"react hooks"}}' },
+          huggingface: { icon: "🤗", label: "Hugging Face", example: '{"tool":"search_models","args":{"query":"llama"}}' },
+          semgrep: { icon: "🛡", label: "Semgrep", example: '{"tool":"scan","args":{"code":"..."}}' },
+          exa: { icon: "🔍", label: "Exa Search", example: '{"tool":"search","args":{"query":"artificial intelligence"}}' },
+          "microsoft-learn": { icon: "📘", label: "Microsoft Learn", example: '{"tool":"search_docs","args":{"query":"azure functions"}}' },
+          "aws-knowledge": { icon: "☁", label: "AWS Knowledge", example: '{"tool":"search_guidance","args":{"query":"s3 security"}}' },
+          grep: { icon: "🔎", label: "Grep", example: '{"tool":"search_code","args":{"query":"fetch"}}' },
+          globalping: { icon: "🌍", label: "Globalping", example: '{"tool":"ping","args":{"target":"google.com"}}' },
+          wolfram: { icon: "🧮", label: "Wolfram Alpha", example: '{"tool":"calculate","args":{"expression":"2+2"}}' },
+        };
+        const newMcpMeta: Record<string, { icon: string; label: string }> = {};
+        const newTools: AgentTool[] = [];
+        enabledServers.forEach((s: { name: string; enabled?: boolean }) => {
+          if (AGENT_TOOLS.some((t) => t.id === s.name)) return;
+          const meta = catalogMap[s.name] || { icon: "🔌", label: s.name, example: '{"tool":"some_tool","args":{}}' };
+          newMcpMeta[s.name] = { icon: meta.icon, label: meta.label };
+          newTools.push({
+            id: s.name,
+            name: s.name,
+            desc: `use your connected ${meta.label} MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one`,
+            example: meta.example,
+            run: async (input: string) => mcpTool(s.name, input),
+          });
+        });
+        setDynamicMcpMeta(newMcpMeta);
+        setAvailableTools([...AGENT_TOOLS, ...newTools]);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function loadKbIntoKnowledge(id: string) {
+    setKbLoad(true);
+    try { const r = await fetch(`/api/kb/${id}/docs`); const j = await r.json(); if (r.ok) { const text = (j.docs || []).map((d: { text: string }) => d.text).join("\n\n").trim(); if (text) setKnowledgeText(text); } } catch { /* ignore */ } finally { setKbLoad(false); }
+  }
   const fileRef = useRef<HTMLInputElement>(null);
 
   // database upload & test state for db_query / db_schema tool nodes
@@ -1326,7 +1401,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   }, [step, agentType, buildMode, aSel]);
 
   const hasProvider = providers.length > 0;
-  const toolList = AGENT_TOOLS.filter((t) => enabledTools.has(t.id));
+  const toolList = availableTools.filter((t) => enabledTools.has(t.id));
   const togglePlaced = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); if (n.has(id)) { n.delete(id); setEnabledTools((e) => { const m = new Set(e); m.delete(id); return m; }); } else { n.add(id); setEnabledTools((e) => new Set(e).add(id)); } return n; }); };
   const connectTool = (id: string) => { setNodePos({}); setPlacedTools((s) => new Set(s).add(id)); setEnabledTools((s) => new Set(s).add(id)); };
   const disconnectTool = (id: string) => { setNodePos({}); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
@@ -1591,7 +1666,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       if (cfg.name) setName(String(cfg.name));
       if (react) {
         if (cfg.goal) setGoal(String(cfg.goal));
-        if (Array.isArray(cfg.tools)) { const picked = new Set<string>(cfg.tools.filter((t: string) => AGENT_TOOLS.some((x) => x.id === t))); setEnabledTools(picked); setPlacedTools(new Set(picked)); }
+        if (Array.isArray(cfg.tools)) { const picked = new Set<string>(cfg.tools); setEnabledTools(picked); setPlacedTools(new Set(picked)); }
         if (cfg.maxIters) setMaxIters(Math.max(1, Math.min(10, Number(cfg.maxIters) || 6)));
         setBuildMode("visual");
       } else if (Array.isArray(cfg.steps)) setSteps(cfg.steps.slice(0, 6).map((s: { name?: string; instruction?: string }, i: number) => ({ id: `s${i + 1}`, name: String(s.name || `Step ${i + 1}`), instruction: String(s.instruction || "") })));
@@ -1603,7 +1678,10 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   async function runReact() {
     setRunning(true); setTrace([]); setFinalOut(""); setMsg(""); setMetrics(null); setPendingApproval(null);
     setNodeStatus({ trigger: "done", model: "done", agent: "running" });
-    const ctx: ToolCtx = { requestApproval: (q) => new Promise<string>((resolve) => setPendingApproval({ q, resolve })) };
+    const ctx: ToolCtx = {
+      requestApproval: (q) => new Promise<string>((resolve) => setPendingApproval({ q, resolve })),
+      selectedRagId: selectedRagId || undefined,
+    };
     if (enabledTools.has("knowledge")) { const kb = buildKnowledge(knowledgeText); if (kb) { ctx.knowledgeIndex = kb.index as RagIndex; ctx.knowledgeChunks = kb.chunks; } }
     if ((enabledTools.has("db_query") || enabledTools.has("db_schema")) && dbDataText.trim()) {
       ctx.dbTable = parseRecords(dbDataText);
@@ -1731,6 +1809,23 @@ if __name__ == "__main__":
     }
     const tls = toolList;
     const imports = ["import re"]; const defs: string[] = []; const reg: string[] = [];
+    if (tls.some((t) => t.id === "rag")) {
+      if (!imports.includes("import requests")) imports.push("import requests");
+      reg.push(`"rag": tool_rag`);
+      defs.push(`RAG_PROJECT_ID = ${JSON.stringify(selectedRagId || "")}
+WORKSPACE_HOST = os.environ.get("WORKSPACE_HOST", "http://localhost:3000")
+
+def tool_rag(x):
+    if not RAG_PROJECT_ID:
+        return "Error: No RAG model is connected."
+    try:
+        url = f"{WORKSPACE_HOST}/api/rag/query"
+        r = requests.post(url, json={"projectId": RAG_PROJECT_ID, "query": x}, headers={"content-type": "application/json"}, timeout=12)
+        return r.json().get("answer", "(no response)")
+    except Exception as e:
+        return f"Error querying RAG: {e}"`);
+    }
+
     if (tls.some((t) => t.id === "calculator")) { imports.push("import math"); reg.push(`"calculator": tool_calculator`); defs.push(`def tool_calculator(x):
     try:
         return str(eval(x, {"__builtins__": {}}, {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}))
@@ -1844,7 +1939,8 @@ if __name__ == "__main__":
   function agentConfig() {
     return {
       type: agentType, name, description, systemPrompt: goal, provider: providerId, model, temperature, maxIterations: maxIters,
-      tools: [...enabledTools], knowledge: enabledTools.has("knowledge") ? knowledgeText : undefined,
+      tools: [...enabledTools], selectedRagId: enabledTools.has("rag") ? selectedRagId : undefined,
+      knowledge: enabledTools.has("knowledge") ? knowledgeText : undefined,
       steps: agentType === "workflow" ? steps.map((s) => ({ name: s.name, instruction: s.instruction })) : undefined, task,
     };
   }
@@ -1905,7 +2001,8 @@ if __name__ == "__main__":
     if (cfg.model) setModel(String(cfg.model));
     if (typeof cfg.temperature === "number") setTemperature(cfg.temperature);
     if (cfg.maxIterations) setMaxIters(Math.max(1, Math.min(10, Number(cfg.maxIterations))));
-    if (Array.isArray(cfg.tools)) { const s = new Set<string>(cfg.tools.filter((t: string) => AGENT_TOOLS.some((x) => x.id === t))); setEnabledTools(s); setPlacedTools(new Set(s)); }
+    if (cfg.selectedRagId) setSelectedRagId(cfg.selectedRagId);
+    if (Array.isArray(cfg.tools)) { const s = new Set<string>(cfg.tools); setEnabledTools(s); setPlacedTools(new Set(s)); }
     if (cfg.knowledge) setKnowledgeText(String(cfg.knowledge));
     if (Array.isArray(cfg.steps)) setSteps(cfg.steps.map((s: any, i: number) => ({ id: `s${i + 1}`, name: String(s.name || `Step ${i + 1}`), instruction: String(s.instruction || "") })));
     if (cfg.task) setTask(String(cfg.task));
@@ -1946,7 +2043,7 @@ if __name__ == "__main__":
         </div>
       </div>
       {runtime === "nat" ? <NatAgentPanel /> : <>
-      {provKnown && !hasProvider && <div className="warnbar">No provider configured — an admin must add one under Admin → Providers before you can run an agent.</div>}
+      {provKnown && !hasProvider && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin) before you can run an agent.</div>}
       <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>To attach <b>MCP servers</b> or <b>knowledge bases</b> to an agent, switch to the <b>NVIDIA NAT</b> runtime above — the in-browser runtime uses built-in tools only.</span></div>
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
@@ -2029,7 +2126,17 @@ if __name__ == "__main__":
                   {addOpen && (
                     <div className="addmenu2">
                       <div className="hd">Add a tool node to the canvas</div>
-                      {AGENT_TOOLS.map((t) => { const on = placedTools.has(t.id); return <div key={t.id} className="ai" onClick={() => { togglePlaced(t.id); if (!on) setASel("tool:" + t.id); }}><span>{TOOL_META[t.id]?.icon ?? "🔧"}</span>{TOOL_META[t.id]?.label ?? t.id}<span className={`ai-state ${on ? "on" : ""}`}>{on ? "✓ on canvas" : "+ add"}</span></div>; })}
+                      {availableTools.map((t) => {
+                        const on = placedTools.has(t.id);
+                        const meta = TOOL_META[t.id] || dynamicMcpMeta[t.id] || { icon: "🔌", label: t.id };
+                        return (
+                          <div key={t.id} className="ai" onClick={() => { togglePlaced(t.id); if (!on) setASel("tool:" + t.id); }}>
+                            <span>{meta.icon}</span>
+                            {meta.label}
+                            <span className={`ai-state ${on ? "on" : ""}`}>{on ? "✓ on canvas" : "+ add"}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -2046,7 +2153,7 @@ if __name__ == "__main__":
                   <div className="insp-field"><div className="k">Agent name</div><input type="text" value={name} onChange={(e) => setName(e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Description</div><input type="text" value={description} onChange={(e) => setDescription(e.target.value)} /></div>
                   <div className="insp-field"><div className="k">System prompt (role & goal)</div><textarea rows={4} value={goal} onChange={(e) => setGoal(e.target.value)} /></div>
-                  <div className="insp-field"><div className="k">Max reasoning steps · {maxIters}</div><input type="range" min={1} max={10} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div>
+                  <div className="insp-field"><div className="k">Max reasoning steps · {maxIters}</div><input type="range" min={1} max={20} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Connected</div><div className="chip-row"><span className="c">{model || providerLabel}</span>{[...enabledTools].map((t) => <span key={t} className="c">{TOOL_META[t]?.label}</span>)}</div></div>
                 </>)}
                 {selNode?.type === "model" && (<>
@@ -2059,14 +2166,75 @@ if __name__ == "__main__":
                   <div className="insp-field"><div className="k">Temperature · {temperature}</div><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Max tokens</div><input type="text" value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value) || 600)} /></div>
                 </>)}
-                {selNode?.type === "tool" && selNode.toolId !== "knowledge" && selNode.toolId !== "db_query" && selNode.toolId !== "db_schema" && (<>
-                  <div className="insp-field"><div className="k">Tool</div><div className="note" style={{ margin: 0 }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.desc}</div></div>
-                  <div className="insp-field"><div className="k">Example input the agent sends</div><div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.example}</div></div>
-                  <div className="row" style={{ gap: 8 }}>
-                    {enabledTools.has(selNode.toolId!) ? <button className="btn ghost sm" onClick={() => disconnectTool(selNode.toolId!)}>Disconnect</button> : <button className="btn sm" onClick={() => connectTool(selNode.toolId!)}>Connect to agent</button>}
-                    <button className="btn ghost sm" onClick={() => { removeToolNode(selNode.toolId!); setASel("agent"); }}>Remove node</button>
+                {selNode?.type === "tool" && selNode.toolId !== "knowledge" && selNode.toolId !== "rag" && selNode.toolId !== "db_query" && selNode.toolId !== "db_schema" && (() => {
+                  const t = availableTools.find((x) => x.id === selNode.toolId);
+                  return (<>
+                    <div className="insp-field"><div className="k">Tool</div><div className="note" style={{ margin: 0 }}>{t?.desc}</div></div>
+                    <div className="insp-field"><div className="k">Example input the agent sends</div><div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{t?.example}</div></div>
+                    <div className="row" style={{ gap: 8 }}>
+                      {enabledTools.has(selNode.toolId!) ? <button className="btn ghost sm" onClick={() => disconnectTool(selNode.toolId!)}>Disconnect</button> : <button className="btn sm" onClick={() => connectTool(selNode.toolId!)}>Connect to agent</button>}
+                      <button className="btn ghost sm" onClick={() => { removeToolNode(selNode.toolId!); setASel("agent"); }}>Remove node</button>
+                    </div>
+                    <div className="note" style={{ marginTop: 8 }}>Drag its top dot to the Agent to wire it, or click a wire and press <b>Delete</b>. {enabledTools.has(selNode.toolId!) ? "" : "Unconnected tools aren't used at run."}</div>
+                  </>);
+                })()}
+                {selNode?.type === "tool" && selNode.toolId === "rag" && (<>
+                  <div className="insp-field">
+                    <div className="k">Select a Deployed RAG Model</div>
+                    {ragLoading ? (
+                      <div className="note">Loading deployed RAG models...</div>
+                    ) : deployedRags.length > 0 ? (
+                      <select
+                        value={selectedRagId}
+                        onChange={(e) => setSelectedRagId(e.target.value)}
+                      >
+                        <option value="">— Select a RAG build —</option>
+                        {deployedRags.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="note" style={{ color: "var(--warn)" }}>
+                        No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click &quot;Deploy&quot; first!
+                      </div>
+                    )}
                   </div>
-                  <div className="note" style={{ marginTop: 8 }}>Drag its top dot to the Agent to wire it, or click a wire and press <b>Delete</b>. {enabledTools.has(selNode.toolId!) ? "" : "Unconnected tools aren't used at run."}</div>
+                  <div className="insp-field">
+                    <div className="k">Tool Description</div>
+                    <div className="note" style={{ margin: 0 }}>
+                      {AGENT_TOOLS.find((t) => t.id === "rag")?.desc}
+                    </div>
+                  </div>
+                  <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                    {enabledTools.has("rag") ? (
+                      <button className="btn ghost sm" onClick={() => disconnectTool("rag")}>
+                        Disconnect
+                      </button>
+                    ) : (
+                      <button
+                        className="btn sm"
+                        onClick={() => connectTool("rag")}
+                        disabled={!selectedRagId}
+                      >
+                        Connect to agent
+                      </button>
+                    )}
+                    <button
+                      className="btn ghost sm"
+                      onClick={() => {
+                        removeToolNode("rag");
+                        setASel("agent");
+                      }}
+                    >
+                      Remove node
+                    </button>
+                  </div>
+                  <div className="note" style={{ marginTop: 8 }}>
+                    {selectedRagId ? "✓ RAG model connected. " : "⚠ Please select a RAG model above to connect. "}
+                    Drag the top dot to wire it to the Agent.
+                  </div>
                 </>)}
                 {selNode?.type === "tool" && selNode.toolId === "db_schema" && (<>
                   <div className="insp-field">
@@ -2250,6 +2418,13 @@ if __name__ == "__main__":
                   </div>
                 </>)}
                 {selNode?.type === "tool" && selNode.toolId === "knowledge" && (<>
+                  {kbs.length > 0 && <div className="insp-field"><div className="k">Load from a saved Knowledge base</div>
+                    <select defaultValue="" onChange={(e) => { if (e.target.value) loadKbIntoKnowledge(e.target.value); }} disabled={kbLoad}>
+                      <option value="">— or paste text below —</option>
+                      {kbs.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+                    </select>
+                    <div className="note" style={{ marginTop: 4 }}>{kbLoad ? "loading KB…" : "Pulls a Studio KB's docs into the box below — the agent grounds on it."}</div>
+                  </div>}
                   <div className="insp-field"><div className="k">Knowledge base (the agent searches this)</div><textarea rows={5} value={knowledgeText} onChange={(e) => setKnowledgeText(e.target.value)} /></div>
                   <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                     <button className="btn ghost sm" onClick={() => fileRef.current?.click()} disabled={uploading}>{uploading ? "Parsing…" : "Upload doc"}</button>
@@ -2276,12 +2451,37 @@ if __name__ == "__main__":
               </div>
               <div className="split col-2e" style={{ marginTop: 12 }}><div><label className="fld">Temperature · {temperature}</label><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div><div><label className="fld">Max reasoning steps · {maxIters}</label><input type="range" min={1} max={10} value={maxIters} onChange={(e) => setMaxIters(+e.target.value)} /></div></div>
               <label className="fld" style={{ marginTop: 12 }}>Tools</label>
-              <div className="checklist">{AGENT_TOOLS.map((t) => <span key={t.id} className={`chk ${enabledTools.has(t.id) ? "on" : ""}`} onClick={() => toggleManual(t.id)} title={t.desc}>{t.name}</span>)}</div>
+              <div className="checklist">{availableTools.map((t) => <span key={t.id} className={`chk ${enabledTools.has(t.id) ? "on" : ""}`} onClick={() => toggleManual(t.id)} title={t.desc}>{t.name}</span>)}</div>
               {enabledTools.has("knowledge") && (<>
                 <label className="fld" style={{ marginTop: 12 }}>Knowledge base</label>
                 <textarea rows={3} value={knowledgeText} onChange={(e) => setKnowledgeText(e.target.value)} />
                 <div className="row" style={{ marginTop: 8, gap: 8 }}><button className="btn ghost sm" onClick={() => fileRef.current?.click()} disabled={uploading}>{uploading ? "Parsing…" : "Upload doc (pdf/docx/xlsx)"}</button><span className="note">{knowledgeText.split(/\s+/).filter(Boolean).length} words loaded</span></div>
               </>)}
+              {enabledTools.has("rag") && (
+                <>
+                  <label className="fld" style={{ marginTop: 12 }}>Connected RAG Model</label>
+                  {ragLoading ? (
+                    <div className="note">Loading deployed RAG models...</div>
+                  ) : deployedRags.length > 0 ? (
+                    <select
+                      value={selectedRagId}
+                      onChange={(e) => setSelectedRagId(e.target.value)}
+                      style={{ width: "100%", padding: "8px", borderRadius: "8px", border: "1px solid var(--border)", background: "var(--surface)" }}
+                    >
+                      <option value="">— Select a RAG build —</option>
+                      {deployedRags.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="note" style={{ color: "var(--warn)" }}>
+                      No deployed RAG models found. Open RAG Lab, connect an LLM to a dataset, and click &quot;Deploy&quot; first!
+                    </div>
+                  )}
+                </>
+              )}
               <div className="stepnav"><button className="btn ghost" onClick={() => setStep("type")}>← Back</button><button className="btn" onClick={startRun} disabled={!hasProvider}>Next: Run →</button></div>
             </div>
           </div>

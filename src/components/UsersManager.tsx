@@ -20,6 +20,14 @@ export default function UsersManager({ initial, meId, defaultLimit }: { initial:
     setBusy(null);
   }
 
+  async function remove(id: string, email: string) {
+    if (!confirm(`Permanently delete ${email}? This removes their account, sessions, keys, projects, and knowledge bases. This cannot be undone.`)) return;
+    setBusy(id);
+    await fetch(`/api/admin/users/${id}`, { method: "DELETE" });
+    router.refresh();
+    setBusy(null);
+  }
+
   const badge = (s: string) => s === "active" ? "badge good" : s === "pending" ? "badge warn" : "badge";
   const fmt = (n: number) => n.toLocaleString();
 
@@ -66,6 +74,7 @@ export default function UsersManager({ initial, meId, defaultLimit }: { initial:
                       {u.status === "pending" && <button className="btn sm" disabled={busy === u.id} onClick={() => patch(u.id, { status: "active" })}>Approve</button>}
                       {u.status === "active" && u.id !== meId && <button className="btn ghost sm" disabled={busy === u.id} onClick={() => patch(u.id, { status: "suspended" })}>Suspend</button>}
                       {u.status === "suspended" && <button className="btn ghost sm" disabled={busy === u.id} onClick={() => patch(u.id, { status: "active" })}>Reactivate</button>}
+                      {u.id !== meId && <button className="btn ghost sm" disabled={busy === u.id} onClick={() => remove(u.id, u.email)} title="Permanently delete this account" style={{ color: "var(--crit)" }}>Delete</button>}
                     </div>
                   </td>
                 </tr>

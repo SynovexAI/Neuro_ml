@@ -7,6 +7,7 @@ import { audit } from "@/lib/monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 // Streams plain-text tokens from the admin-configured provider (OpenAI-compatible).
 // Accepts optional `providerId` in the body to use a specific configured provider.
@@ -26,8 +27,8 @@ export async function POST(req: Request) {
   let prov: Awaited<ReturnType<typeof getActiveProvider>>;
   try {
     prov = body.providerId
-      ? await getProviderById(String(body.providerId))
-      : await getActiveProvider();
+      ? await getProviderById(String(body.providerId), user.id, user.role === "admin")
+      : await getActiveProvider(user.id, user.role === "admin");
   } catch {
     return NextResponse.json({ error: "Database error while loading provider config. Please retry." }, { status: 503 });
   }
