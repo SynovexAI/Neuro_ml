@@ -58,7 +58,7 @@ const STREAM_SOURCES: PalItem[] = [
 ];
 const opItem = (t: OpType, cat: Cat = "transformation"): PalItem => ({ key: "op-" + t, label: OP_META[t].label, icon: OP_META[t].icon, cat, kind: "op", opType: t });
 const TRANSFORMS: PalItem[] = [
-  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse"] as OpType[]).map((t) => opItem(t, "transformation")),
+  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse", "scd2", "fuzzydedupe", "quality"] as OpType[]).map((t) => opItem(t, "transformation")),
   opItem("join", "integration"), opItem("union", "integration"),
   // New integration ops
   opItem("lookup", "integration"),
@@ -1216,6 +1216,19 @@ function OpConfig({ op, cols, bCols, patchOp, colSel }: { op: EtlOp; cols: strin
         <div className="insp-field"><div className="k">Date column</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
         <div className="insp-field"><div className="k">Extract</div><select value={o.fn} onChange={(e) => patchOp({ fn: e.target.value })}><option value="year">year</option><option value="month">month</option><option value="day">day</option><option value="weekday">weekday</option><option value="iso">ISO date</option><option value="days_since">days since</option></select></div>
         <div className="insp-field"><div className="k">Output column</div><input type="text" value={o.name ?? ""} onChange={(e) => patchOp({ name: e.target.value })} /></div>
+      </>}
+      {o.type === "scd2" && <>
+        <div className="insp-field"><div className="k">Business Key</div>{colSel(o.businessKey || o.col, (v) => patchOp({ businessKey: v, col: v }))}</div>
+        <div className="note" style={{ marginTop: 6, fontSize: 11 }}>Adds effective_start, effective_end, and is_current tracking fields automatically.</div>
+      </>}
+      {o.type === "fuzzydedupe" && <>
+        <div className="insp-field"><div className="k">Column to Deduplicate</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
+        <div className="insp-field"><div className="k">Similarity Threshold ({o.threshold ?? 0.8})</div><input type="range" min="0.5" max="1.0" step="0.05" value={o.threshold ?? 0.8} onChange={(e) => patchOp({ threshold: parseFloat(e.target.value) })} style={{ width: "100%" }} /></div>
+      </>}
+      {o.type === "quality" && <>
+        <div className="insp-field"><div className="k">Column to Validate</div>{colSel(o.qualityCol || o.col, (v) => patchOp({ qualityCol: v, col: v }))}</div>
+        <div className="insp-field"><div className="k">Validation Rule</div><select value={o.rule || "not_null"} onChange={(e) => patchOp({ rule: e.target.value })}><option value="not_null">Not Null</option><option value="positive">Numeric &gt; 0</option><option value="numeric">Is Numeric</option></select></div>
+        <div className="insp-field"><div className="k">Status Column Name</div><input type="text" value={o.name ?? "_quality_status"} onChange={(e) => patchOp({ name: e.target.value })} /></div>
       </>}
     </>
   );
