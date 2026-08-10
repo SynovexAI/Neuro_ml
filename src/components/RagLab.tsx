@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { chunkText, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric } from "@/lib/ragUtils";
+import { chunkText, chunkBy, CHUNK_STRATEGY_LABEL, buildIndex, retrieve, retrieveDense, simDense, simSparse, mmrRerank, retrievalMetrics, cosine, tokenize, queryVector, METRIC_LABEL, METRIC_MILVUS, type RagIndex, type Strategy, type Vec, type Metric, type ChunkStrategy } from "@/lib/ragUtils";
 import { extractGraph, graphFromTriples, retrieveGraph, layoutGraph, type KnowledgeGraph, type KgEdge } from "@/lib/kgUtils";
 import Plot from "@/components/Plot";
 import { plotlyTheme } from "@/lib/edaCharts";
@@ -46,9 +46,9 @@ const EMB_SUGGEST: Record<string, string[]> = {
 };
 const embSuggestFor = (prov?: string): string[] => EMB_SUGGEST[(prov || "").toLowerCase()] || EMB_SUGGEST.openai;
 
-function computeChunks(docs: Doc[], size: number, overlap: number): Chunk[] {
+function computeChunks(docs: Doc[], size: number, overlap: number, strategy: ChunkStrategy = "fixed"): Chunk[] {
   const out: Chunk[] = [];
-  for (const d of docs) for (const t of chunkText(d.text, size, overlap)) out.push({ text: t, docName: d.name, docKind: d.kind });
+  for (const d of docs) for (const t of chunkBy(d.text, strategy, size, overlap)) out.push({ text: t, docName: d.name, docKind: d.kind });
   return out;
 }
 function topTermsW(v: Vec, n = 6): { term: string; w: number }[] {
@@ -124,13 +124,25 @@ export default function RagLab() {
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
   const [metric, setMetric] = useState<Metric>("cosine");
   const [topK, setTopK] = useState(3);
+  const [chunkStrategy, setChunkStrategy] = useState<ChunkStrategy>("fixed");
+  const [strategyRows, setStrategyRows] = useState<{ strat: ChunkStrategy; chunks: number; top: number; avg: number }[]>([]);
+  const [alpha, setAlpha] = useState(0.5); // hybrid dense↔keyword weight
+  // query transformation (before retrieval) + LLM reranking (after)
+  const [queryMode, setQueryMode] = useState<"none" | "rewrite" | "hyde" | "multi">("none");
+  const [transformInfo, setTransformInfo] = useState<{ mode: string; queries: string[]; hyde?: string } | null>(null);
+  const [rerankScores, setRerankScores] = useState<Record<number, number> | null>(null);
+  // faithfulness / groundedness (LLM-as-judge, after generation)
+  const [faith, setFaith] = useState<{ running: boolean; score: number; claims: { text: string; supported: boolean; why: string }[] } | null>(null);
+  // conversational RAG (Steps mode): multi-turn transcript + follow-up rewriting
+  const [convo, setConvo] = useState(false);
+  const [transcript, setTranscript] = useState<{ q: string; a: string }[]>([]);
   // neural embeddings (real, via provider) + re-ranking + retrieval metrics
   const [embedMode, setEmbedMode] = useState<"tfidf" | "neural">("tfidf");
   const [embModel, setEmbModel] = useState("");
   const [denseVecs, setDenseVecs] = useState<number[][] | null>(null);
   const [embedInfo, setEmbedInfo] = useState<{ model: string; dim: number } | null>(null);
   const [qVec, setQVec] = useState<number[] | null>(null);
-  const [rerank, setRerank] = useState<"none" | "mmr">("none");
+  const [rerank, setRerank] = useState<"none" | "mmr" | "llm">("none");
   const [mmrLambda, setMmrLambda] = useState(0.7);
   const [relevant, setRelevant] = useState<Set<number>>(new Set());
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
@@ -444,7 +456,7 @@ export default function RagLab() {
   // ── chunking (cards fade in with a CSS stagger) ──
   function runChunking() {
     if (timer.current) clearTimeout(timer.current);
-    const cs = computeChunks(docs, size, overlap);
+    const cs = computeChunks(docs, size, overlap, chunkStrategy);
     setChunks(cs); setIndex(null); setChunking(true); setChunkPlayKey((k) => k + 1);
     setInspIdx(0); setInspPlaying(cs.length > 0);
     timer.current = setTimeout(() => setChunking(false), Math.min(2000, cs.length * 90 + 400));
@@ -508,6 +520,9 @@ export default function RagLab() {
     if (typeof c.mmrLambda === "number") setMmrLambda(c.mmrLambda);
     if (c.embModel) setEmbModel(c.embModel);
     if (c.kgHops) setKgHops(c.kgHops);
+    if (typeof c.alpha === "number") setAlpha(c.alpha);
+    if (c.chunkStrategy === "fixed" || c.chunkStrategy === "sentence" || c.chunkStrategy === "paragraph" || c.chunkStrategy === "semantic") setChunkStrategy(c.chunkStrategy);
+    if (c.queryMode === "none" || c.queryMode === "rewrite" || c.queryMode === "hyde" || c.queryMode === "multi") setQueryMode(c.queryMode);
     setMsg("Loaded experiment settings — re-run chunking & index to apply them.");
   }
   async function saveProject() {
@@ -582,9 +597,60 @@ export default function RagLab() {
     try { const v = (await embedViaApi([question]))[0] || null; setQVec(v); return v; } catch { return null; }
   }
   // Full ranking of every chunk for a strategy (dense when neural, else TF-IDF/BM25).
-  function fullRank(strat: Strategy, qv: number[] | null): { i: number; score: number }[] {
-    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, question, qv, denseVecs, strat, chunks.length, metric);
-    return retrieve(index!, question, strat, chunks.length, metric);
+  // `queryText` (rewritten/expanded query) drives the keyword side; `qv` the dense side.
+  function fullRank(strat: Strategy, qv: number[] | null, queryText: string = question): { i: number; score: number }[] {
+    if (embedMode === "neural" && denseVecs && qv) return retrieveDense(index!, queryText, qv, denseVecs, strat, chunks.length, metric, alpha);
+    return retrieve(index!, queryText, strat, chunks.length, metric, alpha);
+  }
+  // Embed an arbitrary text into the query vector space (for HyDE / multi-query / rewrite).
+  async function embedText(text: string): Promise<number[] | null> {
+    try { return (await embedViaApi([text]))[0] || null; } catch { return null; }
+  }
+  // ── query transformation (rewrite / HyDE / multi-query) via the LLM ──
+  async function transformQuery(q: string): Promise<{ queries: string[]; hyde?: string }> {
+    if (queryMode === "none") return { queries: [q] };
+    try {
+      if (queryMode === "rewrite") {
+        const out = await agentChat([
+          { role: "system", content: "Rewrite the user's question into a single concise search query optimized for document retrieval. Return ONLY the query text, no quotes or preamble." },
+          { role: "user", content: q },
+        ], { maxTokens: 80 });
+        const rw = out.trim().split("\n")[0].replace(/^["']|["']$/g, "").slice(0, 300) || q;
+        return { queries: [rw] };
+      }
+      if (queryMode === "hyde") {
+        const out = await agentChat([
+          { role: "system", content: "Write a short, plausible passage (2-3 sentences) that would directly answer the user's question, as if from a reference document. This hypothetical passage is used to search for real documents (HyDE). Return ONLY the passage." },
+          { role: "user", content: q },
+        ], { maxTokens: 220 });
+        return { queries: [q], hyde: out.trim().slice(0, 1200) };
+      }
+      // multi-query: several diverse phrasings
+      const out = await agentChat([
+        { role: "system", content: "Generate 3 alternative phrasings of the user's question that would help retrieve relevant documents (synonyms, rephrasings, sub-questions). Return ONLY a JSON array of 3 strings, no prose." },
+        { role: "user", content: q },
+      ], { maxTokens: 200 });
+      const m = out.match(/\[[\s\S]*\]/);
+      const arr = m ? JSON.parse(m[0]) : [];
+      const qs = [q, ...(Array.isArray(arr) ? arr : []).filter((x: unknown) => typeof x === "string").map((s: string) => s.slice(0, 300))].slice(0, 4);
+      return { queries: qs };
+    } catch { return { queries: [q] }; }
+  }
+  // ── LLM reranker: score candidate chunks 0-10 for relevance, reorder ──
+  async function llmRerank(cands: { i: number; score: number }[], queryText: string, k: number): Promise<{ order: number[]; scores: Record<number, number> }> {
+    const list = cands.map((c, n) => `[${n}] ${chunks[c.i].text.slice(0, 320)}`).join("\n\n");
+    try {
+      const out = await agentChat([
+        { role: "system", content: `Score each candidate passage 0-10 for how well it helps answer the question (10 = directly answers, 0 = irrelevant). Return ONLY a JSON array of {\"n\":<index>,\"score\":<0-10>} for every candidate, no prose.` },
+        { role: "user", content: `Question: ${queryText}\n\nCandidates:\n${list}` },
+      ], { maxTokens: 400 });
+      const m = out.match(/\[[\s\S]*\]/);
+      const arr: { n: number; score: number }[] = m ? JSON.parse(m[0]) : [];
+      const scores: Record<number, number> = {};
+      arr.forEach((r) => { const c = cands[r.n]; if (c) scores[c.i] = Math.max(0, Math.min(10, Number(r.score) || 0)); });
+      const order = [...cands].sort((a, b) => (scores[b.i] ?? -1) - (scores[a.i] ?? -1)).slice(0, k).map((c) => c.i);
+      return { order: order.length ? order : cands.slice(0, k).map((c) => c.i), scores };
+    } catch { return { order: cands.slice(0, k).map((c) => c.i), scores: {} }; }
   }
   // Apply MMR re-ranking (diversity) to a ranked candidate list, returning top-k indices.
   function applyRerank(ranked: { i: number; score: number }[], k: number): number[] {
@@ -638,35 +704,78 @@ export default function RagLab() {
 
   async function ask() {
     if (chunks.length === 0 || !canQuery) { setAnswer("Build the index first (step 3)."); return; }
-    setRunning(true); setTab("out"); setAnswer(""); setMeta("retrieving…");
+    setRunning(true); setTab("out"); setAnswer(""); setFaith(null); setRerankScores(null); setTransformInfo(null); setMeta("retrieving…");
     const neural = embedMode === "neural" && !!denseVecs;
+
+    // Conversational: rewrite a follow-up into a standalone question using the transcript.
+    let effQ = question;
+    if (convo && transcript.length) {
+      setMeta("resolving follow-up…");
+      try {
+        const hist = transcript.slice(-4).map((t) => `Q: ${t.q}\nA: ${t.a}`).join("\n");
+        const sa = await agentChat([
+          { role: "system", content: "Rewrite the user's follow-up into a standalone question that includes any context needed from the conversation. Return ONLY the rewritten question." },
+          { role: "user", content: `Conversation so far:\n${hist}\n\nFollow-up: ${question}` },
+        ], { maxTokens: 100 });
+        effQ = sa.trim().split("\n")[0].replace(/^["']|["']$/g, "").slice(0, 300) || question;
+      } catch { effQ = question; }
+    }
+
+    // Query transformation (rewrite / HyDE / multi-query).
+    let queries = [effQ]; let hyde: string | undefined;
+    if (queryMode !== "none") {
+      setMeta("transforming query…");
+      const tr = await transformQuery(effQ);
+      queries = tr.queries.length ? tr.queries : [effQ]; hyde = tr.hyde;
+      setTransformInfo({ mode: queryMode, queries, hyde });
+    }
+    const primaryQuery = queries[0] || effQ;
+
     const steps = [
-      { who: backend === "kg" ? "link entities" : "embed query", what: backend === "kg" ? "match query terms → graph nodes" : neural ? `question → ${embedInfo?.dim ?? 0}-d neural vector` : "question → TF-IDF vector" },
-      { who: "retrieve", what: backend === "kg" ? `graph traversal · ${kgHops}-hop · top ${topK}` : backend === "hybrid" ? `graph → vector rank · top ${topK}` : `${strategy}${rerank === "mmr" ? " + MMR" : ""} · top-k ${topK}` },
+      { who: backend === "kg" ? "link entities" : queryMode !== "none" ? "transform + embed" : "embed query", what: backend === "kg" ? "match query terms → graph nodes" : neural ? `${queryMode === "hyde" ? "hypothetical answer" : "query"} → ${embedInfo?.dim ?? 0}-d vector` : "query → TF-IDF vector" },
+      { who: "retrieve", what: backend === "kg" ? `graph traversal · ${kgHops}-hop · top ${topK}` : backend === "hybrid" ? `graph → vector rank · top ${topK}` : `${strategy}${strategy === "hybrid" ? ` α=${alpha.toFixed(2)}` : ""}${rerank === "mmr" ? " + MMR" : rerank === "llm" ? " + LLM rerank" : ""} · top-k ${topK}` },
       { who: "prompt", what: "inject retrieved context + sources" },
       { who: "generate", what: `stream → ${model || provider || "provider"}` },
     ];
     setTraceStep(steps, 1);
+
     let top: { i: number; score: number }[];
     let rankedAll: { i: number; score: number }[] = [];
     let selOrder: number[] = [];
     if (backend === "kg" && graph) {
-      const r = retrieveGraph(graph, question, topK, kgHops);
+      const r = retrieveGraph(graph, primaryQuery, topK, kgHops);
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
       top = r.chunkIds.map((i, rank) => ({ i, score: Math.max(0.05, 1 - rank * 0.12) }));
       rankedAll = top; selOrder = top.map((h) => h.i);
     } else if (backend === "hybrid" && graph && index) {
-      const r = retrieveGraph(graph, question, Math.max(topK * 3, 8), Math.max(kgHops, 2));
+      const r = retrieveGraph(graph, primaryQuery, Math.max(topK * 3, 8), Math.max(kgHops, 2));
       setKgSeeds(r.seeds); setKgVisited(r.nodes); setKgPath(r.path); setKgLayers(r.layers); setKgPlayKey((k) => k + 1);
-      const cand = new Set(r.chunkIds); const qv = await ensureQVec();
-      const ranked = fullRank(strategy, qv); const inGraph = ranked.filter((h) => cand.has(h.i));
+      const cand = new Set(r.chunkIds); const qv = neural ? await embedText(hyde || primaryQuery) : null;
+      const ranked = fullRank(strategy, qv, primaryQuery); const inGraph = ranked.filter((h) => cand.has(h.i));
       const order = applyRerank(inGraph.length ? inGraph : ranked, topK);
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
       rankedAll = ranked; selOrder = order;
     } else {
-      const qv = await ensureQVec();
-      const ranked = fullRank(strategy, qv); const order = applyRerank(ranked, topK);
+      // vector store: multi-query merge → candidate ranking → rerank (none / MMR / LLM)
+      let ranked: { i: number; score: number }[];
+      if (queries.length > 1) {
+        const per = await Promise.all(queries.map(async (qq) => { const v = neural ? await embedText(qq) : null; return fullRank(strategy, v, qq); }));
+        const best = new Map<number, number>();
+        per.flat().forEach((h) => best.set(h.i, Math.max(best.get(h.i) ?? -Infinity, h.score)));
+        ranked = [...best.entries()].map(([i, score]) => ({ i, score })).sort((a, b) => b.score - a.score);
+      } else {
+        const qv = neural ? await embedText(hyde || primaryQuery) : null;
+        ranked = fullRank(strategy, qv, primaryQuery);
+      }
+      let order: number[];
+      if (rerank === "llm") {
+        setMeta("LLM reranking…");
+        const rr = await llmRerank(ranked.slice(0, Math.max(topK * 3, topK)), primaryQuery, topK);
+        order = rr.order; setRerankScores(rr.scores);
+      } else {
+        order = applyRerank(ranked, topK);
+      }
       const scoreOf = new Map(ranked.map((h) => [h.i, h.score]));
       top = order.map((i) => ({ i, score: scoreOf.get(i) ?? 0 }));
       rankedAll = ranked; selOrder = order;
@@ -675,9 +784,11 @@ export default function RagLab() {
     setDebugRank(rankedAll); setSelectedIdx(selOrder);
     setTraceStep(steps, 3);
     const context = top.map((h) => `[chunk ${h.i + 1} · source: ${chunks[h.i].docName}] ${chunks[h.i].text}`).join("\n\n");
+    const history = convo ? transcript.slice(-4).flatMap((t) => [{ role: "user", content: t.q }, { role: "assistant", content: t.a }]) : [];
     const messages = [
       { role: "system", content: "You are a helpful assistant. Answer using ONLY the provided context. Cite inline like [chunk N]. If the answer is not in the context, say you don't know." },
-      { role: "user", content: `Context:\n${context}\n\nQuestion: ${question}` },
+      ...history,
+      { role: "user", content: `Context:\n${context}\n\nQuestion: ${effQ}` },
     ];
     setMeta("generating…");
     const t0 = performance.now();
@@ -689,8 +800,37 @@ export default function RagLab() {
       const lat = Math.round(performance.now() - t0); setLastLatency(lat);
       setMeta(`${model ? model + " · " : ""}grounded · ${top.length} sources · ${lat}ms`);
       setTrace(steps.map((s) => ({ ...s, state: "done" })));
+      if (convo) { const uq = question; setTranscript((tr) => [...tr, { q: uq, a: text }].slice(-8)); setQuestion(""); }
     } catch (e) { setAnswer("⚠ " + (e as Error).message); setMeta("error"); }
     setRunning(false);
+  }
+
+  // ── faithfulness / groundedness: LLM judges each claim in the answer vs the context ──
+  async function checkFaithfulness() {
+    if (!hits.length || !answer || /^Ask a question/.test(answer)) { setFaith({ running: false, score: 0, claims: [{ text: "Run ▶ Ask first to generate an answer to check.", supported: false, why: "" }] }); return; }
+    setFaith({ running: true, score: 0, claims: [] });
+    const context = hits.map((h) => `[chunk ${h.i + 1}] ${chunks[h.i].text}`).join("\n\n");
+    try {
+      const out = await agentChat([
+        { role: "system", content: "You are a strict RAG faithfulness judge. Break the ANSWER into individual factual claims. For EACH claim decide if it is directly supported by the CONTEXT. Return ONLY JSON: {\"claims\":[{\"text\":\"...\",\"supported\":true|false,\"why\":\"short reason\"}]}. A claim is supported only if the context states or clearly implies it." },
+        { role: "user", content: `CONTEXT:\n${context}\n\nANSWER:\n${answer}` },
+      ], { maxTokens: 700 });
+      const m = out.match(/\{[\s\S]*\}/);
+      const parsed = m ? JSON.parse(m[0]) : { claims: [] };
+      const claims = (Array.isArray(parsed.claims) ? parsed.claims : []).map((c: { text?: unknown; supported?: unknown; why?: unknown }) => ({ text: String(c.text || "").slice(0, 300), supported: !!c.supported, why: String(c.why || "").slice(0, 200) }));
+      const sup = claims.filter((c: { supported: boolean }) => c.supported).length;
+      setFaith({ running: false, score: claims.length ? sup / claims.length : 0, claims });
+    } catch (e) { setFaith({ running: false, score: 0, claims: [{ text: "Faithfulness check failed: " + (e as Error).message, supported: false, why: "" }] }); }
+  }
+  // Compare chunking STRATEGIES (fixed/sentence/paragraph/semantic) for the current question.
+  function compareChunkStrategies() {
+    const strats: ChunkStrategy[] = ["fixed", "sentence", "paragraph", "semantic"];
+    setStrategyRows(strats.map((st) => {
+      const cks = docs.flatMap((d) => chunkBy(d.text, st, size, overlap));
+      if (!cks.length) return { strat: st, chunks: 0, top: 0, avg: 0 };
+      const hs = retrieve(buildIndex(cks), question, strategy, topK, metric, alpha);
+      return { strat: st, chunks: cks.length, top: hs[0]?.score || 0, avg: hs.length ? hs.reduce((a, h) => a + h.score, 0) / hs.length : 0 };
+    }));
   }
 
   // RAG vs no-RAG: answer the SAME question twice — once grounded on the retrieved
@@ -943,10 +1083,17 @@ export default function RagLab() {
               {kgHead("var(--accent)", "Chunking controls")}
               <div style={{ padding: 15 }}>
                 <div className="row" style={{ flexWrap: "wrap", gap: 20, alignItems: "flex-end" }}>
-                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>Chunk size (words)</span><b>{size}</b></div><input type="range" min={15} max={1000} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
+                  <div style={{ minWidth: 180 }}>
+                    <label className="fld" style={{ marginBottom: 4 }}>Chunking strategy</label>
+                    <select value={chunkStrategy} onChange={(e) => setChunkStrategy(e.target.value as ChunkStrategy)} style={{ width: 180 }}>
+                      {(["fixed", "sentence", "paragraph", "semantic"] as ChunkStrategy[]).map((s) => <option key={s} value={s}>{CHUNK_STRATEGY_LABEL[s]}</option>)}
+                    </select>
+                  </div>
+                  <div className="knob" style={{ margin: 0, minWidth: 200 }}><div className="kr"><span>{chunkStrategy === "fixed" ? "Chunk size (words)" : "Target size (words)"}</span><b>{size}</b></div><input type="range" min={15} max={1000} step={5} value={size} onChange={(e) => setSize(+e.target.value)} /></div>
                   <div className="knob" style={{ margin: 0, minWidth: 170 }}><div className="kr"><span>Overlap (words)</span><b>{overlap}</b></div><input type="range" min={0} max={500} step={2} value={Math.min(overlap, size - 1)} onChange={(e) => setOverlap(Math.min(+e.target.value, size - 1))} /></div>
                   <button className="btn" onClick={runChunking} disabled={chunking}>▶ Run chunking</button>
                 </div>
+                <div className="note" style={{ marginTop: 8, fontSize: 11 }}>{chunkStrategy === "fixed" ? "Sliding word window — simple, ignores sentence boundaries." : chunkStrategy === "sentence" ? "Groups whole sentences up to the target size — never splits mid-sentence." : chunkStrategy === "paragraph" ? "Splits on blank lines (paragraphs), falling back to sentences." : "Semantic — starts a new chunk when the topic shifts (TF-IDF similarity drop)."}</div>
                 <div style={{ marginTop: 12, fontFamily: "var(--mono)", fontSize: 11, color: "var(--faint)", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 11px" }}>sliding window: <b style={{ color: "var(--accent)" }}>{size}</b>-word window · advances <b style={{ color: "var(--accent)" }}>{stepWords}</b> words each step · <b style={{ color: "var(--accent)" }}>{overlap}</b>w shared{chunks.length ? <> → {totalWords.toLocaleString()} words split into <b style={{ color: "var(--accent)" }}>{chunks.length}</b> chunks</> : null}</div>
               </div>
             </div>
@@ -1338,13 +1485,31 @@ export default function RagLab() {
                 {backend !== "kg" && <select value={strategy} onChange={(e) => setStrategy(e.target.value as Strategy)} style={{ width: 168 }}>
                   <option value="hybrid">Hybrid</option><option value="vector">Vector ({embedMode === "neural" ? "neural" : "TF-IDF"})</option><option value="keyword">Keyword (BM25)</option>
                 </select>}
-                {backend !== "kg" && <select value={rerank} onChange={(e) => setRerank(e.target.value as "none" | "mmr")} style={{ width: 168 }} title="Re-ranking">
-                  <option value="none">No re-ranking</option><option value="mmr">MMR re-rank (diversity)</option>
+                {backend !== "kg" && <select value={rerank} onChange={(e) => setRerank(e.target.value as "none" | "mmr" | "llm")} style={{ width: 176 }} title="Re-ranking">
+                  <option value="none">No re-ranking</option><option value="mmr">MMR re-rank (diversity)</option><option value="llm">LLM re-rank (relevance)</option>
                 </select>}
                 {backend !== "kg" && rerank === "mmr" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>λ (relevance↔diversity)</span><b>{mmrLambda.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={mmrLambda} onChange={(e) => setMmrLambda(+e.target.value)} /></div>}
+                {backend === "vector" && strategy === "hybrid" && <div className="knob" style={{ margin: 0, minWidth: 165 }}><div className="kr"><span>α (keyword↔vector)</span><b>{alpha.toFixed(2)}</b></div><input type="range" min={0} max={1} step={0.05} value={alpha} onChange={(e) => setAlpha(+e.target.value)} title="0 = pure keyword/BM25, 1 = pure vector" /></div>}
                 {backend !== "vector" && <div className="knob" style={{ margin: 0, minWidth: 150 }}><div className="kr"><span>Graph hops</span><b>{kgHops}</b></div><input type="range" min={1} max={3} value={kgHops} onChange={(e) => setKgHops(+e.target.value)} /></div>}
                 <div className="knob" style={{ margin: 0, minWidth: 140 }}><div className="kr"><span>Top-k</span><b>{topK}</b></div><input type="range" min={1} max={6} value={topK} onChange={(e) => setTopK(+e.target.value)} /></div>
               </div>
+              {backend !== "kg" && (
+                <div className="row" style={{ flexWrap: "wrap", gap: 10, marginBottom: 12, alignItems: "center" }}>
+                  <div style={{ minWidth: 210 }}>
+                    <label className="fld" style={{ marginBottom: 4 }}>Query transformation</label>
+                    <select value={queryMode} onChange={(e) => setQueryMode(e.target.value as "none" | "rewrite" | "hyde" | "multi")} style={{ width: 210 }} title="Transform the query before retrieval">
+                      <option value="none">None — use the question as-is</option>
+                      <option value="rewrite">Rewrite — clean search query</option>
+                      <option value="hyde">HyDE — embed a hypothetical answer</option>
+                      <option value="multi">Multi-query — 3 phrasings, merged</option>
+                    </select>
+                  </div>
+                  <label className="note" style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", alignSelf: "flex-end", paddingBottom: 6 }} title="Keep conversation history and resolve follow-ups">
+                    <input type="checkbox" checked={convo} onChange={(e) => { setConvo(e.target.checked); if (!e.target.checked) setTranscript([]); }} /> 💬 Conversational (multi-turn)
+                  </label>
+                  {convo && transcript.length > 0 && <button className="btn ghost sm" style={{ alignSelf: "flex-end", marginBottom: 4 }} onClick={() => setTranscript([])}>clear chat ({transcript.length})</button>}
+                </div>
+              )}
               <label className="fld">Generation model — the LLM that writes the grounded answer</label>
               <div className="row" style={{ gap: 10, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
                 {providers.length > 1 && <select value={providerId} onChange={(e) => { setProviderId(e.target.value); loadModels(e.target.value); }} style={{ width: 176 }} title="Provider">{providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}</select>}
@@ -1355,9 +1520,34 @@ export default function RagLab() {
                 {provider && <span className="note">{providers.length > 1 ? provider + " · " : ""}{models.length} model{models.length === 1 ? "" : "s"}</span>}
                 {provKnown && !provider && <span className="note" style={{ color: "var(--warn)" }}>no provider configured — add one under Admin → Providers</span>}
               </div>
-              <label className="fld">Question</label>
-              <input type="text" value={question} onChange={(e) => setQuestion(e.target.value)} />
-              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={ask} disabled={running || !canQuery}>▶ Ask</button></div>
+              {convo && transcript.length > 0 && (
+                <div style={{ ...pnl, marginBottom: 10, maxHeight: 200, overflowY: "auto" }}>
+                  {kgHead("#a855f7", `Conversation · ${transcript.length} turn${transcript.length === 1 ? "" : "s"}`)}
+                  <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {transcript.map((t, i) => (
+                      <div key={i} style={{ fontSize: 12 }}>
+                        <div style={{ color: "var(--accent)", fontWeight: 600 }}>🧑 {t.q}</div>
+                        <div style={{ color: "var(--muted)", marginTop: 2, lineHeight: 1.5 }}>🤖 {t.a.slice(0, 240)}{t.a.length > 240 ? "…" : ""}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <label className="fld">{convo && transcript.length > 0 ? "Follow-up question" : "Question"}</label>
+              <input type="text" value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !running && canQuery) ask(); }} placeholder={convo && transcript.length > 0 ? "ask a follow-up — it's resolved against the conversation" : ""} />
+              <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={ask} disabled={running || !canQuery}>{running ? "…" : convo && transcript.length > 0 ? "▶ Send follow-up" : "▶ Ask"}</button></div>
+              {transformInfo && (
+                <div style={{ ...pnl, marginTop: 12 }}>
+                  {kgHead("#22b8cf", `Query transformation · ${transformInfo.mode}`)}
+                  <div style={{ padding: 12, fontSize: 11.5, lineHeight: 1.6 }}>
+                    {transformInfo.hyde
+                      ? <><div className="note" style={{ marginBottom: 4 }}>HyDE — a hypothetical answer is embedded and used to search:</div><div style={{ fontFamily: "var(--mono)", color: "var(--muted)", background: "var(--panel-2)", borderRadius: 8, padding: "8px 10px" }}>{transformInfo.hyde}</div></>
+                      : transformInfo.queries.length > 1
+                        ? <><div className="note" style={{ marginBottom: 4 }}>Retrieved for {transformInfo.queries.length} queries, merged by best score:</div>{transformInfo.queries.map((q, i) => <div key={i} style={{ fontFamily: "var(--mono)", color: i === 0 ? "var(--text)" : "var(--muted)" }}>• {q}</div>)}</>
+                        : <><span className="note">rewritten query: </span><b style={{ fontFamily: "var(--mono)" }}>{transformInfo.queries[0]}</b></>}
+                  </div>
+                </div>
+              )}
 
               {backend !== "vector" && graph && graphPos && kgVisited.length > 0 && (
                 <div style={{ ...pnl, marginTop: 16 }}>
@@ -1443,6 +1633,36 @@ export default function RagLab() {
                   {hits.map((h) => <div key={h.i} className="src"><span className="src-tag">{chunks[h.i].docKind}</span>[chunk {h.i + 1}] {chunks[h.i].docName}</div>)}
                 </div>
               )}
+              {tab === "out" && hits.length > 0 && !running && (
+                <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button className="btn sm" onClick={checkFaithfulness} disabled={!!faith?.running}>{faith?.running ? "checking…" : "🛡 Check faithfulness"}</button>
+                    <span className="note" style={{ fontSize: 11 }}>is every claim grounded in the retrieved context?</span>
+                  </div>
+                  {faith && !faith.running && faith.claims.length > 0 && (() => {
+                    const pct = Math.round(faith.score * 100);
+                    const col = pct >= 80 ? "var(--good)" : pct >= 50 ? "var(--warn)" : "var(--crit)";
+                    return (
+                      <div style={{ marginTop: 10 }}>
+                        <div className="row" style={{ gap: 10, alignItems: "center", marginBottom: 8 }}>
+                          <span style={{ fontWeight: 700, fontSize: 18, color: col, fontFamily: "var(--mono)" }}>{pct}%</span>
+                          <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 5, height: 8, overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: col }} /></div>
+                          <span className="note">groundedness · {faith.claims.filter((c) => c.supported).length}/{faith.claims.length} claims supported</span>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {faith.claims.map((c, i) => (
+                            <div key={i} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "7px 10px", background: "var(--surface)" }}>
+                              <div style={{ fontSize: 12, lineHeight: 1.45 }}><span style={{ color: c.supported ? "var(--good)" : "var(--crit)", fontWeight: 700, marginRight: 6 }}>{c.supported ? "✓" : "✗"}</span>{c.text}</div>
+                              {c.why && <div className="note" style={{ fontSize: 10.5, marginTop: 3 }}>{c.why}</div>}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="note" style={{ marginTop: 8, lineHeight: 1.5 }}>An ✗ claim isn&apos;t in your retrieved context — the model likely <b>hallucinated</b> it. Low groundedness means you need better retrieval (more top-K, better chunks) or a stricter prompt.</div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1482,6 +1702,37 @@ export default function RagLab() {
         </div>
       )}
 
+      {step === "query" && index && answerMode === "direct" && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="card-h"><span className="t">Compare chunking strategy</span><span className="mono r">fixed · sentence · paragraph · semantic</span></div>
+          <div className="card-b">
+            <div className="note" style={{ marginBottom: 10 }}>Re-chunks the documents with each <b>strategy</b> (at the current size) and retrieves for “{question}”. Boundary choice — not just size — changes what ends up retrievable together.</div>
+            <button className="btn sm" onClick={compareChunkStrategies} style={{ marginBottom: strategyRows.length ? 14 : 0 }}>{strategyRows.length ? "↻ Re-run comparison" : "▶ Compare strategies"}</button>
+            {strategyRows.length > 0 && (() => {
+              const best = Math.max(...strategyRows.map((r) => r.top), 0.0001);
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {strategyRows.map((r, i) => {
+                    const win = r.top === best && r.top > 0;
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="mono" style={{ width: 88, flex: "0 0 auto", fontSize: 12 }}>{CHUNK_STRATEGY_LABEL[r.strat]}</span>
+                        <div style={{ flex: 1, background: "var(--panel-2)", borderRadius: 5, height: 18, position: "relative", overflow: "hidden" }}>
+                          <div style={{ width: `${Math.max(3, (r.top / best) * 100)}%`, height: "100%", background: win ? "var(--good)" : "var(--accent)", borderRadius: 5, transition: "width .3s" }} />
+                          <span style={{ position: "absolute", right: 8, top: 0, lineHeight: "18px", fontSize: 10.5, fontFamily: "var(--mono)", color: "var(--muted)" }}>{r.top.toFixed(3)}{win ? " ⭐" : ""}</span>
+                        </div>
+                        <span className="note" style={{ width: 62, flex: "0 0 auto", textAlign: "right" }}>{r.chunks} ck</span>
+                      </div>
+                    );
+                  })}
+                  <div className="note" style={{ marginTop: 6, lineHeight: 1.5 }}>Higher top score = the best chunk matches more strongly. Semantic/sentence often win on prose; fixed can win on uniform text. The current pipeline uses <b>{CHUNK_STRATEGY_LABEL[chunkStrategy]}</b> — change it in the Chunk step.</div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
       {/* RAG DEBUGGER — every candidate chunk ranked, with the top-k cutoff made explicit */}
       {step === "query" && answerMode === "direct" && backend !== "kg" && debugRank.length > 0 && (
         <div className="card" style={{ marginTop: 16 }}>
@@ -1508,6 +1759,7 @@ export default function RagLab() {
                           <div style={{ width: `${Math.max(3, (h.score / maxScore) * 100)}%`, height: "100%", background: on ? "var(--good)" : "var(--border-strong)", borderRadius: 5 }} />
                         </div>
                         <span className="mono" style={{ width: 50, flex: "0 0 auto", textAlign: "right", fontSize: 11, color: "var(--muted)" }}>{h.score.toFixed(3)}</span>
+                        {rerankScores && <span className="mono" style={{ width: 58, flex: "0 0 auto", textAlign: "right", fontSize: 10.5, color: rerankScores[h.i] != null ? "#a855f7" : "var(--faint)" }} title="LLM relevance score 0-10">{rerankScores[h.i] != null ? `LLM ${rerankScores[h.i]}` : "—"}</span>}
                         <span style={{ width: 112, flex: "0 0 auto", fontSize: 10 }}>
                           {on ? <span style={{ color: "var(--good)", fontWeight: 600 }}>✓ selected</span>
                               : <span className="note" title={`score ${h.score.toFixed(3)} < cutoff ${cutoff.toFixed(3)}`}>✕ below cutoff</span>}
@@ -1553,7 +1805,7 @@ export default function RagLab() {
       {step === "query" && answerMode === "direct" && (
         <RagExperiments
           current={{
-            config: { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops },
+            config: { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops, alpha, chunkStrategy, queryMode },
             metrics: currentMetrics,
             question,
             dataset: docs[0]?.name || "",

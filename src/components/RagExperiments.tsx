@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 export type ExpConfig = {
   backend: string; size: number; overlap: number; strategy: string; metric: string;
   topK: number; rerank: string; mmrLambda: number; embedMode: string; embModel: string; kgHops: number;
+  alpha?: number; chunkStrategy?: string; queryMode?: string;
 };
 export type ExpMetrics = { p: number; r: number; mrr: number; ndcg: number } | null;
 export type CurrentExperiment = {
@@ -61,7 +62,8 @@ export default function RagExperiments({ current, onLoad }: { current: CurrentEx
 
   const selected = rows.filter((r) => sel.has(r.id));
   const fmtTs = (t: string | null) => (t ? new Date(t).toLocaleString() : "—");
-  const cfgSummary = (c: ExpConfig) => `${c.size}w/${c.overlap}ov · ${c.strategy}${c.rerank === "mmr" ? "+mmr" : ""} · ${c.embedMode === "neural" ? "neural" : "tf-idf"} · top-${c.topK}`;
+  const rr = (c: ExpConfig) => c.rerank === "mmr" ? "+mmr" : c.rerank === "llm" ? "+llm" : "";
+  const cfgSummary = (c: ExpConfig) => `${c.chunkStrategy && c.chunkStrategy !== "fixed" ? c.chunkStrategy + " · " : ""}${c.size}w/${c.overlap}ov · ${c.strategy}${rr(c)} · ${c.embedMode === "neural" ? "neural" : "tf-idf"} · top-${c.topK}${c.queryMode && c.queryMode !== "none" ? " · " + c.queryMode : ""}`;
 
   // Best value per metric across the selected experiments (max for quality metrics, min for latency).
   const bestOf = (key: keyof NonNullable<ExpMetrics>) => Math.max(...selected.map((r) => r.metrics?.[key] ?? -1));
