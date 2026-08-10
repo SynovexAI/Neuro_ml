@@ -6,6 +6,7 @@ import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
+import { parseRecords, sampleSources } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import { toast } from "@/lib/toast";
@@ -1245,6 +1246,18 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // database upload & test state for db_query / db_schema tool nodes
+  const [dbDataText, setDbDataText] = useState("");
+  const [dbFileName, setDbFileName] = useState("");
+  const [dbQueryTest, setDbQueryTest] = useState("select count(*) from orders");
+  const [dbTestResult, setDbTestResult] = useState("");
+  const [dbTestRunning, setDbTestRunning] = useState(false);
+  const [showRawDbText, setShowRawDbText] = useState(false);
+  const [showAllRows, setShowAllRows] = useState(true);
+  const [dbCustomSchema, setDbCustomSchema] = useState("");
+  const [schemaTestResult, setSchemaTestResult] = useState("");
+  const dbFileRef = useRef<HTMLInputElement>(null);
+
   // workflow config
   const [steps, setSteps] = useState<{ id: string; name: string; instruction: string }[]>([
     { id: "s1", name: "Plan", instruction: "Break the user's request into a short bullet plan." },
@@ -1339,6 +1352,96 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       } else setKnowledgeText(await f.text());
     } catch (err) { setMsg(`Could not read ${f.name}: ${(err as Error).message}`); }
     setUploading(false); e.target.value = "";
+  }
+
+  // ── db file upload & query testing ──
+  async function onDbFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setUploading(true); setMsg("");
+    const name = f.name;
+    setDbFileName(name);
+    const ext = (name.split(".").pop() || "txt").toLowerCase();
+    try {
+      if (["pdf", "docx", "doc", "xlsx", "xls", "xlsm"].includes(ext)) {
+        const fd = new FormData(); fd.append("file", f);
+        const r = await fetch("/api/rag/extract", { method: "POST", body: fd });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || "parse failed");
+        setDbDataText(j.text);
+      } else {
+        setDbDataText(await f.text());
+      }
+      toast(`Loaded database file: ${name}`, "success");
+    } catch (err) {
+      toast(`Could not read ${name}: ${(err as Error).message}`, "error");
+    }
+    setUploading(false); e.target.value = "";
+  }
+
+  async function handleTestDbQuery() {
+    if (!dbDataText.trim()) {
+      toast("Please upload a file or select a sample dataset first.", "error");
+      return;
+    }
+    setDbTestRunning(true);
+    setDbTestResult("");
+    try {
+      const { runSql } = await import("@/lib/sqlEngine");
+      const tbl = parseRecords(dbDataText);
+      const tableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+      const extraNames = Array.from(new Set([tableName, "students", "orders", "data", "raw"]));
+      const extraTables = extraNames.map((n) => ({ name: n, table: tbl }));
+      const res = await runSql(dbQueryTest, tbl, null, extraTables);
+      if (!res.rows.length) {
+        setDbTestResult("OK — 0 rows returned.");
+      } else {
+        const header = res.cols.join(" | ");
+        const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
+        setDbTestResult(`${header}\n${body}\n(${res.rows.length} rows)`);
+      }
+    } catch (err) {
+      setDbTestResult("Query Error: " + (err as Error).message);
+    }
+    setDbTestRunning(false);
+  }
+
+  function runQueryInAgent(queryText?: string) {
+    const q = (queryText || dbQueryTest || "").trim();
+    if (!q) {
+      toast("Please type a SQL query first.", "error");
+      return;
+    }
+    setEnabledTools((prev) => new Set([...prev, "db_query"]));
+    setPlacedTools((prev) => new Set([...prev, "db_query"]));
+    setTask(q);
+    setStep("run");
+    toast(`Running query in agent on Run page…`, "success");
+    setTimeout(() => {
+      runReact();
+    }, 150);
+  }
+
+  function handleTestSchema() {
+    if (dbCustomSchema.trim()) {
+      setSchemaTestResult(dbCustomSchema.trim());
+    } else if (dbDataText.trim()) {
+      const tbl = parseRecords(dbDataText);
+      const name = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+      const cols = tbl.cols.join(", ");
+      setSchemaTestResult(`Tables available: ${name}(${cols}), students(${cols}), orders(${cols}), raw(${cols})\n(${tbl.rows.length} rows loaded locally)`);
+    } else {
+      setSchemaTestResult("No custom schema or database file loaded yet. Upload a file above or enter a schema definition.");
+    }
+  }
+
+  function runSchemaInAgent() {
+    setEnabledTools((prev) => new Set([...prev, "db_schema"]));
+    setPlacedTools((prev) => new Set([...prev, "db_schema"]));
+    setTask("Show database schema and tables available.");
+    setStep("run");
+    toast("Running DB Schema in agent on Run page…", "success");
+    setTimeout(() => {
+      runReact();
+    }, 150);
   }
 
   // ── node canvas model ──
@@ -1502,6 +1605,13 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     setNodeStatus({ trigger: "done", model: "done", agent: "running" });
     const ctx: ToolCtx = { requestApproval: (q) => new Promise<string>((resolve) => setPendingApproval({ q, resolve })) };
     if (enabledTools.has("knowledge")) { const kb = buildKnowledge(knowledgeText); if (kb) { ctx.knowledgeIndex = kb.index as RagIndex; ctx.knowledgeChunks = kb.chunks; } }
+    if ((enabledTools.has("db_query") || enabledTools.has("db_schema")) && dbDataText.trim()) {
+      ctx.dbTable = parseRecords(dbDataText);
+      ctx.dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "orders";
+    }
+    if (enabledTools.has("db_schema") && dbCustomSchema.trim()) {
+      ctx.dbCustomSchema = dbCustomSchema.trim();
+    }
     const tools: AgentTool[] = toolList;
     const messages: { role: string; content: string }[] = [{ role: "system", content: reactSystemPrompt(tools, goal) }, { role: "user", content: task }];
     const push = (t: TraceItem) => setTrace((tr) => [...tr, t]);
@@ -1949,7 +2059,7 @@ if __name__ == "__main__":
                   <div className="insp-field"><div className="k">Temperature · {temperature}</div><input type="range" min={0} max={1} step={0.05} value={temperature} onChange={(e) => setTemperature(+e.target.value)} /></div>
                   <div className="insp-field"><div className="k">Max tokens</div><input type="text" value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value) || 600)} /></div>
                 </>)}
-                {selNode?.type === "tool" && selNode.toolId !== "knowledge" && (<>
+                {selNode?.type === "tool" && selNode.toolId !== "knowledge" && selNode.toolId !== "db_query" && selNode.toolId !== "db_schema" && (<>
                   <div className="insp-field"><div className="k">Tool</div><div className="note" style={{ margin: 0 }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.desc}</div></div>
                   <div className="insp-field"><div className="k">Example input the agent sends</div><div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.example}</div></div>
                   <div className="row" style={{ gap: 8 }}>
@@ -1957,6 +2067,187 @@ if __name__ == "__main__":
                     <button className="btn ghost sm" onClick={() => { removeToolNode(selNode.toolId!); setASel("agent"); }}>Remove node</button>
                   </div>
                   <div className="note" style={{ marginTop: 8 }}>Drag its top dot to the Agent to wire it, or click a wire and press <b>Delete</b>. {enabledTools.has(selNode.toolId!) ? "" : "Unconnected tools aren't used at run."}</div>
+                </>)}
+                {selNode?.type === "tool" && selNode.toolId === "db_schema" && (<>
+                  <div className="insp-field">
+                    <div className="k">Tool description</div>
+                    <div className="note" style={{ margin: 0 }}>List database tables, column names, and data types for the AI agent.</div>
+                  </div>
+
+                  <div className="insp-field">
+                    <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>1. Upload Database File</span>
+                      {dbFileName && <span className="mono" style={{ fontSize: 11, color: "var(--accent)" }}>📄 {dbFileName}</span>}
+                    </div>
+                    <div className="row" style={{ gap: 8, margin: "6px 0", flexWrap: "wrap" }}>
+                      <input ref={dbFileRef} type="file" style={{ display: "none" }} accept=".csv,.json,.xlsx,.xls,.txt,.sql" onChange={(e) => {
+                        onDbFileChange(e);
+                        // Auto populate schema from file
+                        setTimeout(() => {
+                          if (e.target.files?.[0]) {
+                            const fname = e.target.files[0].name;
+                            const name = fname ? fname.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+                            e.target.files[0].text().then((txt) => {
+                              const tbl = parseRecords(txt);
+                              if (tbl.cols.length) {
+                                setDbCustomSchema(`${name}(${tbl.cols.map((c) => `${c} TEXT`).join(", ")})`);
+                              }
+                            }).catch(() => {});
+                          }
+                        }, 200);
+                      }} />
+                      <button className="btn sm" onClick={() => dbFileRef.current?.click()} disabled={uploading}>
+                        📁 {uploading ? "Parsing…" : "Upload Database File"}
+                      </button>
+                      {dbDataText.trim() && (
+                        <button className="btn ghost xs" style={{ fontSize: 10, color: "var(--accent)" }} onClick={() => {
+                          const tbl = parseRecords(dbDataText);
+                          const name = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+                          const cols = tbl.cols.map((c) => `${c} TEXT`).join(", ");
+                          setDbCustomSchema(`${name}(${cols})`);
+                          toast("Auto-generated schema from uploaded file!", "success");
+                        }}>
+                          ⚡ Auto-Generate Schema
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="insp-field">
+                    <div className="k">2. Database Schema Definition Input</div>
+                    <textarea rows={5} value={dbCustomSchema} onChange={(e) => setDbCustomSchema(e.target.value)} placeholder="e.g. students(student_id INT, gender TEXT, gpa FLOAT, final_grade TEXT)" />
+                    <div className="note" style={{ marginTop: 4 }}>
+                      The AI agent calls <code>db_schema</code> to read this exact table blueprint.
+                    </div>
+                  </div>
+
+                  <div className="insp-field" style={{ marginTop: 8 }}>
+                    <div className="k">3. Test & Run Schema Output</div>
+                    <div className="row" style={{ gap: 6 }}>
+                      <button className="btn ghost sm" onClick={handleTestSchema}>
+                        Test Tool Output
+                      </button>
+                      <button className="btn sm" onClick={runSchemaInAgent} title="Run on Run page and view output in Final Answer">
+                        ▶ Run in Agent →
+                      </button>
+                    </div>
+                    {schemaTestResult && (
+                      <div style={{ marginTop: 6 }}>
+                        <pre className="mono" style={{ padding: 8, background: "#0d1117", borderRadius: 4, fontSize: 11, color: "#7ee787", overflowX: "auto", maxHeight: 120 }}>
+                          {schemaTestResult}
+                        </pre>
+                        <button className="btn ghost xs" style={{ marginTop: 4, width: "100%", justifyContent: "center", fontSize: 10, color: "var(--accent)" }} onClick={runSchemaInAgent}>
+                          ▶ Output schema in Final Answer card on Run page →
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                    {enabledTools.has("db_schema") ? <button className="btn ghost sm" onClick={() => disconnectTool("db_schema")}>Disconnect</button> : <button className="btn sm" onClick={() => connectTool("db_schema")}>Connect to agent</button>}
+                    <button className="btn ghost sm" onClick={() => { removeToolNode("db_schema"); setASel("agent"); }}>Remove node</button>
+                  </div>
+                </>)}
+                {selNode?.type === "tool" && selNode.toolId === "db_query" && (<>
+                  <div className="insp-field">
+                    <div className="k">Tool description</div>
+                    <div className="note" style={{ margin: 0 }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.desc}</div>
+                  </div>
+                  <div className="insp-field">
+                    <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>Upload database file (CSV / JSON / Excel / Text)</span>
+                      {dbFileName && <span className="mono" style={{ fontSize: 11, color: "var(--accent)" }}>📄 {dbFileName}</span>}
+                    </div>
+                    <div className="row" style={{ gap: 8, flexWrap: "wrap", margin: "6px 0" }}>
+                      <input ref={dbFileRef} type="file" style={{ display: "none" }} accept=".csv,.json,.xlsx,.xls,.txt,.sql" onChange={onDbFileChange} />
+                      <button className="btn sm" onClick={() => dbFileRef.current?.click()} disabled={uploading}>
+                        📁 {uploading ? "Parsing…" : "Upload Database File"}
+                      </button>
+                    </div>
+                      {showRawDbText && (
+                        <textarea rows={4} value={dbDataText} onChange={(e) => setDbDataText(e.target.value)} placeholder="Paste CSV or JSON rows here..." style={{ marginTop: 6 }} />
+                      )}
+                      <button className="btn ghost xs" style={{ fontSize: 10, opacity: 0.7, marginTop: 4, width: "100%", justifyContent: "flex-start" }} onClick={() => setShowRawDbText(!showRawDbText)}>
+                        {showRawDbText ? "▲ Hide raw CSV text" : "⚙️ View / Edit raw CSV text"}
+                      </button>
+                    </div>
+
+                  {dbDataText.trim() ? (() => {
+                    const tbl = parseRecords(dbDataText);
+                    const rawName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "";
+                    const firstLine = dbDataText.split("\n")[0].toLowerCase();
+                    const tableName = rawName || (/student|grade|gpa|sat_|education|school/i.test(firstLine) ? "students" : "orders");
+                    const displayRows = showAllRows ? tbl.rows : tbl.rows.slice(0, 15);
+                    return (
+                      <div className="insp-field" style={{ background: "rgba(255,255,255,0.03)", padding: 8, borderRadius: 6, border: "1px solid var(--border)" }}>
+                        <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <span>Active Table: <b style={{ color: "var(--accent)" }}>{tableName}</b> ({tbl.rows.length} rows, {tbl.cols.length} cols)</span>
+                          <button className="btn ghost xs" style={{ fontSize: 10 }} onClick={() => setShowAllRows(!showAllRows)}>
+                            {showAllRows ? "Collapse (top 15)" : `Show all ${tbl.rows.length} rows`}
+                          </button>
+                        </div>
+                        {tbl.rows.length > 0 && (
+                          <div style={{ overflowX: "auto", overflowY: "auto", marginTop: 6, maxHeight: showAllRows ? 300 : 140, fontSize: 11, fontFamily: "var(--mono)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4 }}>
+                            <table style={{ width: "max-content", minWidth: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+                              <thead>
+                                <tr style={{ borderBottom: "1px solid var(--border)", background: "#161b22", position: "sticky", top: 0, zIndex: 1 }}>
+                                  <th style={{ padding: "4px 8px", color: "var(--muted)", fontSize: 10 }}>#</th>
+                                  {tbl.cols.map((c) => (
+                                    <th key={c} style={{ padding: "4px 10px", color: "var(--accent)", whiteSpace: "nowrap", borderRight: "1px solid rgba(255,255,255,0.05)" }}>{c}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {displayRows.map((r, idx) => (
+                                  <tr key={idx} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)", background: idx % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)" }}>
+                                    <td style={{ padding: "4px 8px", color: "var(--muted)", fontSize: 10 }}>{idx + 1}</td>
+                                    {tbl.cols.map((c) => (
+                                      <td key={c} style={{ padding: "4px 10px", whiteSpace: "nowrap", borderRight: "1px solid rgba(255,255,255,0.03)" }}>{String(r[c] ?? "")}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4, textAlign: "right" }}>
+                          Showing {displayRows.length} of {tbl.rows.length} rows · All {tbl.cols.length} columns
+                        </div>
+                      </div>
+                    );
+                  })() : (
+                    <div className="note" style={{ margin: "4px 0" }}>
+                      ℹ️ No database file uploaded yet. The agent will run queries against your connected cloud PostgreSQL database. Upload a file above to execute queries on local data!
+                    </div>
+                  )}
+
+                  <div className="insp-field" style={{ marginTop: 8 }}>
+                    <div className="k">Test SQL Query & Output</div>
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <input type="text" value={dbQueryTest} onChange={(e) => setDbQueryTest(e.target.value)} placeholder="e.g. select count(*) from orders" style={{ flex: 1, minWidth: 160 }} />
+                      <button className="btn ghost sm" onClick={handleTestDbQuery} disabled={dbTestRunning}>
+                        {dbTestRunning ? "Executing…" : "Test Query"}
+                      </button>
+                      <button className="btn sm" onClick={() => runQueryInAgent()} title="Run on Run page and output in Final Answer">
+                        ▶ Run in Agent →
+                      </button>
+                    </div>
+                    {dbTestResult && (
+                      <div style={{ marginTop: 6 }}>
+                        <pre className="mono" style={{ padding: 8, background: "#0d1117", borderRadius: 4, fontSize: 11, color: "#7ee787", overflowX: "auto", maxHeight: 120 }}>
+                          {dbTestResult}
+                        </pre>
+                        <button className="btn ghost xs" style={{ marginTop: 4, width: "100%", justifyContent: "center", fontSize: 10, color: "var(--accent)" }} onClick={() => runQueryInAgent()}>
+                          ▶ Output this result in Final Answer card on Run page →
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                    {enabledTools.has(selNode.toolId!) ? <button className="btn ghost sm" onClick={() => disconnectTool(selNode.toolId!)}>Disconnect</button> : <button className="btn sm" onClick={() => connectTool(selNode.toolId!)}>Connect to agent</button>}
+                    <button className="btn ghost sm" onClick={() => { removeToolNode(selNode.toolId!); setASel("agent"); }}>Remove node</button>
+                  </div>
                 </>)}
                 {selNode?.type === "tool" && selNode.toolId === "knowledge" && (<>
                   <div className="insp-field"><div className="k">Knowledge base (the agent searches this)</div><textarea rows={5} value={knowledgeText} onChange={(e) => setKnowledgeText(e.target.value)} /></div>

@@ -2,11 +2,15 @@
 // or via the existing server proxies), no mocks. Plus ReAct prompt/parse helpers.
 
 import { chunkText, buildIndex, retrieve, type RagIndex } from "./ragUtils";
+import type { Table } from "./etlUtils";
 
 export interface ToolCtx {
   knowledgeIndex?: RagIndex | null;
   knowledgeChunks?: string[];
   requestApproval?: (question: string) => Promise<string>;
+  dbTable?: Table | null;
+  dbTableName?: string;
+  dbCustomSchema?: string;
 }
 export interface AgentTool {
   id: string;
@@ -206,8 +210,35 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "wikipedia", name: "wikipedia", desc: "search Wikipedia and read article summaries", example: "retrieval augmented generation", run: async (input) => nativeTool("wikipedia", input) },
   { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (title, abstract, link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
-  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
-  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
+  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async (_, ctx) => {
+    if (ctx?.dbCustomSchema && ctx.dbCustomSchema.trim()) {
+      return ctx.dbCustomSchema.trim();
+    }
+    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
+      const name = ctx.dbTableName || "students";
+      const cols = ctx.dbTable.cols.join(", ");
+      return `Tables available: ${name}(${cols}), students(${cols}), orders(${cols}), raw(${cols})\n(${ctx.dbTable.rows.length} rows loaded locally)`;
+    }
+    return nativeTool("db_schema", "");
+  } },
+  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input, ctx) => {
+    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
+      try {
+        const { runSql } = await import("./sqlEngine");
+        const name = ctx.dbTableName || "students";
+        const extraNames = Array.from(new Set([name, "students", "orders", "customers", "events", "employees", "products", "sensors", "data", "raw"]));
+        const extraTables = extraNames.map((n) => ({ name: n, table: ctx.dbTable! }));
+        const res = await runSql(input, ctx.dbTable, null, extraTables);
+        if (!res.rows.length) return "OK — 0 rows returned.";
+        const header = res.cols.join(" | ");
+        const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
+        return `${header}\n${body}\n(${res.rows.length} rows)`;
+      } catch (e) {
+        return "Error executing SQL on uploaded dataset: " + (e as Error).message;
+      }
+    }
+    return nativeTool("db_query", input);
+  } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
 ];
@@ -275,6 +306,9 @@ export function parseReAct(text: string): ReActParse {
   const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
   if (final) return { thought, final };
   const action = text.match(/Action:\s*([^\n]+)/i)?.[1]?.trim().replace(/[.'"]+$/, "");
-  const input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim().replace(/^["']|["']$/g, "");
+  let input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim() || "";
+  if (input.length >= 2 && ((input.startsWith('"') && input.endsWith('"')) || (input.startsWith("'") && input.endsWith("'")))) {
+    input = input.slice(1, -1).trim();
+  }
   return { thought, action, input };
 }
