@@ -1751,7 +1751,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     logAgentRun({ agentName: name, agentType: "workflow", runtime: "browser", provider: providerLabel, model, iterations: steps.length, toolCalls: [], toolCallCount: 0, totalTokens: tokens, latencyMs: Math.round(performance.now() - t0), outcome, errorMsg });
     setRunning(false);
   }
-  function startRun() { setStep("run"); if (agentType === "react") runReact(); else runWorkflow(); }
+  function startRun() { setStep("run"); }
   // Linear workflow node canvas (input → steps → output), lights up as it runs.
   const wfCanvas = () => {
     const list = [
@@ -2122,7 +2122,7 @@ if __name__ == "__main__":
                 <div className="r" style={{ position: "relative" }}>
                   <button className="btn ghost sm" onClick={() => setFullscreen((f) => !f)}>{fullscreen ? "⤢ Exit" : "⛶ Fullscreen"}</button>
                   <button className="btn ghost sm" onClick={() => setAddOpen((o) => !o)}>+ Add node</button>
-                  <button className="btn sm" onClick={startRun} disabled={!hasProvider}>▶ Run</button>
+                  <button className="btn sm" onClick={startRun} disabled={!hasProvider}>Next: Run →</button>
                   {addOpen && (
                     <div className="addmenu2">
                       <div className="hd">Add a tool node to the canvas</div>
