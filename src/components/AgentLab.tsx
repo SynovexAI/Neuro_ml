@@ -6,7 +6,7 @@ import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, mcpTool, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
-import { parseRecords, sampleSources } from "@/lib/etlUtils";
+import { parseRecords } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import { toast } from "@/lib/toast";
@@ -786,7 +786,7 @@ const MapSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: 
   </svg>
 );
 
-const AlertSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+export const AlertSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline-block", verticalAlign: "middle" }}>
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
     <line x1="12" y1="9" x2="12" y2="13" />
@@ -1063,7 +1063,7 @@ function renderTutorMessage(text: string) {
 export default function AgentLab() {
   const [step, setStep] = useState<Step>("type");
   const [selectedTopic, setSelectedTopic] = useState<LearnTopic | null>(null);
-  const [quizOption, setQuizOption] = useState<number | null>(null);
+  const [_quizOption, setQuizOption] = useState<number | null>(null); void _quizOption;
   const [tutorMessages, setTutorMessages] = useState<{ sender: "user" | "bot"; text: string }[]>([
     {
       sender: "bot",
@@ -1249,7 +1249,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [kbs, setKbs] = useState<{ id: string; name: string }[]>([]);
   const [kbLoad, setKbLoad] = useState(false);
   useEffect(() => { fetch("/api/kb").then((r) => (r.ok ? r.json() : { kbs: [] })).then((j) => setKbs(j.kbs || [])).catch(() => {}); }, []);
-  
   const [selectedRagId, setSelectedRagId] = useState("");
   const [deployedRags, setDeployedRags] = useState<{ id: string; name: string }[]>([]);
   const [ragLoading, setRagLoading] = useState(false);
@@ -1314,7 +1313,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       })
       .catch(() => {});
   }, []);
-
   async function loadKbIntoKnowledge(id: string) {
     setKbLoad(true);
     try { const r = await fetch(`/api/kb/${id}/docs`); const j = await r.json(); if (r.ok) { const text = (j.docs || []).map((d: { text: string }) => d.text).join("\n\n").trim(); if (text) setKnowledgeText(text); } } catch { /* ignore */ } finally { setKbLoad(false); }
@@ -1751,7 +1749,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     logAgentRun({ agentName: name, agentType: "workflow", runtime: "browser", provider: providerLabel, model, iterations: steps.length, toolCalls: [], toolCallCount: 0, totalTokens: tokens, latencyMs: Math.round(performance.now() - t0), outcome, errorMsg });
     setRunning(false);
   }
-  function startRun() { setStep("run"); if (agentType === "react") runReact(); else runWorkflow(); }
+  function startRun() { setStep("run"); }
   // Linear workflow node canvas (input → steps → output), lights up as it runs.
   const wfCanvas = () => {
     const list = [
@@ -2122,7 +2120,7 @@ if __name__ == "__main__":
                 <div className="r" style={{ position: "relative" }}>
                   <button className="btn ghost sm" onClick={() => setFullscreen((f) => !f)}>{fullscreen ? "⤢ Exit" : "⛶ Fullscreen"}</button>
                   <button className="btn ghost sm" onClick={() => setAddOpen((o) => !o)}>+ Add node</button>
-                  <button className="btn sm" onClick={startRun} disabled={!hasProvider}>▶ Run</button>
+                  <button className="btn sm" onClick={startRun} disabled={!hasProvider}>Next: Run →</button>
                   {addOpen && (
                     <div className="addmenu2">
                       <div className="hd">Add a tool node to the canvas</div>

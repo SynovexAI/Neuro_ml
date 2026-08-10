@@ -56,6 +56,7 @@ function refsOf(sql: string, known: string[]): string[] {
 }
 const EXT_TYPES = ["auto", "TEXT", "BIGINT", "DOUBLE", "VARCHAR(255)", "DATE", "DATETIME", "BOOLEAN"];
 
+import DataVizExplorer from "./visualization/DataVizExplorer";
 export default function EtlLab() {
   const [step, setStep] = useState<Step>("extract");
   const [pipeMode, setPipeMode] = useState<PipeMode>("etl");
@@ -199,6 +200,9 @@ export default function EtlLab() {
     else if (type === "window") Object.assign(base, { groupBy: "(none)", col: numCol, fn: "running_sum", name: "running_sum" });
     else if (type === "regex") Object.assign(base, { col: cols[0], value: "(\\d+)", name: cols[0] + "_match" });
     else if (type === "dateparse") Object.assign(base, { col: cols[0], fn: "year", name: cols[0] + "_year" });
+    else if (type === "scd2") Object.assign(base, { businessKey: cols[0] });
+    else if (type === "fuzzydedupe") Object.assign(base, { col: cols[0], threshold: 0.8 });
+    else if (type === "quality") Object.assign(base, { qualityCol: cols[0], rule: "not_null", name: "_quality_status" });
     setOps((o) => [...o, base]); setSel(base.id); setAddOpen(false);
   }
   const patch = (p: Partial<EtlOp>) => setOps((os) => os.map((o) => (o.id === sel ? { ...o, ...p } : o)));
@@ -599,6 +603,15 @@ ${mode === "stream"
             <div className="card-b" style={{ borderTop: "1px solid var(--border)" }}>
               <label className="fld">Live preview — sink output ({pipe!.final.rows.length} rows)</label>
               <div style={{ maxHeight: 180, overflowY: "auto" }}>{dtable(pipe!.final, 6)}</div>
+              {/* Data Visualization Explorer */}
+              {pipe && srcTable && (
+                <DataVizExplorer
+                  sourceTable={srcTable}
+                  finalTable={pipe.final}
+                  ops={ops}
+                  rules={rules}
+                />
+              )}
               <div className="stepnav"><button className="btn ghost" onClick={() => setStep("extract")}>← Extract</button><button className="btn" onClick={() => setStep("load")}>Next: Load &amp; Run →</button></div>
             </div>
           </div>
@@ -690,6 +703,19 @@ ${mode === "stream"
                     <div className="insp-field"><div className="k">Date column</div>{colSel(o.col, (v) => patch({ col: v }))}</div>
                     <div className="insp-field"><div className="k">Extract</div><select value={o.fn} onChange={(e) => patch({ fn: e.target.value })}><option value="year">year</option><option value="month">month</option><option value="day">day</option><option value="weekday">weekday</option><option value="iso">ISO date</option><option value="days_since">days since</option></select></div>
                     <div className="insp-field"><div className="k">Output column</div><input type="text" value={o.name ?? ""} onChange={(e) => patch({ name: e.target.value })} /></div>
+                  </>)}
+                  {o.type === "scd2" && (<>
+                    <div className="insp-field"><div className="k">Business Key</div>{colSel(o.businessKey || o.col, (v) => patch({ businessKey: v, col: v }))}</div>
+                    <div className="note" style={{ marginTop: 6, fontSize: 12 }}>Adds effective_start, effective_end, and is_current tracking fields automatically.</div>
+                  </>)}
+                  {o.type === "fuzzydedupe" && (<>
+                    <div className="insp-field"><div className="k">Column to Deduplicate</div>{colSel(o.col, (v) => patch({ col: v }))}</div>
+                    <div className="insp-field"><div className="k">Similarity Threshold ({o.threshold ?? 0.8})</div><input type="range" min="0.5" max="1.0" step="0.05" value={o.threshold ?? 0.8} onChange={(e) => patch({ threshold: parseFloat(e.target.value) })} style={{ width: "100%" }} /></div>
+                  </>)}
+                  {o.type === "quality" && (<>
+                    <div className="insp-field"><div className="k">Column to Validate</div>{colSel(o.qualityCol || o.col, (v) => patch({ qualityCol: v, col: v }))}</div>
+                    <div className="insp-field"><div className="k">Validation Rule</div><select value={o.rule || "not_null"} onChange={(e) => patch({ rule: e.target.value })}><option value="not_null">Not Null</option><option value="positive">Numeric &gt; 0</option><option value="numeric">Is Numeric</option></select></div>
+                    <div className="insp-field"><div className="k">Status Column Name</div><input type="text" value={o.name ?? "_quality_status"} onChange={(e) => patch({ name: e.target.value })} /></div>
                   </>)}
                   <button className="btn ghost sm" onClick={() => removeOp(o.id)}>Remove transform</button>
                 </>);

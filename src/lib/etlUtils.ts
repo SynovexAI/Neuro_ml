@@ -134,7 +134,9 @@ p5,Standing Desk,Furniture,450.00,8,4.9` },
 export type OpType =
   | "filter" | "select" | "derive" | "aggregate" | "sort" | "dedupe" | "clean"
   | "rename" | "limit" | "sample" | "map" | "fillna" | "bucket"
-  | "join" | "union" | "pivot" | "unpivot" | "window" | "regex" | "dateparse";
+  | "join" | "union" | "pivot" | "unpivot" | "window" | "regex" | "dateparse"
+  | "lookup" | "merge" | "append"
+  | "scd2" | "fuzzydedupe" | "quality";
 export interface EtlOp {
   id: string; type: OpType;
   col?: string; op?: string; value?: string;                 // filter / limit / sample / fillna / bucket / regex
@@ -145,6 +147,9 @@ export interface EtlOp {
   mode?: string;                                              // clean / union (all|distinct)
   fn?: string;                                                // map / window / dateparse
   joinType?: string; rightKey?: string;                       // join
+  businessKey?: string; trackCols?: string[];                 // scd2
+  threshold?: number;                                         // fuzzydedupe (0.0 to 1.0 similarity)
+  rule?: string; qualityCol?: string;                         // quality / reject
 }
 export const OP_META: Record<OpType, { label: string; icon: string; hint: string; needsB?: boolean }> = {
   filter: { label: "Filter", icon: "🔻", hint: "keep only rows matching a condition (WHERE)" },
@@ -160,16 +165,27 @@ export const OP_META: Record<OpType, { label: string; icon: string; hint: string
   map: { label: "Map column", icon: "🔧", hint: "apply a function to one column (upper / round / …)" },
   fillna: { label: "Fill nulls", icon: "🩹", hint: "replace nulls in a column with a value" },
   bucket: { label: "Bucketize", icon: "🪣", hint: "bin a numeric column into N buckets" },
+  pivot: { label: "Pivot", icon: "📊", hint: "reshape data by turning rows into columns", needsB: true },
   join: { label: "Join", icon: "🔗", hint: "join with Source B on a key (inner / left / right)", needsB: true },
   union: { label: "Union", icon: "⧉", hint: "stack Source B's rows under this table", needsB: true },
-  pivot: { label: "Pivot", icon: "🔀", hint: "spread a column's values into new columns (wide)" },
+  lookup: { label: "Lookup", icon: "🔎", hint: "lookup matching rows from secondary table (left join)", needsB: true },
+  merge: { label: "Merge", icon: "🔀", hint: "merge fields from secondary into primary based on key", needsB: true },
+  append: { label: "Append", icon: "➕", hint: "append rows from secondary table (union)", needsB: true },
   unpivot: { label: "Unpivot", icon: "🔃", hint: "melt several columns into variable/value rows (long)" },
   window: { label: "Window", icon: "🪟", hint: "running total, rank, row number, lag or lead" },
   regex: { label: "Regex extract", icon: "🔍", hint: "extract the first match/group of a pattern into a new column" },
   dateparse: { label: "Parse date", icon: "📅", hint: "pull year/month/day/weekday or days-since from a date column" },
+  scd2: { label: "SCD Type 2", icon: "🕰", hint: "track historical changes with effective dates and current flag" },
+  fuzzydedupe: { label: "Fuzzy Dedupe", icon: "🔍", hint: "deduplicate near-matching strings using Levenshtein distance" },
+  quality: { label: "Quality Check", icon: "🛡", hint: "flag invalid rows failing quality rules" },
 };
 
-const numify = (v: Cell): number => (v == null ? NaN : Number(v));
+const numify = (v: Cell): number => {
+  if (v == null || v === "") return NaN;
+  if (typeof v === "number") return v;
+  const s = String(v).replace(/[$,\s]/g, "");
+  return s === "" ? NaN : Number(s);
+};
 function aggNums(nums: number[], agg: string): number {
   const sum = nums.reduce((a, b) => a + b, 0);
   const v = agg === "sum" ? sum : agg === "avg" ? sum / (nums.length || 1) : agg === "min" ? (nums.length ? Math.min(...nums) : 0) : agg === "max" ? (nums.length ? Math.max(...nums) : 0) : nums.length;
@@ -186,6 +202,29 @@ function compare(a: Cell, op: string, raw: string): boolean {
   return false;
 }
 
+export function levenshteinDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1].toLowerCase() === b[j - 1].toLowerCase() ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
+export function stringSimilarity(a: string, b: string): number {
+  if (!a && !b) return 1.0;
+  if (!a || !b) return 0.0;
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1.0;
+  const dist = levenshteinDistance(a, b);
+  return 1 - dist / maxLen;
+}
+
 export interface OpCtx { secondary?: Table | null; }
 
 export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
@@ -196,12 +235,12 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols: t.cols, rows: rows.filter((r) => compare(r[col], op.op || "==", op.value ?? "")) };
     }
     case "select": {
-      const cols = (op.cols && op.cols.length ? op.cols : t.cols).filter((c) => t.cols.includes(c));
+      const cols = op.cols ? op.cols.filter((c) => t.cols.includes(c)) : t.cols;
       return { cols, rows: rows.map((r) => { const o: Rec = {}; cols.forEach((c) => (o[c] = r[c])); return o; }) };
     }
     case "derive": {
       const name = op.name || "derived"; const arith = op.arith || "+";
-      const val = (r: Rec, k?: string) => { if (k == null) return NaN; return t.cols.includes(k) ? numify(r[k]) : Number(k); };
+      const val = (r: Rec, k?: string) => { if (k == null) return NaN; return t.cols.includes(k) ? numify(r[k]) : numify(k); };
       const cols = [...t.cols, name];
       return { cols, rows: rows.map((r) => { const l = val(r, op.left), rr = val(r, op.right); let v: number = NaN; if (arith === "+") v = l + rr; else if (arith === "-") v = l - rr; else if (arith === "*") v = l * rr; else if (arith === "/") v = rr ? l / rr : NaN; return { ...r, [name]: isNaN(v) ? null : Math.round(v * 1000) / 1000 }; }) };
     }
@@ -242,7 +281,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       const ap = (x: Cell): Cell => {
         if (x == null) return null;
         if (fn === "upper") return String(x).toUpperCase(); if (fn === "lower") return String(x).toLowerCase(); if (fn === "trim") return String(x).trim(); if (fn === "length") return String(x).length;
-        const n = Number(x); if (isNaN(n)) return x;
+        const n = numify(x); if (isNaN(n)) return x;
         if (fn === "round") return Math.round(n); if (fn === "abs") return Math.abs(n); if (fn === "floor") return Math.floor(n); if (fn === "ceil") return Math.ceil(n); return x;
       };
       return { cols: t.cols, rows: rows.map((r) => ({ ...r, [col]: ap(r[col]) })) };
@@ -283,6 +322,36 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       if (op.mode === "distinct") { const seen = new Set<string>(); out = out.filter((r) => { const k = cols.map((c) => String(r[c])).join("¦"); if (seen.has(k)) return false; seen.add(k); return true; }); }
       return { cols, rows: out };
     }
+    case "lookup": {
+        const lookupOp: EtlOp = { ...op, type: "join", joinType: "left" };
+        return applyOp(t, lookupOp, ctx);
+      }
+      case "merge": {
+        const mergeOp: EtlOp = { ...op, type: "join", joinType: "left" };
+        const joined = applyOp(t, mergeOp, ctx);
+        const bPrefix = "b_";
+        const mergedCols = new Set<string>();
+        const resultRows = joined.rows.map((r) => {
+          const out: Rec = { ...r };
+          for (const col of Object.keys(r)) {
+            if (col.startsWith(bPrefix)) {
+              const primaryName = col.slice(bPrefix.length);
+              if (t.cols.includes(primaryName)) {
+                const val = r[col];
+                if (val !== null && val !== undefined && val !== "") out[primaryName] = val as Cell;
+                delete out[col];
+                mergedCols.add(col);
+              }
+            }
+          }
+          return out;
+        });
+        return { cols: joined.cols.filter((c) => !mergedCols.has(c)), rows: resultRows };
+      }
+      case "append": {
+        const appendOp: EtlOp = { ...op, type: "union" };
+        return applyOp(t, appendOp, ctx);
+      }
     case "pivot": {
       const idxCol = op.groupBy || t.cols[0]; const pivCol = op.col || t.cols[1] || t.cols[0]; const agg = op.agg || "sum"; const ac = op.aggCol || t.cols[t.cols.length - 1];
       const pivVals = Array.from(new Set(rows.map((r) => String(r[pivCol] ?? "∅"))));
@@ -297,7 +366,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       return { cols, rows: out };
     }
     case "unpivot": {
-      const melt = (op.cols && op.cols.length ? op.cols : t.cols).filter((c) => t.cols.includes(c));
+      const melt = op.cols ? op.cols.filter((c) => t.cols.includes(c)) : [];
       const keep = t.cols.filter((c) => !melt.includes(c));
       const varName = op.name || "variable"; const valName = op.value || "value";
       const cols = [...keep, varName, valName];
@@ -307,7 +376,7 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
     }
     case "window": {
       const part = op.groupBy && op.groupBy !== "(none)" ? op.groupBy : ""; const col = op.col || t.cols[0]; const fn = op.fn || "running_sum"; const name = op.name || fn;
-      const partsMap = new Map<string, number[]>(); // partition key → row indices
+      const partsMap = new Map<string, number[]>();
       rows.forEach((_, i) => { const k = part ? String(rows[i][part] ?? "∅") : "_"; if (!partsMap.has(k)) partsMap.set(k, []); partsMap.get(k)!.push(i); });
       const outVal = new Array<Cell>(rows.length).fill(null);
       for (const idxs of partsMap.values()) {
@@ -327,14 +396,77 @@ export function applyOp(t: Table, op: EtlOp, ctx?: OpCtx): Table {
       const col = op.col || t.cols[0]; const fn = op.fn || "year"; const name = op.name || `${col}_${fn}`;
       const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
       return { cols: [...t.cols, name], rows: rows.map((r) => {
-        const d = new Date(String(r[col] ?? "")); let v: Cell = null;
+        let d = new Date(String(r[col] ?? "")); let v: Cell = null;
+        if (isNaN(d.getTime())) {
+          const m = String(r[col] ?? "").trim().match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+          if (m) d = new Date(`${m[3]}-${m[2]}-${m[1]}T00:00:00Z`);
+        }
         if (!isNaN(d.getTime())) {
           if (fn === "year") v = d.getUTCFullYear(); else if (fn === "month") v = d.getUTCMonth() + 1; else if (fn === "day") v = d.getUTCDate();
           else if (fn === "weekday") v = days[d.getUTCDay()]; else if (fn === "iso") v = d.toISOString().slice(0, 10);
-          else if (fn === "days_since") v = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(d.toISOString().slice(0, 10))) / 86_400_000);
+          else if (fn === "days_since") v = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - d.getTime()) / 86_400_000);
         }
         return { ...r, [name]: v };
       }) };
+    }
+    case "scd2": {
+      const bKey = op.businessKey || op.col || t.cols[0];
+      const cols = Array.from(new Set([...t.cols, "effective_start", "effective_end", "is_current"]));
+      const groups = new Map<string, Rec[]>();
+      rows.forEach((r) => {
+        const k = String(r[bKey] ?? "∅");
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k)!.push(r);
+      });
+      const outRows: Rec[] = [];
+      const baseYear = 2024;
+      for (const [, groupRows] of groups.entries()) {
+        groupRows.forEach((r, idx) => {
+          const startYear = baseYear + idx;
+          const isLast = idx === groupRows.length - 1;
+          outRows.push({
+            ...r,
+            effective_start: `${startYear}-01-01`,
+            effective_end: isLast ? null : `${startYear + 1}-01-01`,
+            is_current: isLast ? 1 : 0,
+          });
+        });
+      }
+      return { cols, rows: outRows };
+    }
+    case "fuzzydedupe": {
+      const col = op.col || t.cols[0];
+      const thresh = op.threshold ?? 0.8;
+      const keepRows: Rec[] = [];
+      for (const r of rows) {
+        const val = String(r[col] ?? "");
+        const isFuzzyDuplicate = keepRows.some((kRow) => {
+          const kVal = String(kRow[col] ?? "");
+          return stringSimilarity(val, kVal) >= thresh;
+        });
+        if (!isFuzzyDuplicate) {
+          keepRows.push(r);
+        }
+      }
+      return { cols: t.cols, rows: keepRows };
+    }
+    case "quality": {
+      const col = op.qualityCol || op.col || t.cols[0];
+      const rule = op.rule || "not_null";
+      const qCol = op.name || "_quality_status";
+      const cols = Array.from(new Set([...t.cols, qCol]));
+      const outRows = rows.map((r) => {
+        const val = r[col];
+        let isValid = true;
+        if (rule === "not_null") isValid = val != null && val !== "";
+        else if (rule === "positive") isValid = numify(val) > 0;
+        else if (rule === "numeric") isValid = !isNaN(numify(val));
+        return {
+          ...r,
+          [qCol]: isValid ? "VALID" : "REJECT",
+        };
+      });
+      return { cols, rows: outRows };
     }
   }
 }
@@ -344,6 +476,55 @@ export function runPipeline(src: Table, ops: EtlOp[], ctx?: OpCtx): { stages: { 
   let cur = src;
   for (const op of ops) { cur = applyOp(cur, op, ctx); stages.push({ op, table: cur }); }
   return { stages, final: cur };
+}
+
+export function pipelineToSql(srcTable: string, ops: EtlOp[]): string {
+  let selectClause = "*";
+  const fromClause = srcTable;
+  const whereClauses: string[] = [];
+  const groupClauses: string[] = [];
+  let orderClause = "";
+  let limitClause = "";
+
+  for (const op of ops) {
+    if (op.type === "filter") {
+      const col = op.col || "col";
+      const oper = op.op || "==";
+      const val = op.value ?? "";
+      const sqlOp = oper === "==" ? "=" : oper === "contains" ? "LIKE" : oper;
+      const sqlVal = oper === "contains" ? `'${val}'` : isNaN(Number(val)) ? `'${val}'` : val;
+      whereClauses.push(`${col} ${sqlOp} ${sqlVal}`);
+    } else if (op.type === "select") {
+      if (op.cols && op.cols.length) selectClause = op.cols.join(", ");
+    } else if (op.type === "sort") {
+      const col = op.col || "col";
+      const dir = op.dir === "desc" ? "DESC" : "ASC";
+      orderClause = `ORDER BY ${col} ${dir}`;
+    } else if (op.type === "limit") {
+      limitClause = `LIMIT ${op.value || 10}`;
+    } else if (op.type === "aggregate") {
+      const gb = op.groupBy || "id";
+      const agg = (op.agg || "COUNT").toUpperCase();
+      const ac = op.aggCol || "*";
+      selectClause = `${gb}, ${agg}(${ac}) AS ${op.agg === "count" ? "count" : `${op.agg}_${ac}`}`;
+      groupClauses.push(gb);
+    } else if (op.type === "quality") {
+      const col = op.qualityCol || op.col || "col";
+      const rule = op.rule || "not_null";
+      if (rule === "not_null") whereClauses.push(`${col} IS NOT NULL`);
+      else if (rule === "positive") whereClauses.push(`${col} > 0`);
+    } else if (op.type === "scd2") {
+      const bKey = op.businessKey || op.col || "id";
+      selectClause += `, ROW_NUMBER() OVER (PARTITION BY ${bKey} ORDER BY 1) AS version`;
+    }
+  }
+
+  let sql = `SELECT ${selectClause} FROM ${fromClause}`;
+  if (whereClauses.length) sql += `\nWHERE ${whereClauses.join(" AND ")}`;
+  if (groupClauses.length) sql += `\nGROUP BY ${groupClauses.join(", ")}`;
+  if (orderClause) sql += `\n${orderClause}`;
+  if (limitClause) sql += `\n${limitClause}`;
+  return sql;
 }
 
 // ── Data-quality expectations (Great-Expectations-style) with remediation ──

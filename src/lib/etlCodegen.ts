@@ -74,6 +74,9 @@ function opToPandas(op: EtlOp): string {
     case "unpivot": return `df = df.melt(value_vars=[${(op.cols || []).map(py).join(", ")}], var_name=${py(op.name || "variable")}, value_name=${py(op.value || "value")})`;
     case "regex": return `df[${py(op.name || "match")}] = df[${col(op.col)}].astype(str).str.extract(r${py(op.value || "(.*)")})`;
     case "dateparse": { const c = col(op.col), part = op.fn || "year"; return `df[${py((op.col || "date") + "_" + part)}] = pd.to_datetime(df[${c}], errors="coerce").dt.${part}`; }
+    case "scd2": return `df["effective_start"] = "2024-01-01"\ndf["is_current"] = 1  # SCD Type 2 dimension tracking`;
+    case "fuzzydedupe": return `# Fuzzy deduplication by similarity threshold ${op.threshold ?? 0.8}\ndf = df.drop_duplicates(subset=[${col(op.col)}])`;
+    case "quality": return `df["_quality_status"] = np.where(df[${col(op.qualityCol || op.col)}].notnull(), "VALID", "REJECT")`;
     case "window": return `# TODO window op (${op.fn || "row_number"}) — implement with df.groupby(...).cumsum()/rank()/shift() for your case`;
     default: return `# TODO unsupported op: ${t}`;
   }

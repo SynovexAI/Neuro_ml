@@ -77,7 +77,7 @@ const CheckSvg = () => (
   </svg>
 );
 
-function CopyBtn({ text }: { text: string }) {
+export function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -92,6 +92,7 @@ function CopyBtn({ text }: { text: string }) {
     </button>
   );
 }
+
 
 export default function AgenticAnswer({ chunks, tools, retrieve, chat, chatStream, fetchWeb, modelPicker, note, defaultQuestion, disabled, compact, config, onConfigChange }: Props) {
   const [question, setQuestion] = useState(defaultQuestion || "What is the refund policy for damaged items?");
@@ -353,7 +354,6 @@ export default function AgenticAnswer({ chunks, tools, retrieve, chat, chatStrea
         {turns.length > 0 && !running && <button className="btn ghost sm" onClick={() => setTurns([])} title="Clear conversation">🗑 Clear</button>}
       </div>
       {activeTools.length === 0 && <div className="note" style={{ color: "var(--warn)" }}>Enable at least one tool above.</div>}
-
     </div>
   );
 }

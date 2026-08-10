@@ -2,8 +2,34 @@ import { drizzle as drizzleMysql, type MySql2Database } from "drizzle-orm/mysql2
 import { drizzle as drizzleHttp } from "drizzle-orm/tidb-serverless";
 import { connect } from "@tidbcloud/serverless";
 import mysql from "mysql2/promise";
+import { readFileSync } from "fs";
 import * as schema from "./schema";
 
+// Ensure `.env.local` or `.env` is loaded at runtime when Next/Node doesn't inject it automatically.
+try {
+  if (!process.env.DATABASE_URL) {
+    const envFile = [".env.local", ".env"].find((name) => {
+      try {
+        return !!readFileSync(name, "utf8");
+      } catch {
+        return false;
+      }
+    });
+    if (envFile) {
+      const raw = readFileSync(envFile, "utf8");
+      raw.split(/\r?\n/).forEach((line) => {
+        const idx = line.indexOf("=");
+        if (idx > 0) {
+          const key = line.slice(0, idx).trim();
+          const value = line.slice(idx + 1).trim();
+          if (key && process.env[key] === undefined) process.env[key] = value;
+        }
+      });
+    }
+  }
+} catch {
+  // Ignore failure if the env file is missing or unreadable.
+}
 // Two ways to talk to TiDB, chosen by env so the SAME code runs on both hosts:
 //  • default  → mysql2 TCP pool  (works great on a persistent server like Render)
 //  • http     → TiDB Cloud serverless HTTP driver, when TIDB_DRIVER=http
