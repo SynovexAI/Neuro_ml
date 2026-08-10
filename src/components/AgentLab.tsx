@@ -9,6 +9,7 @@ import {
 import { parseRecords } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
+import AgentOutput from "@/components/AgentOutput";
 import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
@@ -1296,8 +1297,12 @@ Explore any connected node on the Concept Network Tree above for detailed visual
         };
         const newMcpMeta: Record<string, { icon: string; label: string }> = {};
         const newTools: AgentTool[] = [];
+        setDbConnected(enabledServers.some((s: { name: string }) => s.name === "database"));
         enabledServers.forEach((s: { name: string; enabled?: boolean }) => {
           if (AGENT_TOOLS.some((t) => t.id === s.name)) return;
+          // The "database" connector is served by the built-in db_query / db_schema tools
+          // (HTTP, free-tier). Don't expose it as a stdio MCP tool node — that can't run here.
+          if (s.name === "database") return;
           const meta = catalogMap[s.name] || { icon: "🔌", label: s.name, example: '{"tool":"some_tool","args":{}}' };
           newMcpMeta[s.name] = { icon: meta.icon, label: meta.label };
           newTools.push({
@@ -1322,6 +1327,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   // database upload & test state for db_query / db_schema tool nodes
   const [dbDataText, setDbDataText] = useState("");
   const [dbFileName, setDbFileName] = useState("");
+  const [dbConnected, setDbConnected] = useState(false); // a cloud DB is connected on the MCP page
   const [dbQueryTest, setDbQueryTest] = useState("select count(*) from orders");
   const [dbTestResult, setDbTestResult] = useState("");
   const [dbTestRunning, setDbTestRunning] = useState(false);
@@ -1493,7 +1499,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     }, 150);
   }
 
-  function handleTestSchema() {
+  async function handleTestSchema() {
     if (dbCustomSchema.trim()) {
       setSchemaTestResult(dbCustomSchema.trim());
     } else if (dbDataText.trim()) {
@@ -1501,8 +1507,16 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       const name = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
       const cols = tbl.cols.join(", ");
       setSchemaTestResult(`Tables available: ${name}(${cols}), students(${cols}), orders(${cols}), raw(${cols})\n(${tbl.rows.length} rows loaded locally)`);
+    } else if (dbConnected) {
+      // No local data → read the LIVE schema from the connected database (same path the agent uses at run time).
+      setSchemaTestResult("Reading live schema from your connected database…");
+      try {
+        const r = await fetch("/api/agent/native", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool: "db_schema", input: "" }) });
+        const j = await r.json();
+        setSchemaTestResult(r.ok ? (j.text || "(no tables returned)") : ("Error: " + (j.error || "failed")));
+      } catch (e) { setSchemaTestResult("Error: " + (e as Error).message); }
     } else {
-      setSchemaTestResult("No custom schema or database file loaded yet. Upload a file above or enter a schema definition.");
+      setSchemaTestResult("No database connected and no file loaded. Connect a database on the MCP page, or upload a file / enter a schema above.");
     }
   }
 
@@ -2240,9 +2254,19 @@ if __name__ == "__main__":
                     <div className="note" style={{ margin: 0 }}>List database tables, column names, and data types for the AI agent.</div>
                   </div>
 
+                  {dbConnected ? (
+                    <div className="teach-note" style={{ borderColor: "color-mix(in srgb, var(--good) 30%, transparent)", background: "color-mix(in srgb, var(--good) 8%, transparent)" }}>
+                      <span className="ic">✓</span><span><b>Using your connected database.</b> The agent reads the live schema over the connection you saved on the MCP page — <b>no file needed</b>. Uploading a file below is optional (only to test on a local CSV/JSON instead).</span>
+                    </div>
+                  ) : (
+                    <div className="teach-note" style={{ borderColor: "color-mix(in srgb, var(--warn) 30%, transparent)", background: "color-mix(in srgb, var(--warn) 8%, transparent)" }}>
+                      <span className="ic">ℹ️</span><span>No database connected. <b>Connect one on the MCP servers page</b> (“Connect your database”) to query it live — or upload a local CSV/JSON below to test.</span>
+                    </div>
+                  )}
+
                   <div className="insp-field">
                     <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span>1. Upload Database File</span>
+                      <span>{dbConnected ? "Optional — test on a local file instead" : "Upload a local file (CSV / JSON)"}</span>
                       {dbFileName && <span className="mono" style={{ fontSize: 11, color: "var(--accent)" }}>📄 {dbFileName}</span>}
                     </div>
                     <div className="row" style={{ gap: 8, margin: "6px 0", flexWrap: "wrap" }}>
@@ -2280,10 +2304,12 @@ if __name__ == "__main__":
                   </div>
 
                   <div className="insp-field">
-                    <div className="k">2. Database Schema Definition Input</div>
+                    <div className="k">{dbConnected ? "Schema override (optional)" : "Schema definition"}</div>
                     <textarea rows={5} value={dbCustomSchema} onChange={(e) => setDbCustomSchema(e.target.value)} placeholder="e.g. students(student_id INT, gender TEXT, gpa FLOAT, final_grade TEXT)" />
                     <div className="note" style={{ marginTop: 4 }}>
-                      The AI agent calls <code>db_schema</code> to read this exact table blueprint.
+                      {dbConnected
+                        ? <>Leave blank to read your connected database&apos;s <b>live schema</b>. Anything typed here <b>overrides</b> it.</>
+                        : <>The AI agent calls <code>db_schema</code> to read this exact table blueprint.</>}
                     </div>
                   </div>
 
@@ -2319,9 +2345,18 @@ if __name__ == "__main__":
                     <div className="k">Tool description</div>
                     <div className="note" style={{ margin: 0 }}>{AGENT_TOOLS.find((t) => t.id === selNode.toolId)?.desc}</div>
                   </div>
+                  {dbConnected ? (
+                    <div className="teach-note" style={{ borderColor: "color-mix(in srgb, var(--good) 30%, transparent)", background: "color-mix(in srgb, var(--good) 8%, transparent)" }}>
+                      <span className="ic">✓</span><span><b>Using your connected database.</b> The agent runs SQL live against the Postgres/Turso you saved on the MCP page — <b>no file needed</b>. Uploading below is optional (only to test on a local CSV/JSON instead).</span>
+                    </div>
+                  ) : (
+                    <div className="teach-note" style={{ borderColor: "color-mix(in srgb, var(--warn) 30%, transparent)", background: "color-mix(in srgb, var(--warn) 8%, transparent)" }}>
+                      <span className="ic">ℹ️</span><span>No database connected. <b>Connect one on the MCP servers page</b> to run SQL live — or upload a local CSV/JSON below to query on sample data.</span>
+                    </div>
+                  )}
                   <div className="insp-field">
                     <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span>Upload database file (CSV / JSON / Excel / Text)</span>
+                      <span>{dbConnected ? "Optional — test on a local file instead" : "Upload database file (CSV / JSON / Excel / Text)"}</span>
                       {dbFileName && <span className="mono" style={{ fontSize: 11, color: "var(--accent)" }}>📄 {dbFileName}</span>}
                     </div>
                     <div className="row" style={{ gap: 8, flexWrap: "wrap", margin: "6px 0" }}>
@@ -2539,13 +2574,13 @@ if __name__ == "__main__":
               <div className="card-b">
                 <label className="fld">What should {name} do?</label><textarea rows={3} value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!running && hasProvider && task.trim()) runReact(); } }} placeholder="Type your prompt and press Enter to run…" />
                 <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={runReact} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run agent"}</button><span className="note">{toolList.length} tools · {model || providerLabel} · max {maxIters} steps</span></div>
-                {finalOut && <><label className="fld" style={{ marginTop: 16 }}>Final answer</label><div className="out" style={{ position: "relative" }}><CopyBtn text={formatFinalAnswer(finalOut)} /><div style={{ paddingRight: 36, whiteSpace: "pre-wrap", fontFamily: "var(--mono)", fontSize: "12.5px" }}>{formatFinalAnswer(finalOut)}</div></div></>}
+                {finalOut && <><label className="fld" style={{ marginTop: 16 }}>Final answer</label><div className="out" style={{ position: "relative" }}><CopyBtn text={formatFinalAnswer(finalOut)} /><div style={{ paddingRight: 36 }}><AgentOutput text={formatFinalAnswer(finalOut)} /></div></div></>}
               </div>
             </div>
             <div className="card"><div className="card-h"><span className="t">Reasoning trace</span><span className="mono r">{trace.length} steps</span></div>
               <div className="card-b" ref={scrollRef} style={{ maxHeight: 460, overflow: "auto" }}>
                 {trace.length === 0 && <div className="note">Run the agent to watch the Thought → Action → Observation loop.</div>}
-                {trace.map((t, i) => (<div key={i} className={`ag-step ${t.kind} ${t.state}`}><div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div><div className="ag-t">{t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</> : t.text}</div></div>))}
+                {trace.map((t, i) => (<div key={i} className={`ag-step ${t.kind} ${t.state}`}><div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div><div className="ag-t">{t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</> : (t.kind === "observation" || t.kind === "final") ? <AgentOutput text={t.text} /> : t.text}</div></div>))}
               </div>
             </div>
           </div>
@@ -2559,7 +2594,7 @@ if __name__ == "__main__":
             <div className="card-b" ref={scrollRef} style={{ maxHeight: 560, overflow: "auto" }}>
               <label className="fld">Input</label><textarea rows={2} value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!running && hasProvider && task.trim()) runWorkflow(); } }} placeholder="Type your prompt and press Enter to run…" />
               <div className="row" style={{ margin: "12px 0" }}><button className="btn" onClick={runWorkflow} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run workflow"}</button></div>
-              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8, position: "relative" }}><CopyBtn text={formatFinalAnswer(o.text)} /><div style={{ paddingRight: 36, whiteSpace: "pre-wrap", fontFamily: "var(--mono)", fontSize: "12.5px" }}>{formatFinalAnswer(o.text)}</div></div>}</div>))}
+              {wfOutputs.map((o, i) => (<div key={i} className={`wf-run ${o.state}`}><div className="wf-run-h"><span className="wf-idx">{i + 1}</span><b>{o.name}</b>{o.state === "active" && <span className="busy-dot" style={{ marginLeft: 8 }} />}{o.state === "done" && <span className="badge good" style={{ marginLeft: 8 }}>done</span>}</div>{o.text && <div className="out" style={{ marginTop: 8, position: "relative" }}><CopyBtn text={formatFinalAnswer(o.text)} /><div style={{ paddingRight: 36 }}><AgentOutput text={formatFinalAnswer(o.text)} /></div></div>}</div>))}
             </div>
           </div>
         </>)}
