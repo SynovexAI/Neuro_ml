@@ -786,7 +786,7 @@ const MapSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: 
   </svg>
 );
 
-const AlertSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
+export const AlertSvg = ({ size = 16, color = "currentColor" }: { size?: number; color?: string }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline-block", verticalAlign: "middle" }}>
     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
     <line x1="12" y1="9" x2="12" y2="13" />
@@ -1063,7 +1063,7 @@ function renderTutorMessage(text: string) {
 export default function AgentLab() {
   const [step, setStep] = useState<Step>("type");
   const [selectedTopic, setSelectedTopic] = useState<LearnTopic | null>(null);
-  const [quizOption, setQuizOption] = useState<number | null>(null);
+  const [_quizOption, setQuizOption] = useState<number | null>(null); void _quizOption;
   const [tutorMessages, setTutorMessages] = useState<{ sender: "user" | "bot"; text: string }[]>([
     {
       sender: "bot",

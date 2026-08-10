@@ -27,7 +27,8 @@ const tabs = [
 
 type Tab = typeof tabs[number];
 
-export default function DataVizExplorer({ sourceTable, finalTable, ops, rules }: DataVizExplorerProps) {
+export default function DataVizExplorer({ sourceTable, finalTable, ops, rules: _rules }: DataVizExplorerProps) {
+  void _rules;
   const [activeTab, setActiveTab] = useState<Tab>(tabs[0]);
 
   const renderTab = () => {
