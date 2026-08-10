@@ -20,10 +20,25 @@ export async function runSql(sql: string, raw: Table, b?: Table | null, extra?: 
   const mod: any = await import("alasql");
   const alasql = mod.default || mod;
   const db = new alasql.Database();
-  const register = (name: string, t: Table) => { if (!IDENT.test(name)) return; db.exec(`CREATE TABLE ${name}`); db.tables[name].data = t.rows.map((r) => ({ ...r })); };
+  const register = (name: string, t: Table) => {
+    if (!IDENT.test(name)) return;
+    if (!db.tables[name]) {
+      db.exec(`CREATE TABLE ${name}`);
+    }
+    db.tables[name].data = t.rows.map((r) => ({ ...r }));
+  };
   register("raw", raw);
   if (b && b.cols.length) register("b", b);
   (extra || []).forEach((e) => register(e.name, e.table));
+
+  // Dynamically register any table name referenced in the SQL query (e.g. FROM tableid, FROM student_performance_dataset)
+  const referencedTables = Array.from(sql.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([A-Za-z0-9_]+)/gi)).map((m) => m[1]);
+  referencedTables.forEach((tblName) => {
+    if (IDENT.test(tblName) && !db.tables[tblName]) {
+      register(tblName, raw);
+    }
+  });
+
   const res = db.exec(sql);
   if (!Array.isArray(res)) return { cols: [], rows: [] };
   const out = res as Record<string, unknown>[];

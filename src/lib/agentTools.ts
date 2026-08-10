@@ -2,11 +2,16 @@
 // or via the existing server proxies), no mocks. Plus ReAct prompt/parse helpers.
 
 import { chunkText, buildIndex, retrieve, type RagIndex } from "./ragUtils";
+import type { Table } from "./etlUtils";
 
 export interface ToolCtx {
   knowledgeIndex?: RagIndex | null;
   knowledgeChunks?: string[];
   requestApproval?: (question: string) => Promise<string>;
+  selectedRagId?: string;
+  dbTable?: Table | null;
+  dbTableName?: string;
+  dbCustomSchema?: string;
 }
 export interface AgentTool {
   id: string;
@@ -157,13 +162,69 @@ async function mcpPost(body: object): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
-// Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
-// JSON {"tool":"…","args":{…}} calls one.
-async function mcpTool(server: string, input: string): Promise<string> {
+// In-memory cache: server → real tool names (populated on first use, avoids re-listing)
+const mcpToolCache: Record<string, string[]> = {};
+
+function fixCommonArgMismatches(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  // Exa web_fetch_exa expects urls[] not url string
+  if ("url" in args && !("urls" in args) && typeof args.url === "string") {
+    const { url, ...rest } = args;
+    return { ...rest, urls: [url] };
+  }
+  return args;
+}
+
+function fuzzyMatchTool(requested: string, available: string[]): string | null {
+  // Exact match first
+  if (available.includes(requested)) return requested;
+  const req = requested.toLowerCase();
+  // Contains check (e.g. "search" → "web_search_exa")
+  const contains = available.find((t) => t.toLowerCase().includes(req) || req.includes(t.toLowerCase().replace(/^.*_/, "")));
+  if (contains) return contains;
+  // Suffix match (e.g. "fetch" → "web_fetch_exa")
+  const suffix = available.find((t) => t.toLowerCase().endsWith(req) || t.toLowerCase().includes("_" + req));
+  return suffix || null;
+}
+
+export async function mcpTool(server: string, input: string): Promise<string> {
   const s = (input || "").trim();
-  if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
+  if (!s || /^list$/i.test(s)) {
+    const result = await mcpPost({ server, action: "list" });
+    // Cache the tool names for future calls
+    const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+    if (names.length) mcpToolCache[server] = names;
+    return result;
+  }
   if (s.startsWith("{")) {
-    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; return mcpPost({ server, action: "call", tool: p.tool, args: p.args }); }
+    try {
+      const p = JSON.parse(s) as { tool?: string; args?: Record<string, unknown> };
+      if (p.tool === "list" || p.tool === "tools/list") {
+        const result = await mcpPost({ server, action: "list" });
+        const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+        if (names.length) mcpToolCache[server] = names;
+        return result;
+      }
+      const args = p.args ? fixCommonArgMismatches(p.tool || "", p.args) : p.args;
+      const result = await mcpPost({ server, action: "call", tool: p.tool, args });
+      // Auto-retry: if tool not found, discover real names and retry with best match
+      if (result.includes("-32602") && result.toLowerCase().includes("not found") && p.tool) {
+        // Fetch and cache tool list if not already cached
+        if (!mcpToolCache[server]) {
+          const listResult = await mcpPost({ server, action: "list" });
+          const names = [...listResult.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+          if (names.length) mcpToolCache[server] = names;
+          else return `${result}\n\nAvailable tools:\n${listResult}`;
+        }
+        const bestMatch = fuzzyMatchTool(p.tool, mcpToolCache[server]);
+        if (bestMatch && bestMatch !== p.tool) {
+          const retryArgs = args ? fixCommonArgMismatches(bestMatch, args) : args;
+          const retryResult = await mcpPost({ server, action: "call", tool: bestMatch, args: retryArgs });
+          return retryResult;
+        }
+        return `${result}\n\nAvailable tools on "${server}": ${mcpToolCache[server].join(", ")}`;
+      }
+      return result;
+    }
     catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
   }
   return mcpPost({ server, action: "call", tool: s });
@@ -192,6 +253,24 @@ function memoryTool(input: string): string {
   return 'Use: "set key: value", "get key", "list", or "delete key".';
 }
 
+async function ragTool(input: string, ctx: ToolCtx): Promise<string> {
+  if (!ctx.selectedRagId) {
+    return "Error: No RAG model is connected to the RAG tool. Click on the RAG tool node and select a deployed RAG model.";
+  }
+  try {
+    const res = await fetch("/api/rag/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: ctx.selectedRagId, query: input }),
+    });
+    const j = await res.json();
+    if (!res.ok) return "Error: " + (j.error || "RAG query failed");
+    return j.answer || "(no response)";
+  } catch (e) {
+    return "Error: " + (e as Error).message;
+  }
+}
+
 export const AGENT_TOOLS: AgentTool[] = [
   { id: "calculator", name: "calculator", desc: "evaluate an arithmetic / math expression", example: "2*(3+4)^2  or  sqrt(144)+pi", run: async (input) => { try { return String(safeCalc(input)); } catch (e) { return "Error: " + (e as Error).message; } } },
   { id: "datetime", name: "datetime", desc: "current date/time, or days until/since a date", example: "now  |  days until 2026-12-25", run: async (input) => dateTool(input) },
@@ -206,10 +285,38 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "wikipedia", name: "wikipedia", desc: "search Wikipedia and read article summaries", example: "retrieval augmented generation", run: async (input) => nativeTool("wikipedia", input) },
   { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (title, abstract, link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
-  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
-  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
+  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async (_, ctx) => {
+    if (ctx?.dbCustomSchema && ctx.dbCustomSchema.trim()) {
+      return ctx.dbCustomSchema.trim();
+    }
+    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
+      const name = ctx.dbTableName || "students";
+      const cols = ctx.dbTable.cols.join(", ");
+      return `Tables available: ${name}(${cols}), students(${cols}), orders(${cols}), raw(${cols})\n(${ctx.dbTable.rows.length} rows loaded locally)`;
+    }
+    return nativeTool("db_schema", "");
+  } },
+  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input, ctx) => {
+    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
+      try {
+        const { runSql } = await import("./sqlEngine");
+        const name = ctx.dbTableName || "students";
+        const extraNames = Array.from(new Set([name, "students", "orders", "customers", "events", "employees", "products", "sensors", "data", "raw"]));
+        const extraTables = extraNames.map((n) => ({ name: n, table: ctx.dbTable! }));
+        const res = await runSql(input, ctx.dbTable, null, extraTables);
+        if (!res.rows.length) return "OK — 0 rows returned.";
+        const header = res.cols.join(" | ");
+        const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
+        return `${header}\n${body}\n(${res.rows.length} rows)`;
+      } catch (e) {
+        return "Error executing SQL on uploaded dataset: " + (e as Error).message;
+      }
+    }
+    return nativeTool("db_query", input);
+  } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
+  { id: "rag", name: "rag", desc: "query a deployed RAG model for grounded answers", example: "what is the product return policy?", run: async (input, ctx) => ragTool(input, ctx) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
@@ -222,6 +329,26 @@ export function buildKnowledge(text: string): { index: RagIndex; chunks: string[
 }
 
 // ── ReAct prompt + parse ──
+export function formatFinalAnswer(text: string): string {
+  if (!text) return "";
+  const formatted = text
+    .replace(/^#{1,6}\s*(.*)$/gm, "// $1")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/(?<!\S)\*(.*?)\*(?!\S)/g, "$1")
+    .replace(/^\s*[\*\-]\s+/gm, "• ")
+    .replace(/^\s*[\$\&\#]\s*/gm, "// ");
+
+  const lines = formatted.split("\n").map((line) => {
+    const trimmed = line.trim();
+    if (trimmed.endsWith(":") && !trimmed.startsWith("//") && !trimmed.startsWith("http") && !trimmed.startsWith("•")) {
+      return `// ${trimmed.slice(0, -1)}`;
+    }
+    return line;
+  });
+
+  return lines.join("\n");
+}
+
 export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
   const list = tools.map((t) => `- ${t.name}: ${t.desc} (example input: ${t.example})`).join("\n");
   return `You are a ReAct agent that solves tasks by reasoning and using tools.${goal ? `\nYour goal / role: ${goal}` : ""}
@@ -240,15 +367,47 @@ When you have enough information, instead output:
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
+Example of a tool call block:
+Thought: I need to query the exa tool to search.
+Action: exa
+Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
+
+Formatting rules for Final Answer:
+- Output clean line-by-line plain text ready to copy-paste directly.
+- Use // at the start of section headers, command lines, or step labels (e.g. // Summary, // Command, // Step 1).
+- Do NOT use markdown symbols like *, #, $, &, or bold markdown markup.
+- Keep output clear, clean, and line-exact.
+
 Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
 }
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
 export function parseReAct(text: string): ReActParse {
+  const cleanText = text.trim();
+  if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
+    try {
+      const j = JSON.parse(cleanText);
+      if (j && typeof j === "object") {
+        const act = j.action || j.tool;
+        const inp = j.input || j.args || j.action_input;
+        if (act && typeof act === "string") {
+          return {
+            thought: j.thought || "(JSON tool call fallback)",
+            action: act,
+            input: typeof inp === "object" ? JSON.stringify(inp) : String(inp || "")
+          };
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   const thought = text.match(/Thought:\s*([\s\S]*?)(?=\n\s*(?:Action|Final Answer)\s*:|$)/i)?.[1]?.trim();
   const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
   if (final) return { thought, final };
   const action = text.match(/Action:\s*([^\n]+)/i)?.[1]?.trim().replace(/[.'"]+$/, "");
-  const input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim().replace(/^["']|["']$/g, "");
+  let input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim() || "";
+  if (input.length >= 2 && ((input.startsWith('"') && input.endsWith('"')) || (input.startsWith("'") && input.endsWith("'")))) {
+    input = input.slice(1, -1).trim();
+  }
   return { thought, action, input };
 }

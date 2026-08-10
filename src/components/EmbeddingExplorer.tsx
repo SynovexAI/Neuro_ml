@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { pca2, type Metric } from "@/lib/ragUtils";
 import Katex from "@/components/Katex";
 
@@ -33,6 +33,31 @@ export default function EmbeddingExplorer({ vectors, chunks, dim, metric, cluste
   // Pre-select the first two chunks so the compare panel is populated on load.
   const [sel, setSel] = useState<number[]>(vectors.length >= 2 ? [0, 1] : []);
   const [tab, setTab] = useState<Tab>(metric);
+  const [inputA, setInputA] = useState(vectors.length >= 2 ? "1" : "");
+  const [inputB, setInputB] = useState(vectors.length >= 2 ? "2" : "");
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (sel.length >= 1) setInputA(String(sel[0] + 1));
+    if (sel.length >= 2) setInputB(String(sel[1] + 1));
+  }, [sel]);
+
+  const swapChunks = () => {
+    setSel((s) => (s.length === 2 ? [s[1], s[0]] : s));
+  };
+
+  const handleCompare = () => {
+    const idxA = parseInt(inputA, 10) - 1;
+    const idxB = parseInt(inputB, 10) - 1;
+    const nextSel: number[] = [];
+    if (!isNaN(idxA) && idxA >= 0 && idxA < vectors.length) nextSel.push(idxA);
+    if (!isNaN(idxB) && idxB >= 0 && idxB < vectors.length) nextSel.push(idxB);
+    if (nextSel.length === 2 && nextSel[0] === nextSel[1]) {
+      alert("Please select two different chunks to compare.");
+      return;
+    }
+    setSel(nextSel);
+  };
 
   const pts = useMemo(() => pca2(vectors), [vectors]);
   const asg = clusterAssign ?? vectors.map(() => 0);
@@ -131,12 +156,17 @@ export default function EmbeddingExplorer({ vectors, chunks, dim, metric, cluste
     }
     // cosine / dot → arrows from the projected origin to A and B
     const Ox = sx(clamp(0, xmin, xmax)), Oy = sy(clamp(0, ymin, ymax));
+    const tx = Ox + 14, ty = Oy - 24; // top-left position of the box
     return (<>
       <line x1={Ox} y1={Oy} x2={Ax} y2={Ay} stroke="#5b7cff" strokeWidth={1.8} markerEnd="url(#ee-mA)" />
       <line x1={Ox} y1={Oy} x2={Bx} y2={By} stroke="#e0559f" strokeWidth={1.8} markerEnd="url(#ee-mB)" />
       <text x={(Ox + Ax) / 2} y={(Oy + Ay) / 2 + 12} fontSize="10" fill="#5b7cff" fontStyle="italic">A</text>
       <text x={(Ox + Bx) / 2} y={(Oy + By) / 2 - 6} fontSize="10" fill="#e0559f" fontStyle="italic">B</text>
-      <text x={Ox + 10} y={Oy - 6} fontSize="11" fill="#f59e0b" fontFamily="var(--mono)">θ = {calc.theta.toFixed(1)}°</text>
+      {/* Theta highlighted box */}
+      <g>
+        <rect x={tx} y={ty} width={82} height={20} rx={4} ry={4} fill="rgba(245, 158, 11, 0.12)" stroke="#f59e0b" strokeWidth={1.2} />
+        <text x={tx + 41} y={ty + 14} fontSize="10.5" fontWeight="700" fill="#f59e0b" fontFamily="var(--mono)" textAnchor="middle">θ = {calc.theta.toFixed(2)}°</text>
+      </g>
     </>);
   };
 
@@ -149,6 +179,99 @@ export default function EmbeddingExplorer({ vectors, chunks, dim, metric, cluste
           {stat(String(dim), "dimensions")}
           {stat(String(vectors.length), "vectors stored")}
           {stat(metric === "dot" ? "dot (IP)" : metric === "euclidean" ? "euclidean" : "cosine", "similarity")}
+        </div>
+
+        {/* Manual chunk selection & compare bar */}
+        <div className="row" style={{ gap: 12, alignItems: "flex-end", marginBottom: 16, background: "var(--panel-2)", padding: "12px 16px", borderRadius: 12, border: "1px solid var(--border)", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 120, display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#5b7cff", letterSpacing: ".05em" }}>Chunk A</span>
+            <input
+              type="number"
+              min={1}
+              max={chunks.length}
+              value={inputA}
+              onChange={(e) => setInputA(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCompare()}
+              placeholder="Enter chunk number"
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: "8px 12px",
+                color: "var(--text)",
+                fontSize: 13.5,
+                width: "100%",
+                boxSizing: "border-box"
+              }}
+            />
+            <span style={{ fontSize: 9.5, color: "var(--faint)", fontStyle: "italic" }}>(Enter chunk number)</span>
+          </div>
+
+          <button
+            onClick={swapChunks}
+            title="Swap chunks"
+            style={{
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              width: 36,
+              height: 36,
+              display: "grid",
+              placeItems: "center",
+              cursor: "pointer",
+              color: "var(--muted)",
+              fontSize: 16,
+              marginBottom: 14
+            }}
+          >
+            ↔
+          </button>
+
+          <div style={{ flex: 1, minWidth: 120, display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: "#e0559f", letterSpacing: ".05em" }}>Chunk B</span>
+            <input
+              type="number"
+              min={1}
+              max={chunks.length}
+              value={inputB}
+              onChange={(e) => setInputB(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCompare()}
+              placeholder="Enter chunk number"
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: "8px 12px",
+                color: "var(--text)",
+                fontSize: 13.5,
+                width: "100%",
+                boxSizing: "border-box"
+              }}
+            />
+            <span style={{ fontSize: 9.5, color: "var(--faint)", fontStyle: "italic" }}>(Enter chunk number)</span>
+          </div>
+
+          <button
+            className="btn"
+            onClick={handleCompare}
+            style={{
+              padding: "8px 20px",
+              height: 38,
+              fontSize: 12.5,
+              fontWeight: 600,
+              background: "var(--accent)",
+              color: "#fff",
+              border: "none",
+              borderRadius: 8,
+              cursor: "pointer",
+              marginBottom: 14,
+              display: "flex",
+              alignItems: "center",
+              gap: 6
+            }}
+          >
+            Compare ❖
+          </button>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.15fr) minmax(0,1fr)", gap: 14, alignItems: "start" }}>
@@ -171,12 +294,46 @@ export default function EmbeddingExplorer({ vectors, chunks, dim, metric, cluste
               {overlay()}
               {/* points */}
               {pts.map((p, i) => {
-                const X = sx(p.x), Y = sy(p.y); const on = sel.includes(i); const color = PALETTE[asg[i] % PALETTE.length];
+                const X = sx(p.x), Y = sy(p.y);
+                const on = sel.includes(i);
+                const color = PALETTE[asg[i] % PALETTE.length];
+                const isHovered = hoveredIdx === i;
+                
+                // Determine opacity: translucent if other points are selected, unless selected or hovered itself
+                const hasSelection = sel.length > 0;
+                const pointOpacity = on || isHovered ? 1 : (hasSelection ? 0.18 : 0.82);
+                
+                // Show label only if selected, hovered, or total points is small
+                const showLabel = on || isHovered || vectors.length < 30;
+                
+                // Label color and weight
+                const labelColor = i === A ? "#5b7cff" : i === B ? "#e0559f" : (isHovered ? "var(--text)" : "var(--muted)");
+                const labelWeight = on || isHovered ? 700 : 400;
+                const labelSize = on || isHovered ? "11px" : "8.5px";
+
                 return (
-                  <g key={i} onClick={() => pick(i)} style={{ cursor: "pointer" }}>
-                    {on && <circle cx={X} cy={Y} r={11} fill="none" stroke={i === A ? "#5b7cff" : "#e0559f"} strokeWidth={2.5} />}
-                    <circle cx={X} cy={Y} r={on ? 7 : 6} fill={color} opacity={on ? 1 : 0.82} />
-                    <text x={X} y={Y - 10} fontSize="8.5" fill="var(--muted)" textAnchor="middle">{i + 1}</text>
+                  <g
+                    key={i}
+                    onClick={() => pick(i)}
+                    onMouseEnter={() => setHoveredIdx(i)}
+                    onMouseLeave={() => setHoveredIdx(null)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {on && <circle cx={X} cy={Y} r={11} fill="none" stroke={i === A ? "#5b7cff" : "#e0559f"} strokeWidth={2.5} opacity={pointOpacity} />}
+                    <circle cx={X} cy={Y} r={on ? 7.5 : 6} fill={color} opacity={pointOpacity} />
+                    {showLabel && (
+                      <text
+                        x={X}
+                        y={Y - 11}
+                        fontSize={labelSize}
+                        fontWeight={labelWeight}
+                        fill={labelColor}
+                        textAnchor="middle"
+                        style={{ pointerEvents: "none" }}
+                      >
+                        {i + 1}
+                      </text>
+                    )}
                   </g>
                 );
               })}

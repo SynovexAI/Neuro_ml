@@ -25,6 +25,35 @@ const TEMPLATES = [
   { name: "Data helper", icon: "📊", agentType: "tool_calling_agent", tools: ["calculator"], prompt: "You are a precise data assistant. Use the calculator for any arithmetic and show the numbers you used.", task: "If revenue is 2,450 and costs are 1,890, what's the margin percentage?" },
 ];
 
+const CopySvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const CheckSvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button className="out-copy-btn" onClick={onCopy} title={copied ? "Copied!" : "Copy to clipboard"}>
+      {copied ? <CheckSvg /> : <CopySvg />}
+    </button>
+  );
+}
+
 export default function NatAgentPanel() {
   const [providers, setProviders] = useState<ProviderOpt[]>([]);
   const [providerId, setProviderId] = useState("");
@@ -300,7 +329,10 @@ export default function NatAgentPanel() {
                 </div>
               </>)}
               <label className="fld">Answer</label>
-              <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 14px" }}><Markdown text={result.answer} /></div>
+              <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 7, padding: "10px 14px", position: "relative" }}>
+                {result.answer && <CopyBtn text={result.answer} />}
+                <div style={{ paddingRight: 36 }}><Markdown text={result.answer} /></div>
+              </div>
             </>)}
           </div>
         </div>
@@ -313,7 +345,10 @@ export default function NatAgentPanel() {
             <div style={{ maxHeight: 380, overflow: "auto", display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
               {chat.length === 0 && <div className="note">Say hello — the agent keeps the conversation in context.</div>}
               {chat.map((m, i) => (
-                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "82%", background: m.role === "user" ? "var(--accent-weak)" : "var(--panel)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 12px", fontSize: 13, lineHeight: 1.5 }}>{m.role === "user" ? <span style={{ whiteSpace: "pre-wrap" }}>{m.text}</span> : <Markdown text={m.text} />}</div>
+                <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "82%", background: m.role === "user" ? "var(--accent-weak)" : "var(--panel)", border: "1px solid var(--border)", borderRadius: 10, padding: "8px 12px", fontSize: 13, lineHeight: 1.5, position: "relative" }}>
+                  {m.role === "assistant" && m.text && <CopyBtn text={m.text} />}
+                  {m.role === "user" ? <span style={{ whiteSpace: "pre-wrap" }}>{m.text}</span> : <div style={{ paddingRight: m.role === "assistant" ? 36 : 0 }}><Markdown text={m.text} /></div>}
+                </div>
               ))}
               {running && mode === "chat" && <div className="note">thinking…</div>}
             </div>
