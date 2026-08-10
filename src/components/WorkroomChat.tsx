@@ -15,6 +15,35 @@ function kindLabel(cfg: AgentCfg): string {
   return cfg.type === "workflow" ? "Workflow" : "ReAct";
 }
 
+const CopySvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+  </svg>
+);
+
+const CheckSvg = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button className="out-copy-btn" onClick={onCopy} title={copied ? "Copied!" : "Copy to clipboard"}>
+      {copied ? <CheckSvg /> : <CopySvg />}
+    </button>
+  );
+}
+
 export default function WorkroomChat({ agentId, agentName, cfg }: { agentId: string; agentName: string; cfg: AgentCfg }) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -84,8 +113,9 @@ export default function WorkroomChat({ agentId, agentName, cfg }: { agentId: str
         ) : msgs.map((m, i) => (
           <div key={i} className={`wr-msg ${m.role}`}>
             <div className="wr-ava">{m.role === "user" ? "🧑" : "🤖"}</div>
-            <div className="wr-bubble">
-              {m.role === "user" ? <span style={{ whiteSpace: "pre-wrap" }}>{m.text}</span> : <Markdown text={m.text} />}
+            <div className="wr-bubble" style={{ position: "relative" }}>
+              {m.role === "assistant" && m.text && <CopyBtn text={m.text} />}
+              {m.role === "user" ? <span style={{ whiteSpace: "pre-wrap" }}>{m.text}</span> : <div style={{ paddingRight: m.role === "assistant" ? 36 : 0 }}><Markdown text={m.text} /></div>}
               {m.role === "assistant" && m.ms != null && <div className="wr-meta">{(m.ms / 1000).toFixed(1)}s</div>}
             </div>
           </div>

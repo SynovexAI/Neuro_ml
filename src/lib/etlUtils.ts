@@ -43,6 +43,18 @@ export function parseRecords(csv: string): Table {
 
 export function sampleSources(): { key: string; label: string; csv: string }[] {
   return [
+    { key: "students", label: "students (academic performance)", csv:
+`student_id,gender,gpa,sat_math,sat_verbal,education,final_grade
+1,Male,3.8,750,720,High School,A
+2,Female,3.5,680,710,Bachelors,A
+3,Male,2.9,590,610,High School,B
+4,Female,3.9,780,790,Masters,A
+5,Male,3.1,620,640,High School,B
+6,Female,2.4,510,530,High School,C
+7,Male,3.6,710,690,Bachelors,A
+8,Female,3.2,640,660,Bachelors,B
+9,Male,3.9,800,770,Masters,A
+10,Female,2.8,570,580,High School,C` },
     { key: "orders", label: "orders (e-commerce)", csv:
 `order_id,customer,region,amount,status,ordered_at
 1001,Alice,US,120.5,paid,2026-01-04
@@ -102,6 +114,20 @@ s2,south,49.8,1
 s3,south,110,0
 s1,north,20.9,1
 s2,north,61.3,1` },
+    { key: "employees", label: "employees (HR)", csv:
+`emp_id,name,department,salary,role,experience_yrs
+e101,Sarah,Engineering,115000,Senior Dev,6
+e102,David,Marketing,78000,Specialist,3
+e103,Elena,Engineering,135000,Lead Dev,9
+e104,Marcus,Sales,92000,Account Exec,4
+e105,Priya,HR,71000,Recruiter,2` },
+    { key: "products", label: "products (inventory)", csv:
+`product_id,product_name,category,price,stock,rating
+p1,Wireless Headphones,Electronics,149.99,45,4.7
+p2,Ergonomic Chair,Furniture,299.00,12,4.5
+p3,Mechanical Keyboard,Electronics,89.50,60,4.8
+p4,Coffee Tumbler,Kitchenware,24.99,120,4.6
+p5,Standing Desk,Furniture,450.00,8,4.9` },
   ];
 }
 
