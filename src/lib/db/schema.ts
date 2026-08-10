@@ -74,6 +74,7 @@ export const channels = mysqlTable("channels", {
   projectId: varchar("project_id", { length: 36 }).notNull(),
   type: varchar("type", { length: 24 }).notNull(),   // telegram | api | widget
   secretEnc: text("secret_enc"),                     // encrypted bot token / API key
+  configEnc: text("config_enc"),                     // encrypted per-channel config (e.g. ETL source/target DB URLs)
   enabled: boolean("enabled").notNull().default(true),
   dailyLimit: int("daily_limit"),                    // max runs/day for public channels (NULL = default)
   createdAt: timestamp("created_at").defaultNow(),
@@ -241,8 +242,26 @@ export const ragExperiments = mysqlTable("rag_experiments", {
   ts: timestamp("ts").defaultNow(),
 }, (t) => [index("rag_exp_user_ts_idx").on(t.userId, t.ts)]);
 
+// ETL pipeline run log — one row per execution (in-lab load, or API trigger).
+// Powers the "Runs" console: rows in/out/loaded, duration, status. Storage-cheap.
+export const etlRuns = mysqlTable("etl_runs", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  name: varchar("name", { length: 160 }),
+  mode: varchar("mode", { length: 24 }),        // run | load | api | full_run | transform_only
+  target: varchar("target", { length: 200 }),
+  rowsIn: int("rows_in").notNull().default(0),
+  rowsOut: int("rows_out").notNull().default(0),
+  rowsLoaded: int("rows_loaded").notNull().default(0),
+  durationMs: int("duration_ms").notNull().default(0),
+  status: varchar("status", { length: 16 }),    // ok | error
+  error: varchar("error", { length: 300 }),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("etl_runs_user_ts_idx").on(t.userId, t.ts)]);
+
 export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
 export type KbChunk = typeof kbChunks.$inferSelect;
 export type Channel = typeof channels.$inferSelect;
 export type EtlDataset = typeof etlDatasets.$inferSelect;
 export type RagExperiment = typeof ragExperiments.$inferSelect;
+export type EtlRun = typeof etlRuns.$inferSelect;

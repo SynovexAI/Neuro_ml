@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 // log is the single "everything" feed: navigation + actions. Best-effort; never blocks the UI.
 export async function POST(req: Request) {
   const u = await getSessionUser();
-  if (!u) return NextResponse.json({ ok: false }, { status: 204 });
+  if (!u) return new NextResponse(null, { status: 204 }); // 204 must have no body
   const { path } = await req.json().catch(() => ({}));
   if (typeof path !== "string" || !path) return NextResponse.json({ ok: false }, { status: 400 });
   const clean = path.split("?")[0].slice(0, 255);
