@@ -56,6 +56,7 @@ function refsOf(sql: string, known: string[]): string[] {
 }
 const EXT_TYPES = ["auto", "TEXT", "BIGINT", "DOUBLE", "VARCHAR(255)", "DATE", "DATETIME", "BOOLEAN"];
 
+import DataVizExplorer from "./visualization/DataVizExplorer";
 export default function EtlLab() {
   const [step, setStep] = useState<Step>("extract");
   const [pipeMode, setPipeMode] = useState<PipeMode>("etl");
@@ -599,6 +600,15 @@ ${mode === "stream"
             <div className="card-b" style={{ borderTop: "1px solid var(--border)" }}>
               <label className="fld">Live preview — sink output ({pipe!.final.rows.length} rows)</label>
               <div style={{ maxHeight: 180, overflowY: "auto" }}>{dtable(pipe!.final, 6)}</div>
+              {/* Data Visualization Explorer */}
+              {pipe && srcTable && (
+                <DataVizExplorer
+                  sourceTable={srcTable}
+                  finalTable={pipe.final}
+                  ops={ops}
+                  rules={rules}
+                />
+              )}
               <div className="stepnav"><button className="btn ghost" onClick={() => setStep("extract")}>← Extract</button><button className="btn" onClick={() => setStep("load")}>Next: Load &amp; Run →</button></div>
             </div>
           </div>

@@ -6,7 +6,7 @@ import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, mcpTool, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
-import { parseRecords, sampleSources } from "@/lib/etlUtils";
+import { parseRecords } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import { toast } from "@/lib/toast";
@@ -1249,7 +1249,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [kbs, setKbs] = useState<{ id: string; name: string }[]>([]);
   const [kbLoad, setKbLoad] = useState(false);
   useEffect(() => { fetch("/api/kb").then((r) => (r.ok ? r.json() : { kbs: [] })).then((j) => setKbs(j.kbs || [])).catch(() => {}); }, []);
-  
   const [selectedRagId, setSelectedRagId] = useState("");
   const [deployedRags, setDeployedRags] = useState<{ id: string; name: string }[]>([]);
   const [ragLoading, setRagLoading] = useState(false);
@@ -1314,7 +1313,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       })
       .catch(() => {});
   }, []);
-
   async function loadKbIntoKnowledge(id: string) {
     setKbLoad(true);
     try { const r = await fetch(`/api/kb/${id}/docs`); const j = await r.json(); if (r.ok) { const text = (j.docs || []).map((d: { text: string }) => d.text).join("\n\n").trim(); if (text) setKnowledgeText(text); } } catch { /* ignore */ } finally { setKbLoad(false); }
