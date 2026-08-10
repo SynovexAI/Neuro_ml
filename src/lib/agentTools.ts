@@ -12,6 +12,18 @@ export interface ToolCtx {
   dbTable?: Table | null;
   dbTableName?: string;
   dbCustomSchema?: string;
+  a2ui?: boolean; // when true, structured tool results are wrapped as A2UI ```ui blocks
+}
+
+// If `text` contains a pipe-delimited table (header + rows), wrap it as an A2UI
+// ```ui table block so the UI renders it as a real table. Otherwise return as-is.
+export function wrapUiTable(text: string): string {
+  const rows = text.split("\n").filter((l) => l.includes("|")).map((l) => l.split("|").map((c) => c.trim()));
+  if (rows.length < 2) return text;
+  const columns = rows[0];
+  const body = rows.slice(1).filter((r) => r.length === columns.length);
+  if (!body.length) return text;
+  return "```ui\n" + JSON.stringify([{ type: "table", columns, rows: body }]) + "\n```";
 }
 export interface AgentTool {
   id: string;
@@ -307,12 +319,14 @@ export const AGENT_TOOLS: AgentTool[] = [
         if (!res.rows.length) return "OK — 0 rows returned.";
         const header = res.cols.join(" | ");
         const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
-        return `${header}\n${body}\n(${res.rows.length} rows)`;
+        const out = `${header}\n${body}\n(${res.rows.length} rows)`;
+        return ctx?.a2ui ? wrapUiTable(out) : out;
       } catch (e) {
         return "Error executing SQL on uploaded dataset: " + (e as Error).message;
       }
     }
-    return nativeTool("db_query", input);
+    const out = await nativeTool("db_query", input);
+    return ctx?.a2ui ? wrapUiTable(out) : out;
   } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
@@ -349,8 +363,15 @@ export function formatFinalAnswer(text: string): string {
   return lines.join("\n");
 }
 
-export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
+export function reactSystemPrompt(tools: AgentTool[], goal: string, opts?: { a2ui?: boolean }): string {
   const list = tools.map((t) => `- ${t.name}: ${t.desc} (example input: ${t.example})`).join("\n");
+  const a2uiBlock = opts?.a2ui ? `
+
+Rich UI (optional): when the Final Answer is clearly structured data (rows of records or a set of metrics), you MAY return it as a single fenced \`\`\`ui block containing a JSON ARRAY of components. Otherwise use plain text. Supported components:
+{"type":"table","columns":["Name","GPA"],"rows":[["Kavya Reddy",3.98],["Ananya Verma",3.92]]}
+{"type":"stats","items":[{"label":"Rows","value":42}]}
+{"type":"heading","text":"Top 5 students"}   {"type":"callout","tone":"info","text":"..."}   {"type":"text","text":"..."}
+Rules for the \`\`\`ui block: default rows-of-data to a "table" (NOT a chart). Put ONLY the real data in rows — no separator lines, no "//" prefixes, no markdown. Emit the block as a JSON array and nothing else.` : "";
   return `You are a ReAct agent that solves tasks by reasoning and using tools.${goal ? `\nYour goal / role: ${goal}` : ""}
 
 Available tools:
@@ -378,7 +399,7 @@ Formatting rules for Final Answer:
 - Do NOT use markdown symbols like *, #, $, &, or bold markdown markup.
 - Keep output clear, clean, and line-exact.
 
-Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
+Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.${a2uiBlock}`;
 }
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
