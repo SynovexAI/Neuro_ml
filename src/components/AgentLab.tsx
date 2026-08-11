@@ -1362,7 +1362,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // run
-  const [task, setTask] = useState("What is 15% of 240, and how many days until 2026-12-25?");
+  const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [finalOut, setFinalOut] = useState("");

@@ -120,7 +120,7 @@ function Inner() {
   const [denseVecs, setDenseVecs] = useState<number[][] | null>(null);
   const [embedding, setEmbedding] = useState(false);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [question, setQuestion] = useState("What is the refund policy for damaged items?");
+  const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [models, setModels] = useState<string[]>([]);

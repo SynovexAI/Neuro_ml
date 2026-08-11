@@ -150,7 +150,7 @@ export default function RagLab() {
   const [mmrLambda, setMmrLambda] = useState(0.7);
   const [relevant, setRelevant] = useState<Set<number>>(new Set());
   const [metricRows, setMetricRows] = useState<{ name: string; p: number; r: number; mrr: number; ndcg: number }[]>([]);
-  const [question, setQuestion] = useState("What is the refund policy for damaged items?");
+  const [question, setQuestion] = useState("");
   const [url, setUrl] = useState("https://en.wikipedia.org/wiki/Product_return");
   const [srcConn, setSrcConn] = useState<"file" | "url" | "sample" | "datasets" | "github" | "gdrive" | "kb">("file");
   const [connectorOpen, setConnectorOpen] = useState(false);
