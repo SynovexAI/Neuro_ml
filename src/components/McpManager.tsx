@@ -187,7 +187,7 @@ export default function McpManager() {
         </div>
       </div>
 
-      <div className="note" style={{ marginTop: 12, lineHeight: 1.6 }}>Keys are stored encrypted. <b>Your database and the built-in Agent Lab tools run in-app and work on Render&apos;s free tier.</b> Hosted MCP (like GitHub) and any custom <span className="mono">stdio</span> command execute through the NAT agent runtime — a small always-on service that isn&apos;t on the free tier — so those are configured now and become executable once the NAT runtime (a paid instance) is online.</div>
+      <div className="note" style={{ marginTop: 12, lineHeight: 1.6 }}>Keys are stored encrypted. <b>Everything here runs on the free tier:</b> the built-in Agent Lab tools and your database query in-app, and hosted <b>HTTP / SSE</b> MCP servers (like GitHub) are proxied server-side — no extra runtime needed. Local <span className="mono">stdio</span> command servers aren&apos;t supported on this deployment (they need a self-hosted process), so only hosted HTTP/SSE servers can be added.</div>
 
       {connectOpen && (
         <div className="modal-wrap show" onClick={(e) => { if (e.target === e.currentTarget) { setConnectOpen(false); setActive(null); } }}>
@@ -225,7 +225,7 @@ export default function McpManager() {
                     <div><label className="fld">Name</label><input type="text" placeholder="my-server" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
                     <div><label className="fld">Transport</label>
                       <select value={f.transport} onChange={(e) => setF({ ...f, transport: e.target.value as typeof f.transport })}>
-                        <option value="http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">stdio (local command)</option>
+                        <option value="http">Streamable HTTP</option><option value="sse">SSE</option>
                       </select>
                     </div>
                   </div>

@@ -9,6 +9,7 @@ import AgenticAnswer, { type AgentTool, type AgentHit, type AgentConfig } from "
 import ModelPicker from "@/components/ModelPicker";
 import RagExperiments, { type ExpConfig } from "@/components/RagExperiments";
 import EmbeddingExplorer from "@/components/EmbeddingExplorer";
+import AgentOutput from "@/components/AgentOutput";
 import { toast } from "@/lib/toast";
 
 type Doc = { id: string; name: string; kind: string; text: string; r2Url?: string };
@@ -1698,7 +1699,7 @@ export default function RagLab() {
             </div>
             <div className="card-b">
               {tab === "out"
-                ? <div className="out">{answer}{running && <span className="cur" />}</div>
+                ? <div className="out">{running ? <>{answer}<span className="cur" /></> : <AgentOutput text={answer} />}</div>
                 : <div className="tracebox">{trace.length === 0 ? "Ask to see the pipeline run." : trace.map((s, i) => <div key={i} className={`trow ${s.state}`}><span className="who">{s.who}</span><span>{s.what}</span></div>)}</div>}
               {tab === "out" && hits.length > 0 && !running && (
                 <div className="sources-box">
