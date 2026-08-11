@@ -84,7 +84,8 @@ export async function runAgent(inp: RunInput): Promise<RunResult> {
     if (u) { const q = await checkQuota(u); if (!q.ok) return { ok: false, status: 429, error: `Monthly token limit reached (${q.used.toLocaleString()} / ${q.limit.toLocaleString()}).` }; }
   }
 
-  const prov = inp.providerId ? await getProviderById(inp.providerId) : await getActiveProvider();
+  let prov = inp.providerId ? await getProviderById(inp.providerId, inp.userId) : await getActiveProvider(inp.userId);
+  if (!prov) prov = await getActiveProvider(inp.userId);
   if (!prov || !prov.baseUrl) return { ok: false, status: 400, error: "No LLM provider is configured." };
   const model = inp.model || prov.model;
   if (!model) return { ok: false, status: 400, error: "No model selected for this provider." };

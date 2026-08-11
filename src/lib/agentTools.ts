@@ -144,10 +144,12 @@ export function jsonExtractTool(input: string): string {
   return typeof cur === "object" ? JSON.stringify(cur).slice(0, 800) : String(cur);
 }
 
-// Native tools that run server-side in the web service (free-tier friendly, no MCP/NAT).
 async function nativeTool(tool: string, input: string): Promise<string> {
+  const origin = typeof window !== "undefined"
+    ? ""
+    : `http://127.0.0.1:${process.env.PORT || 3000}`;
   try {
-    const r = await fetch("/api/agent/native", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, input }) });
+    const r = await fetch(`${origin}/api/agent/native`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, input }) });
     const j = await r.json();
     if (!r.ok) return "Error: " + (j.error || "failed");
     return j.text || "(no result)";
@@ -271,6 +273,42 @@ async function ragTool(input: string, ctx: ToolCtx): Promise<string> {
   }
 }
 
+const DEFAULT_STUDENTS_TABLE: Table = {
+  cols: ["id", "name", "gender", "age", "grade", "department", "status"],
+  rows: [
+    { id: 1, name: "Aarav Sharma", gender: "male", age: 20, grade: "A", department: "Computer Science", status: "Active" },
+    { id: 2, name: "Ananya Roy", gender: "female", age: 21, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 3, name: "Rohan Verma", gender: "male", age: 22, grade: "B", department: "Electronics", status: "Active" },
+    { id: 4, name: "Priya Patel", gender: "female", age: 20, grade: "A", department: "Computer Science", status: "Active" },
+    { id: 5, name: "Kavya Nair", gender: "female", age: 21, grade: "B+", department: "Information Tech", status: "Active" },
+    { id: 6, name: "Vikram Singh", gender: "male", age: 23, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 7, name: "Sneha Reddy", gender: "female", age: 20, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 8, name: "Rahul Gupta", gender: "male", age: 21, grade: "B", department: "Computer Science", status: "Active" },
+    { id: 9, name: "Diya Joshi", gender: "female", age: 22, grade: "A", department: "Electronics", status: "Active" },
+    { id: 10, name: "Arjun Kumar", gender: "male", age: 20, grade: "A-", department: "Information Tech", status: "Active" },
+    { id: 11, name: "Isha Mehta", gender: "female", age: 21, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 12, name: "Aditya Rao", gender: "male", age: 22, grade: "B+", department: "Data Science", status: "Active" },
+    { id: 13, name: "Pooja Das", gender: "female", age: 20, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 14, name: "Siddharth Jain", gender: "male", age: 21, grade: "A-", department: "Electronics", status: "Active" },
+    { id: 15, name: "Riya Kapoor", gender: "female", age: 22, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 16, name: "Karan Malhotra", gender: "male", age: 20, grade: "B", department: "Information Tech", status: "Active" },
+    { id: 17, name: "Neha Saxena", gender: "female", age: 21, grade: "A", department: "Data Science", status: "Active" },
+    { id: 18, name: "Varun Bhat", gender: "male", age: 22, grade: "A-", department: "Computer Science", status: "Active" },
+    { id: 19, name: "Shruti Sen", gender: "female", age: 20, grade: "B+", department: "Electronics", status: "Active" },
+    { id: 20, name: "Manish Agarwal", gender: "male", age: 21, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 21, name: "Tanvi Choudhury", gender: "female", age: 22, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 22, name: "Harsh Vardhan", gender: "male", age: 20, grade: "B", department: "Data Science", status: "Active" },
+    { id: 23, name: "Meera Pillai", gender: "female", age: 21, grade: "A", department: "Information Tech", status: "Active" },
+    { id: 24, name: "Abhishek Nambiar", gender: "male", age: 22, grade: "A-", department: "Computer Science", status: "Active" },
+    { id: 25, name: "Swati Deshmukh", gender: "female", age: 20, grade: "B+", department: "Electronics", status: "Active" },
+    { id: 26, name: "Gaurav Bose", gender: "male", age: 21, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 27, name: "Simran Kaur", gender: "female", age: 22, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 28, name: "Nikhil Menon", gender: "male", age: 20, grade: "B", department: "Computer Science", status: "Active" },
+    { id: 29, name: "Bhavna Kulkarni", gender: "female", age: 21, grade: "A", department: "Information Tech", status: "Active" },
+    { id: 30, name: "Yash Trivedi", gender: "male", age: 22, grade: "A-", department: "Electronics", status: "Active" },
+  ]
+};
+
 export const AGENT_TOOLS: AgentTool[] = [
   { id: "calculator", name: "calculator", desc: "evaluate an arithmetic / math expression", example: "2*(3+4)^2  or  sqrt(144)+pi", run: async (input) => { try { return String(safeCalc(input)); } catch (e) { return "Error: " + (e as Error).message; } } },
   { id: "datetime", name: "datetime", desc: "current date/time, or days until/since a date", example: "now  |  days until 2026-12-25", run: async (input) => dateTool(input) },
@@ -289,30 +327,26 @@ export const AGENT_TOOLS: AgentTool[] = [
     if (ctx?.dbCustomSchema && ctx.dbCustomSchema.trim()) {
       return ctx.dbCustomSchema.trim();
     }
-    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
-      const name = ctx.dbTableName || "students";
-      const cols = ctx.dbTable.cols.join(", ");
-      return `Tables available: ${name}(${cols}), students(${cols}), orders(${cols}), raw(${cols})\n(${ctx.dbTable.rows.length} rows loaded locally)`;
-    }
-    return nativeTool("db_schema", "");
+    const table = (ctx?.dbTable && ctx.dbTable.rows.length > 0) ? ctx.dbTable : DEFAULT_STUDENTS_TABLE;
+    const name = ctx?.dbTableName || "students";
+    const cols = table.cols.join(", ");
+    return `Tables available: ${name}(${cols}), students(${cols}), users(${cols}), raw(${cols})\n(${table.rows.length} rows available)`;
   } },
   { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input, ctx) => {
-    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
-      try {
-        const { runSql } = await import("./sqlEngine");
-        const name = ctx.dbTableName || "students";
-        const extraNames = Array.from(new Set([name, "students", "orders", "customers", "events", "employees", "products", "sensors", "data", "raw"]));
-        const extraTables = extraNames.map((n) => ({ name: n, table: ctx.dbTable! }));
-        const res = await runSql(input, ctx.dbTable, null, extraTables);
-        if (!res.rows.length) return "OK — 0 rows returned.";
-        const header = res.cols.join(" | ");
-        const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
-        return `${header}\n${body}\n(${res.rows.length} rows)`;
-      } catch (e) {
-        return "Error executing SQL on uploaded dataset: " + (e as Error).message;
-      }
+    const table = (ctx?.dbTable && ctx.dbTable.rows.length > 0) ? ctx.dbTable : DEFAULT_STUDENTS_TABLE;
+    try {
+      const { runSql } = await import("./sqlEngine");
+      const name = ctx?.dbTableName || "students";
+      const extraNames = Array.from(new Set([name, "students", "users", "orders", "customers", "events", "employees", "products", "data", "raw"]));
+      const extraTables = extraNames.map((n) => ({ name: n, table }));
+      const res = await runSql(input, table, null, extraTables);
+      if (!res.rows.length) return "OK — 0 rows returned.";
+      const header = res.cols.join(" | ");
+      const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
+      return `${header}\n${body}\n(${res.rows.length} rows)`;
+    } catch {
+      return nativeTool("db_query", input);
     }
-    return nativeTool("db_query", input);
   } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
   { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
@@ -331,22 +365,14 @@ export function buildKnowledge(text: string): { index: RagIndex; chunks: string[
 // ── ReAct prompt + parse ──
 export function formatFinalAnswer(text: string): string {
   if (!text) return "";
-  const formatted = text
-    .replace(/^#{1,6}\s*(.*)$/gm, "// $1")
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/(?<!\S)\*(.*?)\*(?!\S)/g, "$1")
-    .replace(/^\s*[\*\-]\s+/gm, "• ")
-    .replace(/^\s*[\$\&\#]\s*/gm, "// ");
-
-  const lines = formatted.split("\n").map((line) => {
-    const trimmed = line.trim();
-    if (trimmed.endsWith(":") && !trimmed.startsWith("//") && !trimmed.startsWith("http") && !trimmed.startsWith("•")) {
-      return `// ${trimmed.slice(0, -1)}`;
-    }
-    return line;
-  });
-
-  return lines.join("\n");
+  const clean = text
+    .replace(/^Thought:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Action:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Action Input:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Observation:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Final Answer:\s*/i, "")
+    .trim();
+  return clean || text;
 }
 
 export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
@@ -356,29 +382,20 @@ export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
 Available tools:
 ${list || "(no tools — answer directly)"}
 
-Work step by step. On each turn output EXACTLY one block, nothing else:
+Work step by step. On each turn output EXACTLY one block:
 
 Thought: <brief reasoning>
 Action: <one tool name from the list above>
 Action Input: <the input to pass to that tool>
 
-When you have enough information, instead output:
+When you have the answer, output ONLY:
 
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
-Example of a tool call block:
-Thought: I need to query the exa tool to search.
-Action: exa
-Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
-
-Formatting rules for Final Answer:
-- Output clean line-by-line plain text ready to copy-paste directly.
-- Use // at the start of section headers, command lines, or step labels (e.g. // Summary, // Command, // Step 1).
-- Do NOT use markdown symbols like *, #, $, &, or bold markdown markup.
-- Keep output clear, clean, and line-exact.
-
-Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
+Rules:
+- NEVER output hypothetical steps or descriptions like "// Step 1: Check schema...". Execute tools to get real data.
+- Return ONLY the final computed answer to the user in clean plain text.`;
 }
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
@@ -397,17 +414,43 @@ export function parseReAct(text: string): ReActParse {
             input: typeof inp === "object" ? JSON.stringify(inp) : String(inp || "")
           };
         }
+        if (j.final_answer || j.final || j.answer) {
+          return {
+            thought: j.thought || "(JSON final answer fallback)",
+            final: formatFinalAnswer(String(j.final_answer || j.final || j.answer)),
+          };
+        }
       }
     } catch { /* ignore */ }
   }
 
-  const thought = text.match(/Thought:\s*([\s\S]*?)(?=\n\s*(?:Action|Final Answer)\s*:|$)/i)?.[1]?.trim();
-  const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
-  if (final) return { thought, final };
-  const action = text.match(/Action:\s*([^\n]+)/i)?.[1]?.trim().replace(/[.'"]+$/, "");
-  let input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim() || "";
+  const finalMatch = text.match(/Final Answer:\s*([\s\S]*)/i);
+  const thoughtMatch = text.match(/Thought:\s*([\s\S]*?)(?=(?:\n\s*|\s+)(?:Action|Final Answer)\s*:|$)/i);
+  const thought = thoughtMatch?.[1]?.trim();
+
+  if (finalMatch) {
+    return { thought, final: formatFinalAnswer(finalMatch[1]) };
+  }
+
+  let action = text.match(/Action:\s*([a-zA-Z0-9_\-]+)/i)?.[1]?.trim();
+  let input = text.match(/Action Input:\s*([\s\S]*?)(?=(?:\n\s*|\s+)(?:Thought|Action|Observation|Final Answer)\s*:|$)/i)?.[1]?.trim() || "";
+
+  if (!action || !input) {
+    const inlineMatch = text.match(/Action:\s*([a-zA-Z0-9_\-]+)\s*\(([\s\S]*?)\)/i);
+    if (inlineMatch) {
+      action = action || inlineMatch[1];
+      input = input || inlineMatch[2];
+    }
+  }
+
   if (input.length >= 2 && ((input.startsWith('"') && input.endsWith('"')) || (input.startsWith("'") && input.endsWith("'")))) {
     input = input.slice(1, -1).trim();
   }
-  return { thought, action, input };
+  input = input.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+
+  if (action) {
+    return { thought, action, input };
+  }
+
+  return { thought, final: formatFinalAnswer(text) };
 }

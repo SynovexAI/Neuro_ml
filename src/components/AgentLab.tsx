@@ -1937,10 +1937,20 @@ if __name__ == "__main__":
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
   function downloadCode() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.py`; a.click(); URL.revokeObjectURL(a.href); }
   function agentConfig() {
+    let dbTable: Table | null = null;
+    let dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+    if (dbDataText.trim()) {
+      try {
+        dbTable = parseRecords(dbDataText);
+      } catch { /* ignore */ }
+    }
     return {
       type: agentType, name, description, systemPrompt: goal, provider: providerId, model, temperature, maxIterations: maxIters,
       tools: [...enabledTools], selectedRagId: enabledTools.has("rag") ? selectedRagId : undefined,
       knowledge: enabledTools.has("knowledge") ? knowledgeText : undefined,
+      dbTable: dbTable || undefined,
+      dbTableName: dbTable ? dbTableName : undefined,
+      dbCustomSchema: dbCustomSchema.trim() || undefined,
       steps: agentType === "workflow" ? steps.map((s) => ({ name: s.name, instruction: s.instruction })) : undefined, task,
     };
   }
@@ -1967,7 +1977,7 @@ if __name__ == "__main__":
     try {
       const id = await persist();
       if (!id) { toast("Publish failed", "error"); return; }
-      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true, config: agentConfig() }) });
       if (r.ok) setPublished(true);
       toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
     } catch { toast("Publish failed", "error"); }
@@ -2004,6 +2014,14 @@ if __name__ == "__main__":
     if (cfg.selectedRagId) setSelectedRagId(cfg.selectedRagId);
     if (Array.isArray(cfg.tools)) { const s = new Set<string>(cfg.tools); setEnabledTools(s); setPlacedTools(new Set(s)); }
     if (cfg.knowledge) setKnowledgeText(String(cfg.knowledge));
+    if (cfg.dbTable && Array.isArray(cfg.dbTable.rows)) {
+      const cols: string[] = cfg.dbTable.cols || Object.keys(cfg.dbTable.rows[0] || {});
+      const header = cols.join(",");
+      const body = cfg.dbTable.rows.map((r: any) => cols.map((c: string) => (r[c] == null ? "" : String(r[c]))).join(",")).join("\n");
+      setDbDataText(`${header}\n${body}`);
+      if (cfg.dbTableName) setDbFileName(`${cfg.dbTableName}.csv`);
+    }
+    if (cfg.dbCustomSchema) setDbCustomSchema(String(cfg.dbCustomSchema));
     if (Array.isArray(cfg.steps)) setSteps(cfg.steps.map((s: any, i: number) => ({ id: `s${i + 1}`, name: String(s.name || `Step ${i + 1}`), instruction: String(s.instruction || "") })));
     if (cfg.task) setTask(String(cfg.task));
     setBuildMode(cfg.type === "workflow" ? "manual" : "visual"); setNodePos({}); setNodeStatus({}); setASel("agent"); setLoadOpen(false); setStep("build");

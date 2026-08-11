@@ -50,23 +50,25 @@ async function arxiv(q: string): Promise<string> {
     const g = (tag: string) => (e[1].match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`))?.[1] || "").trim();
     return `${i + 1}. ${strip(g("title"))}\n   ${strip(g("summary")).slice(0, 260)}…\n   ${g("id")}`;
   }).join("\n");
-}
-
-// Resolve the DB the user connected on the MCP page (name "database"). Read-write
-// unless they picked read-only (access-mode=restricted).
+}// Resolve the DB the user connected on the MCP page (name "database"). Read-write
+// unless they picked read-only (access-mode=restricted). Falls back to platform DATABASE_URL.
 async function getDb(userId: string): Promise<{ conn: string; write: boolean } | null> {
   const rows = await db.select().from(mcpServers).where(and(eq(mcpServers.userId, userId), eq(mcpServers.name, "database"), eq(mcpServers.enabled, true))).limit(1);
-  const r = rows[0]; if (!r?.secretEnc) return null;
-  return { conn: decrypt(r.secretEnc), write: (r.command || "").includes("unrestricted") };
+  const r = rows[0]; if (r?.secretEnc) return { conn: decrypt(r.secretEnc), write: (r.command || "").includes("unrestricted") };
+  if (process.env.DATABASE_URL) return { conn: process.env.DATABASE_URL, write: true };
+  return null;
 }
 
 type SqlResult = { cols: string[]; rows: unknown[][]; rowCount: number };
 
-// Which driver a connection string needs: libSQL/Turso (SQLite-compatible over HTTP) vs Postgres.
-function dbKind(conn: string): "libsql" | "pg" { return /^libsql:|\.turso\.io/i.test(conn) ? "libsql" : "pg"; }
+// Which driver a connection string needs: libSQL/Turso vs MySQL vs Postgres.
+function dbKind(conn: string): "libsql" | "mysql" | "pg" {
+  if (/^mysql:|^mysql2:/i.test(conn)) return "mysql";
+  return /^libsql:|\.turso\.io/i.test(conn) ? "libsql" : "pg";
+}
 function hostOf(conn: string): string { return (conn.match(/\/\/(?:[^/?@]+@)?([^/?:]+)/) || [])[1] || ""; }
 
-// Turso / libSQL: conn is `libsql://<db>.turso.io?authToken=<token>` (token also accepted separately in the URL).
+// Turso / libSQL: conn is `libsql://<db>.turso.io?authToken=<token>`
 async function libsqlRun(conn: string, sql: string): Promise<SqlResult> {
   const m = conn.match(/[?&]authToken=([^&]+)/i);
   const authToken = m ? decodeURIComponent(m[1]) : undefined;
@@ -79,6 +81,32 @@ async function libsqlRun(conn: string, sql: string): Promise<SqlResult> {
     const rows = res.rows.slice(0, 50).map((r) => cols.map((c) => (r as unknown as Record<string, unknown>)[c]));
     return { cols, rows, rowCount: res.rowsAffected || res.rows.length };
   } finally { client.close(); }
+}
+
+async function mysqlRun(conn: string, sql: string): Promise<SqlResult> {
+  const mysql = await import("mysql2/promise");
+  const u = new URL(conn);
+  const connection = await mysql.createConnection({
+    host: u.hostname,
+    port: Number(u.port || 3306),
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password),
+    database: u.pathname.replace(/^\//, ""),
+    ssl: { minVersion: "TLSv1.2", rejectUnauthorized: false },
+    connectTimeout: 10000,
+  });
+  try {
+    const [rows, fields] = await connection.query(sql);
+    if (Array.isArray(rows)) {
+      const cols = fields ? fields.map((f) => f.name) : Object.keys((rows[0] as object) || {});
+      const rowData = (rows as Record<string, unknown>[]).slice(0, 50).map((r) => cols.map((c) => r[c]));
+      return { cols, rows: rowData, rowCount: rows.length };
+    }
+    const affected = (rows as { affectedRows?: number })?.affectedRows || 0;
+    return { cols: [], rows: [], rowCount: affected };
+  } finally {
+    await connection.end().catch(() => {});
+  }
 }
 
 async function pgRun(conn: string, sql: string): Promise<SqlResult> {
@@ -96,7 +124,10 @@ async function pgRun(conn: string, sql: string): Promise<SqlResult> {
 async function runSql(conn: string, sql: string): Promise<SqlResult> {
   const host = hostOf(conn);
   if (host && await resolvesToPrivate(host)) throw new Error("Blocked host (internal/private address).");
-  return dbKind(conn) === "libsql" ? libsqlRun(conn, sql) : pgRun(conn, sql);
+  const kind = dbKind(conn);
+  if (kind === "libsql") return libsqlRun(conn, sql);
+  if (kind === "mysql") return mysqlRun(conn, sql);
+  return pgRun(conn, sql);
 }
 
 export async function POST(req: Request) {
@@ -115,13 +146,16 @@ export async function POST(req: Request) {
       const d = await getDb(user.id);
       if (!d) return NextResponse.json({ text: "No database connected. Connect one on the MCP servers page ('Connect your database')." });
       if (tool === "db_schema") {
-        const schemaSql = dbKind(d.conn) === "libsql"
+        const kind = dbKind(d.conn);
+        const schemaSql = kind === "libsql"
           ? "SELECT m.name AS table_name, p.name AS column_name, p.type AS data_type FROM sqlite_master m, pragma_table_info(m.name) p WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' ORDER BY m.name, p.cid LIMIT 400"
-          : "select table_name, column_name, data_type from information_schema.columns where table_schema = 'public' order by table_name, ordinal_position limit 400";
+          : kind === "mysql"
+          ? "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = DATABASE() ORDER BY table_name, ordinal_position LIMIT 400"
+          : "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position LIMIT 400";
         const r = await runSql(d.conn, schemaSql);
         const byTable = new Map<string, string[]>();
         r.rows.forEach((row) => { const t = String(row[0]); if (!byTable.has(t)) byTable.set(t, []); byTable.get(t)!.push(`${row[1]} ${row[2]}`); });
-        if (!byTable.size) return NextResponse.json({ text: "No tables found in the public schema." });
+        if (!byTable.size) return NextResponse.json({ text: "No tables found in the database schema." });
         return NextResponse.json({ text: [...byTable.entries()].map(([t, cols]) => `${t}(${cols.join(", ")})`).join("\n") });
       }
       // db_query
@@ -137,6 +171,10 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ error: "unknown tool" }, { status: 400 });
   } catch (e) {
-    return NextResponse.json({ text: "Error: " + (e as Error).message.slice(0, 200) });
+    const errText = (e as Error).message;
+    if (errText.includes("Unknown column") || errText.includes("doesn't exist") || errText.includes("Unknown table")) {
+      return NextResponse.json({ text: `Database Query Note: ${errText}. If you are querying custom data (such as student gender, grades, or sales), attach your CSV dataset in the Agent Lab builder.` });
+    }
+    return NextResponse.json({ text: "Error: " + errText.slice(0, 200) });
   }
 }
