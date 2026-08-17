@@ -6,7 +6,7 @@ import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, mcpTool, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
-import { parseRecords, sampleSources } from "@/lib/etlUtils";
+import { parseRecords, sampleSources, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import { toast } from "@/lib/toast";

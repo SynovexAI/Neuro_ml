@@ -1,7 +1,7 @@
 import "server-only";
 import {
   AGENT_TOOLS, safeCalc, dateTool, statsTool, unitTool, jsonExtractTool,
-  buildKnowledge, reactSystemPrompt, parseReAct,
+  buildKnowledge, reactSystemPrompt, parseReAct, type ToolCtx,
 } from "@/lib/agentTools";
 import { retrieve, type RagIndex } from "@/lib/ragUtils";
 import { resolvesToPrivate } from "@/lib/net";
