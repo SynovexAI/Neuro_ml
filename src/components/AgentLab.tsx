@@ -10,6 +10,7 @@ import { parseRecords, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import AgentOutput from "@/components/AgentOutput";
+import Markdown from "./Markdown";
 import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
@@ -884,7 +885,6 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   db_schema: { icon: "🗄", label: "DB schema" },
   db_query: { icon: "🐘", label: "DB query" },
   github: { icon: "🐙", label: "GitHub" },
-  mcp: { icon: "🔌", label: "MCP server" },
 };
 
 // One-click starter agents — teach where/why agents are used.
@@ -2616,7 +2616,7 @@ if __name__ == "__main__":
                   {t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</>
                     : t.kind === "observation" ? <div style={{ maxHeight: 260, overflow: "auto" }}><AgentOutput text={t.text} /></div>
                     : t.kind === "final" ? <div className="note" style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{t.text.split("\n").filter((l) => l.trim())[0]?.slice(0, 140) || "Done."}{t.text.length > 140 ? " …" : ""}<span style={{ color: "var(--accent)" }}> — full answer in the Final answer panel →</span></div>
-                    : t.text}
+                    : <AgentOutput text={t.text} />}
                 </div></div>))}
               </div>
             </div>

@@ -333,7 +333,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "json_extract", name: "json_extract", desc: "read a value from JSON by dot-path (line 1 = path, rest = JSON) — pairs with http_request", example: "stargazers_count\\n{ …json… }", run: async (input) => jsonExtractTool(input) },
   { id: "web_search", name: "web_search", desc: "search the web (DuckDuckGo) — returns the top results with links", example: "latest mars rover mission", run: async (input) => nativeTool("web_search", input) },
   { id: "wikipedia", name: "wikipedia", desc: "search Wikipedia and read article summaries", example: "retrieval augmented generation", run: async (input) => nativeTool("wikipedia", input) },
-  { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (title, abstract, link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
+  { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (returns detailed title, authors, full abstract, subject, publication date, and direct PDF download link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
   { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async (_, ctx) => {
     if (ctx?.dbCustomSchema && ctx.dbCustomSchema.trim()) {
@@ -365,7 +365,6 @@ export const AGENT_TOOLS: AgentTool[] = [
     return ctx?.a2ui ? wrapUiTable(out) : out;
   } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
-  { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
   { id: "rag", name: "rag", desc: "query a deployed RAG model for grounded answers", example: "what is the product return policy?", run: async (input, ctx) => ragTool(input, ctx) },
 ];
 

@@ -43,13 +43,45 @@ async function wikipedia(q: string): Promise<string> {
 }
 
 async function arxiv(q: string): Promise<string> {
-  const xml = await ext("http://export.arxiv.org/api/query?start=0&max_results=5&search_query=all:" + encodeURIComponent(q));
+  const xml = await ext("http://export.arxiv.org/api/query?start=0&max_results=8&sortBy=relevance&search_query=all:" + encodeURIComponent(q));
   const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)];
-  if (!entries.length) return "No arXiv results.";
-  return entries.slice(0, 5).map((e, i) => {
-    const g = (tag: string) => (e[1].match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`))?.[1] || "").trim();
-    return `${i + 1}. ${strip(g("title"))}\n   ${strip(g("summary")).slice(0, 260)}…\n   ${g("id")}`;
-  }).join("\n");
+  if (!entries.length) return "No arXiv results found for query: " + q;
+  return entries.map((e, i) => {
+    const raw = e[1];
+    const getTag = (tag: string) => (raw.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`))?.[1] || "").trim();
+    const title = strip(getTag("title"));
+    const summary = strip(getTag("summary"));
+    const id = getTag("id");
+    const published = getTag("published").split("T")[0] || "";
+
+    const authorMatches = [...raw.matchAll(/<author>[\s\S]*?<name>([\s\S]*?)<\/name>[\s\S]*?<\/author>/g)];
+    const authorsList = authorMatches.map((m) => strip(m[1])).filter(Boolean);
+    const authors = authorsList.length > 5
+      ? `${authorsList.slice(0, 5).join(", ")} et al.`
+      : authorsList.join(", ") || "Unknown";
+
+    const category = (raw.match(/<arxiv:primary_category[^>]*term="([^"]+)"/)?.[1] ||
+                      raw.match(/<category[^>]*term="([^"]+)"/)?.[1] || "").trim();
+
+    const pdfLink = (raw.match(/<link[^>]*title="pdf"[^>]*href="([^"]+)"/)?.[1] ||
+                     raw.match(/<link[^>]*href="([^"]*\/pdf\/[^"]+)"/)?.[1] ||
+                     (id ? id.replace("/abs/", "/pdf/") + ".pdf" : "")).trim();
+
+    const comment = strip(getTag("arxiv:comment") || getTag("comment"));
+    const doi = strip(getTag("arxiv:doi") || getTag("doi"));
+
+    const lines = [
+      `[${i + 1}] ${title}`,
+      `    Authors: ${authors}${published ? ` | Published: ${published}` : ""}${category ? ` | Subject: ${category}` : ""}`,
+      `    Abstract: ${summary}`,
+    ];
+    if (comment) lines.push(`    Comments/Venue: ${comment}`);
+    if (doi) lines.push(`    DOI: https://doi.org/${doi}`);
+    lines.push(`    arXiv URL: ${id}`);
+    if (pdfLink) lines.push(`    Direct PDF: ${pdfLink}`);
+
+    return lines.join("\n");
+  }).join("\n\n");
 }// Resolve the DB the user connected on the MCP page (name "database"). Read-write
 // unless they picked read-only (access-mode=restricted). Falls back to platform DATABASE_URL.
 async function getDb(userId: string): Promise<{ conn: string; write: boolean } | null> {

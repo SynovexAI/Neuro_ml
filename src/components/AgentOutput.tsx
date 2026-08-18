@@ -23,7 +23,8 @@ const numRe = /^\s*(.+?)\s*[:=]\s*(-?[\d,]+(?:\.\d+)?)\s*$/;
 const fenceRe = /^\s*```/;
 
 function parse(text: string): Block[] {
-  const lines = (text || "").replace(/\r/g, "").split("\n");
+  const normalized = (text || "").replace(/\r/g, "").replace(/\[([^\]\n]+)\]\s*\n+\s*\((https?:\/\/[^\s)]+)\)/g, "[$1]($2)");
+  const lines = normalized.split("\n");
   const blocks: Block[] = [];
   let textBuf: string[] = [];
   const flush = () => { if (textBuf.length) { blocks.push({ kind: "text", lines: textBuf.slice() }); textBuf = []; } };
@@ -77,15 +78,36 @@ function parse(text: string): Block[] {
   return blocks;
 }
 
-// Inline markdown: **bold**, *italic*, `code`, [text](url).
+// Inline markdown: **bold**, *italic*, `code`, [text](url), raw URLs.
 function inline(s: string) {
-  const parts = s.split(/(\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g).filter((x) => x !== "");
+  const parts = s.split(/(\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|`[^`]+`|\[[^\]]+\]\s*\([^)]+\)|https?:\/\/[^\s<>)"]+)/g).filter((x) => x !== "");
   return parts.map((p, j) => {
     if (/^(\*\*|__)[^]+(\*\*|__)$/.test(p)) return <b key={j}>{p.slice(2, -2)}</b>;
     if (/^\*[^]+\*$/.test(p)) return <i key={j}>{p.slice(1, -1)}</i>;
     if (/^`[^`]+`$/.test(p)) return <code key={j} style={{ fontFamily: "var(--mono)", background: "var(--panel-2)", padding: "1px 5px", borderRadius: 4, fontSize: "0.92em" }}>{p.slice(1, -1)}</code>;
-    const link = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-    if (link) return <a key={j} href={link[2]} target="_blank" rel="noreferrer" style={{ color: "var(--accent)", textDecoration: "underline" }}>{link[1]}</a>;
+    const link = p.match(/^\[([^\]]+)\]\s*\(([^)]+)\)$/);
+    if (link) return (
+      <a key={j} href={link[2]} target="_blank" rel="noopener noreferrer" className="touch-link" title={`Direct link to ${link[2]}`}>
+        {link[1]} <span style={{ opacity: 0.75, fontSize: "0.85em" }}>↗</span>
+      </a>
+    );
+    if (/^https?:\/\//i.test(p)) {
+      let url = p;
+      let trailing = "";
+      const matchTrail = url.match(/[.,;!]+$/);
+      if (matchTrail) {
+        trailing = matchTrail[0];
+        url = url.slice(0, -trailing.length);
+      }
+      return (
+        <span key={j}>
+          <a href={url} target="_blank" rel="noopener noreferrer" className="touch-link" title={`Direct link to ${url}`}>
+            {url} <span style={{ opacity: 0.75, fontSize: "0.85em" }}>↗</span>
+          </a>
+          {trailing}
+        </span>
+      );
+    }
     return <span key={j}>{p}</span>;
   });
 }
