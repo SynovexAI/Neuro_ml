@@ -20,12 +20,12 @@ const QUICK = [
 ];
 
 const LABS = [
-  { href: "/labs/prompting", title: "Prompting", desc: "Write, tune and compare prompts." },
-  { href: "/labs/rag", title: "RAG", desc: "Doc Q&A — see the pipeline run." },
-  { href: "/labs/agent", title: "Agent", desc: "Build agents visually or by form." },
-  { href: "/labs/ml", title: "ML", desc: "EDA, preprocess, train in-browser." },
-  { href: "/labs/dl", title: "DL", desc: "Build a net and watch it train." },
-  { href: "/labs/etl", title: "ETL", desc: "A Spark-style data pipeline." },
+    { href: "/labs/etl", icon: "⚙", title: "ETL Lab", desc: "Extract, transform and load data with a visual workflow.", status: "Active" },
+    { href: "/labs/agent", icon: "🤖", title: "Agent Lab", desc: "Compose AI agents using tools, data and memory.", status: "Beta" },
+    { href: "/labs/streaming", icon: "⚡", title: "Streaming Lab", desc: "Stream live data into your pipeline in real time.", status: "New" },
+    { href: "/labs/reverse-etl", icon: "🔄", title: "Reverse ETL Lab", desc: "Sync transformed data back into upstream systems.", status: "New" },
+    { href: "/labs/rag", icon: "📚", title: "RAG Lab", desc: "Build retrieval-augmented bots grounded in your docs.", status: "Active" },
+    { href: "/labs/ml", icon: "🧠", title: "ML Lab", desc: "Train models, evaluate features, and inspect metrics.", status: "Beta" },
 ];
 
 export default async function Dashboard() {
@@ -57,37 +57,43 @@ export default async function Dashboard() {
   const runsSeries = days.map((d) => runMap[d] || 0);
 
   const kpis: [string, string, string, string?][] = [
-    ["🗂", String(nProjects), "Projects", "var(--accent-strong)"],
-    ["◈", String(nRuns), "Agent runs", "var(--accent)"],
-    ["▤", kfmt(monthTok), "Tokens / mo", "var(--sky)"],
-    ["🗄", String(nKbs), "Knowledge bases", undefined],
-    ["🔌", String(nMcp), "MCP tools", "var(--good)"],
+    ["🗂", String(nProjects), "PROJECTS", "var(--text)"],
+    ["◈", String(nRuns), "AGENT RUNS", "var(--text)"],
+    ["▤", kfmt(monthTok), "TOKENS / MO", "var(--text)"],
+    ["🗄", String(nKbs), "KNOWLEDGE BASES", "var(--text)"],
+    ["🔌", String(nMcp), "MCP TOOLS", "var(--text)"],
   ];
 
   return (
     <Shell user={user} title="Studio">
-      <div className="hero">
-        <div className="eyebrow" style={{ marginBottom: 6 }}>Studio</div>
+      <div className="hero-banner">
+        <div className="eyebrow" style={{ marginBottom: 6, color: "var(--accent)", letterSpacing: "0.1em" }}>STUDIO</div>
         <h2>Welcome back{user.name ? `, ${user.name.split(" ")[0]}` : ""}</h2>
         <p>Start something new, pick up where you left off, or open a Lab — you build real models, agents and RAG systems and watch exactly how they work.</p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0,1fr))", gap: 12, margin: "0 0 16px" }}>
-        {kpis.map(([ic, v, k, col]) => <div key={k} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 15px" }}>
-          <div style={{ width: 26, height: 26, borderRadius: 7, display: "grid", placeItems: "center", fontSize: 13, marginBottom: 9, background: "var(--accent-weak)", color: "var(--accent-strong)" }}>{ic}</div>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 21, fontWeight: 600, letterSpacing: "-.02em", color: col }}>{v}</div>
-          <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--faint)", marginTop: 3 }}>{k}</div>
-        </div>)}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0,1fr))", gap: 14, margin: "0 0 20px" }}>
+        {kpis.map(([ic, v, k, col]) => (
+          <div key={k} className="kpi-dash-card card-clickable">
+            <div className="kpi-dash-icon">{ic}</div>
+            <div className="kpi-dash-value" style={{ color: col ?? "var(--text)" }}>{v}</div>
+            <div className="kpi-dash-label">{k}</div>
+          </div>
+        ))}
       </div>
 
-      <div style={{ marginBottom: 22 }}><ActivityChart title="Your activity · last 14 days" days={days} tokens={tokensSeries} runs={runsSeries} /></div>
+      <div className="activity-glass" style={{ marginBottom: 24 }}><ActivityChart title="Your activity · last 14 days" days={days} tokens={tokensSeries} runs={runsSeries} /></div>
 
-      <div className="sec-title">Quick start</div>
+      <div className="sec-title" style={{ marginTop: 32 }}>QUICK START</div>
       <div className="cards" style={{ marginBottom: 24 }}>
         {QUICK.map((q) => (
-          <Link key={q.href} href={q.href} className="lab-card">
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}><span className="zi">{q.icon}</span><h3 style={{ margin: 0 }}>{q.title}</h3></div>
-            <p>{q.desc}</p><div className="go">Start →</div>
+          <Link key={q.href} href={q.href} className="lab-card quick-start-card">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span className="zi">{q.icon}</span>
+              <h3 style={{ margin: 0, fontSize: 15 }}>{q.title}</h3>
+            </div>
+            <p style={{ margin: "4px 0 16px", color: "var(--muted)", fontSize: 13 }}>{q.desc}</p>
+            <div className="go" style={{ marginTop: "auto" }}>Start →</div>
           </Link>
         ))}
       </div>
@@ -104,10 +110,18 @@ export default async function Dashboard() {
         </div>
       </>)}
 
-      <div className="sec-title">Labs</div>
-      <div className="cards">
+      <div className="sec-title">LABS</div>
+      <div className="lab-grid">
         {LABS.map((l) => (
-          <Link key={l.href} href={l.href} className="lab-card"><h3>{l.title} Lab</h3><p>{l.desc}</p><div className="go">Open lab →</div></Link>
+          <Link key={l.href} href={l.href} className="lab-card fade-in">
+            <div>
+              <h3 className="lab-card-title" style={{ fontSize: 15, marginBottom: 4 }}>{l.title}</h3>
+              <p className="lab-card-desc" style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>{l.desc}</p>
+            </div>
+            <div className="lab-card-meta" style={{ justifyContent: "flex-start" }}>
+              <span className="go">Open lab →</span>
+            </div>
+          </Link>
         ))}
       </div>
     </Shell>

@@ -14,7 +14,7 @@ export default async function LabPage({ params }: { params: Promise<{ lab: strin
   const name = NAMES[lab] ?? "Lab";
   return (
     <Shell user={user} title={name}>
-      <div className="hero">
+      <div className="hero fade-in">
         <h2>{name}</h2>
         <p>This lab&apos;s full workflow is being wired to the live providers and in-browser runtimes. It arrives in the next build step.</p>
       </div>

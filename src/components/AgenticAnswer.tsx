@@ -1,5 +1,6 @@
 "use client";
 import { useRef, useState, type ReactNode } from "react";
+import AgentOutput from "@/components/AgentOutput";
 
 // Self-contained Agentic RAG panel. Runs a real ReAct loop over /api/chat (injected as `chat`)
 // and the parent's retrieval (injected as `retrieve`) — reuses the existing engine, never touches
@@ -77,7 +78,7 @@ const CheckSvg = () => (
   </svg>
 );
 
-function CopyBtn({ text }: { text: string }) {
+export function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -92,6 +93,7 @@ function CopyBtn({ text }: { text: string }) {
     </button>
   );
 }
+
 
 export default function AgenticAnswer({ chunks, tools, retrieve, chat, chatStream, fetchWeb, modelPicker, note, defaultQuestion, disabled, compact, config, onConfigChange }: Props) {
   const [question, setQuestion] = useState(defaultQuestion || "What is the refund policy for damaged items?");
@@ -329,7 +331,9 @@ export default function AgenticAnswer({ chunks, tools, retrieve, chat, chatStrea
             {turn.final && (
               <div style={{ border: "1px solid color-mix(in srgb, var(--good) 45%, var(--border))", borderRadius: 12, background: "color-mix(in srgb, var(--good) 8%, transparent)", padding: "14px 16px" }}>
                 <div style={{ fontSize: 10.5, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em", color: "var(--good)", marginBottom: 8 }}>◆ answer</div>
-                <div style={{ fontSize: 14, lineHeight: 1.65, color: "var(--text)", whiteSpace: "pre-wrap" }}>{turn.final.answer}{turn.streaming && <span style={{ display: "inline-block", width: 6, height: 14, background: "var(--accent)", verticalAlign: "-2px", marginLeft: 2, animation: "blink 1s steps(2) infinite" }} />}</div>
+                {turn.streaming
+                  ? <div style={{ fontSize: 14, lineHeight: 1.65, color: "var(--text)", whiteSpace: "pre-wrap" }}>{turn.final.answer}<span style={{ display: "inline-block", width: 6, height: 14, background: "var(--accent)", verticalAlign: "-2px", marginLeft: 2, animation: "blink 1s steps(2) infinite" }} /></div>
+                  : <AgentOutput text={turn.final.answer} />}
                 {!turn.streaming && (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12, paddingTop: 11, borderTop: "1px solid color-mix(in srgb, var(--good) 30%, var(--border))", alignItems: "center" }}>
                     <span className="note">grounding · <b style={{ color: "var(--text)" }}>{cited.length}</b> cited / {uniqueRetrieved.length} retrieved</span>
@@ -353,7 +357,6 @@ export default function AgenticAnswer({ chunks, tools, retrieve, chat, chatStrea
         {turns.length > 0 && !running && <button className="btn ghost sm" onClick={() => setTurns([])} title="Clear conversation">🗑 Clear</button>}
       </div>
       {activeTools.length === 0 && <div className="note" style={{ color: "var(--warn)" }}>Enable at least one tool above.</div>}
-
     </div>
   );
 }
