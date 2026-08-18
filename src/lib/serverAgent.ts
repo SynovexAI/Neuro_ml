@@ -1,10 +1,9 @@
 import "server-only";
 import {
-  AGENT_TOOLS, safeCalc, dateTool, statsTool, unitTool, jsonExtractTool,
+  AGENT_TOOLS,
   buildKnowledge, reactSystemPrompt, parseReAct, type ToolCtx,
 } from "@/lib/agentTools";
-import { retrieve, type RagIndex } from "@/lib/ragUtils";
-import { resolvesToPrivate } from "@/lib/net";
+import type { RagIndex } from "@/lib/ragUtils";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -31,34 +30,6 @@ async function chatComplete(prov: Prov, model: string, messages: { role: string;
     const ct = Number(j?.usage?.completion_tokens) || est(text);
     return { text, promptTokens: pt, completionTokens: ct };
   } finally { clearTimeout(timer); }
-}
-
-// ── server-side tool executors (web_fetch / http_request are SSRF-guarded) ──
-async function serverWebFetch(input: string): Promise<string> {
-  const url = (input || "").trim().replace(/^["']|["']$/g, "");
-  if (!/^https?:\/\//i.test(url)) return "Error: provide a valid http(s) URL.";
-  try {
-    if (await resolvesToPrivate(new URL(url).hostname)) return "Error: that host is blocked.";
-    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12_000);
-    const r = await fetch(url, { signal: ctrl.signal, headers: { "user-agent": "AIWorkbench/1.0" } }); clearTimeout(t);
-    const html = await r.text();
-    const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    return text ? text.slice(0, 1200) + (text.length > 1200 ? " …" : "") : "The page had no extractable text.";
-  } catch (e) { return "Error: " + (e as Error).message; }
-}
-async function serverHttp(input: string): Promise<string> {
-  const s = (input || "").trim();
-  let spec: { method?: string; url?: string; body?: unknown };
-  if (s.startsWith("{")) { try { spec = JSON.parse(s); } catch { return 'Error: input must be a URL or JSON {"method","url","body"}.'; } }
-  else spec = { method: "GET", url: s.replace(/^["']|["']$/g, "") };
-  if (!spec.url || !/^https?:\/\//i.test(spec.url)) return "Error: provide a valid http(s) URL.";
-  try {
-    if (await resolvesToPrivate(new URL(spec.url).hostname)) return "Error: that host is blocked.";
-    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12_000);
-    const r = await fetch(spec.url, { method: (spec.method || "GET").toUpperCase(), headers: { "content-type": "application/json" }, body: spec.body ? JSON.stringify(spec.body) : undefined, signal: ctrl.signal }); clearTimeout(t);
-    const text = await r.text();
-    return `HTTP ${r.status}\n${text.slice(0, 1400)}`;
-  } catch (e) { return "Error: " + (e as Error).message; }
 }
 
 async function runTool(name: string, input: string, ctx: ToolCtx): Promise<{ obs: string; known: boolean }> {

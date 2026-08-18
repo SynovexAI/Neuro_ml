@@ -10,7 +10,6 @@ import { parseRecords, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import AgentOutput from "@/components/AgentOutput";
-import Markdown from "./Markdown";
 import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
@@ -1561,7 +1560,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     const agentX = Math.round((W - agentW) / 2);
 
     if (id === "trigger") {
-      const triggerW = 135;
       const margin = Math.max(20, Math.round(W * 0.04));
       return { x: margin, y: topY };
     }
@@ -2006,7 +2004,7 @@ if __name__ == "__main__":
   function downloadCode() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.py`; a.click(); URL.revokeObjectURL(a.href); }
   function agentConfig() {
     let dbTable: Table | null = null;
-    let dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+    const dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
     if (dbDataText.trim()) {
       try {
         dbTable = parseRecords(dbDataText);
