@@ -244,7 +244,7 @@ export async function mcpTool(server: string, input: string): Promise<string> {
   return mcpPost({ server, action: "call", tool: s });
 }
 // Generic tool over ANY connected hosted MCP server (DeepWiki, Context7, HF, …).
-async function mcpAnyTool(input: string): Promise<string> {
+export async function mcpAnyTool(input: string): Promise<string> {
   const s = (input || "").trim();
   if (!s || /^servers?$/i.test(s)) return mcpPost({ action: "servers" });
   if (s.startsWith("{")) {
