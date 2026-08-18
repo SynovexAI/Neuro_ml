@@ -904,9 +904,7 @@ async function chatOnce(messages: { role: string; content: string }[], temperatu
 
 type TraceItem = { kind: "thought" | "action" | "observation" | "final" | "error"; text: string; tool?: string; state: string };
 type ANode = { id: string; type: "trigger" | "agent" | "output" | "model" | "tool"; toolId?: string; icon: string; title: string; sub: string; w: number; h: number; bottom?: string[] };
-
-const CANVAS_W = 980, CANVAS_H = 400;
-const DEFAULT_POS: Record<string, { x: number; y: number }> = { trigger: { x: 24, y: 130 }, agent: { x: 306, y: 130 }, output: { x: 772, y: 130 } };
+const CANVAS_W = 720, CANVAS_H = 380;
 const CopySvg = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
@@ -1364,6 +1362,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [published, setPublished] = useState(false);
   const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown>; published?: boolean }[]>([]);
   const [loadOpen, setLoadOpen] = useState(false);
+  const [canvasW, setCanvasW] = useState(720);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // run
@@ -1391,6 +1390,25 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       if (j.providers?.length) { setProviderId(j.providerId || j.providers[0].id); setModelList(j.models || []); setModel(j.default || (j.models && j.models[0]) || ""); }
     }).catch(() => setProvKnown(true));
   }, []);
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const updateW = () => {
+      if (canvasRef.current) {
+        const w = canvasRef.current.clientWidth;
+        if (w > 100) setCanvasW(w);
+      }
+    };
+    updateW();
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 100) {
+          setCanvasW(Math.round(entry.contentRect.width));
+        }
+      }
+    });
+    ro.observe(canvasRef.current);
+    return () => ro.disconnect();
+  }, [step, buildMode, fullscreen]);
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [trace, wfOutputs]);
   // Delete / Backspace removes the selected tool node (or clicked wire's tool).
   useEffect(() => {
@@ -1536,25 +1554,61 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const placedOrder = [...placedTools];
   const subNodes = ["model", ...placedOrder.map((tid) => "tool:" + tid)];
 
-  const getSubDefaultPos = (subId: string) => {
-    const idx = subNodes.indexOf(subId);
-    if (idx === -1) return { x: 150, y: 300 };
+  const getDefaultPos = (id: string): { x: number; y: number } => {
+    const W = Math.max(540, canvasW);
+    const topY = 65;
+    const agentW = 190;
+    const agentX = Math.round((W - agentW) / 2);
+
+    if (id === "trigger") {
+      const triggerW = 135;
+      const margin = Math.max(20, Math.round(W * 0.04));
+      return { x: margin, y: topY };
+    }
+    if (id === "agent") {
+      return { x: agentX, y: topY };
+    }
+    if (id === "output") {
+      const outputW = 135;
+      const margin = Math.max(20, Math.round(W * 0.04));
+      return { x: Math.round(W - outputW - margin), y: topY };
+    }
+
+    // Sub-nodes: Model and tools arranged symmetrically and evenly below Agent
+    const idx = subNodes.indexOf(id);
+    if (idx === -1) return { x: 20, y: 225 };
     const total = subNodes.length;
-    const nodeW = 160;
-    const gap = 24;
-    const totalW = total * nodeW + (total - 1) * gap;
-    const startX = Math.max(20, 406 - totalW / 2);
-    return { x: Math.round(startX + idx * (nodeW + gap)), y: 300 };
+    const nodeW = 150;
+
+    if (total <= 4) {
+      // Clean single-row layout with generous, proportional gaps
+      const idealGap = total === 1 ? 0 : total === 2 ? 48 : total === 3 ? 32 : 24;
+      const maxPossibleGap = total > 1 ? Math.floor((W - 40 - total * nodeW) / (total - 1)) : 0;
+      const gap = Math.max(16, Math.min(idealGap, maxPossibleGap));
+      const totalW = total * nodeW + (total - 1) * gap;
+      const startX = Math.max(16, Math.round((W - totalW) / 2));
+      return { x: Math.round(startX + idx * (nodeW + gap)), y: 225 };
+    }
+
+    // Wrap into 2 balanced rows if 5+ tools are added
+    const itemsPerRow = Math.ceil(total / 2);
+    const row = Math.floor(idx / itemsPerRow);
+    const col = idx % itemsPerRow;
+    const countInRow = Math.min(itemsPerRow, total - row * itemsPerRow);
+    const gap = Math.max(16, Math.min(28, Math.floor((W - 40 - countInRow * nodeW) / Math.max(1, countInRow - 1))));
+    const rowW = countInRow * nodeW + (countInRow - 1) * gap;
+    const startX = Math.max(16, Math.round((W - rowW) / 2));
+    return { x: Math.round(startX + col * (nodeW + gap)), y: 215 + row * 70 };
   };
 
-  const getPos = (id: string) => nodePos[id] || DEFAULT_POS[id] || getSubDefaultPos(id);
+  const getPos = (id: string) => nodePos[id] || getDefaultPos(id);
 
   const nodes: ANode[] = [
-    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 150, h: 54 },
-    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 200, h: 54 },
-    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 150, h: 54 },
-    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 160, h: 54 },
-    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 160, h: 54 })),
+    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 135, h: 52 },
+    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 190, h: 52 },
+    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 135, h: 52 },
+    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 150, h: 50 },
+    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 150, h: 50 })),
   ];
 
   const agentNode = nodes.find((n) => n.id === "agent")!;
@@ -3335,34 +3389,6 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                 </div>
               </div>
             </div>
-
-            {/* 4. Common Mistakes & Production Fixes */}
-            <div className="card" style={{ marginBottom: 20, borderRadius: 16 }}>
-              <div className="card-h">
-                <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15 }}>
-                  <span>⚠️</span> <b>Common Developer Pitfalls & Production Fixes</b>
-                </span>
-              </div>
-              <div className="card-b">
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
-                  {selectedTopic.pitfallsAndMistakes.map((item, idx) => (
-                    <div key={idx} style={{
-                      background: "rgba(239, 68, 68, 0.06)", border: "1px solid rgba(239, 68, 68, 0.25)",
-                      borderRadius: 12, padding: 14
-                    }}>
-                      <div style={{ fontWeight: 700, fontSize: 12.5, color: "#f87171", display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>❌ Mistake:</span> {item.mistake}
-                      </div>
-                      <div style={{ fontWeight: 600, fontSize: 12, color: "#34d399", marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>✅ Production Fix:</span> {item.fix}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-
 
             {/* 6. Code Implementation Sandbox */}
             <div className="card" style={{ marginBottom: 20, borderRadius: 16 }}>

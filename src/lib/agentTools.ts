@@ -260,7 +260,21 @@ function memoryTool(input: string): string {
   if (typeof localStorage === "undefined") return "Memory unavailable here.";
   const NS = "agent_mem_"; const s = (input || "").trim();
   const all = () => { const o: Record<string, string> = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; if (k.startsWith(NS)) o[k.slice(NS.length)] = localStorage.getItem(k) || ""; } return o; };
-  const setM = s.match(/^set\s+([^:=]+)[:=]\s*([\s\S]+)$/i); if (setM) { localStorage.setItem(NS + setM[1].trim(), setM[2].trim()); return `Saved "${setM[1].trim()}".`; }
+  if (/^set\s+/i.test(s)) {
+    const raw = s.replace(/^set\s+/i, "");
+    const pairs = raw.split(/\n|,(?=\s*[\w_]+[:=])/).map((p) => p.trim()).filter(Boolean);
+    const saved: string[] = [];
+    for (const pair of pairs) {
+      const m = pair.match(/^([^:=]+)[:=]\s*([\s\S]+)$/);
+      if (m) {
+        const k = m[1].trim();
+        const v = m[2].trim();
+        localStorage.setItem(NS + k, v);
+        saved.push(`"${k}"`);
+      }
+    }
+    if (saved.length) return `Saved ${saved.join(", ")}.`;
+  }
   const getM = s.match(/^get\s+(.+)$/i); if (getM) { const v = localStorage.getItem(NS + getM[1].trim()); return v != null ? `${getM[1].trim()} = ${v}` : `No memory for "${getM[1].trim()}".`; }
   const delM = s.match(/^(?:delete|del|forget)\s+(.+)$/i); if (delM) { localStorage.removeItem(NS + delM[1].trim()); return `Forgot "${delM[1].trim()}".`; }
   if (/^list\b/i.test(s) || !s) { const o = all(); const ks = Object.keys(o); return ks.length ? ks.map((k) => `${k} = ${o[k]}`).join("\n") : "Memory is empty."; }

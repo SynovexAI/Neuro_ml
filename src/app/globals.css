@@ -1844,7 +1844,7 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
 .n8n-canvas-bar .n8n-tag{font-family:var(--mono);font-size:9.5px;padding:2px 7px;border-radius:12px;background:var(--accent-weak);color:var(--accent-strong);text-transform:uppercase;letter-spacing:.05em}
 .n8n-canvas-bar .n8n-controls{display:flex;align-items:center;gap:8px}
 
-.acanvas{position:relative;height:440px;background-color:var(--panel);background-image:radial-gradient(circle at 12px 12px,var(--border-strong) 1px,transparent 1.2px);background-size:24px 24px;border-radius:0 0 var(--r) var(--r);overflow:auto;transition:background-color .2s;scrollbar-width:thin;scrollbar-color:var(--border-strong) var(--panel)}
+.acanvas{position:relative;height:380px;background-color:var(--panel);background-image:radial-gradient(circle at 12px 12px,var(--border-strong) 1px,transparent 1.2px);background-size:24px 24px;border-radius:0 0 var(--r) var(--r);overflow:hidden;transition:background-color .2s}
 .acanvas::-webkit-scrollbar{width:7px;height:7px}
 .acanvas::-webkit-scrollbar-track{background:var(--panel)}
 .acanvas::-webkit-scrollbar-corner{background:var(--panel)}
