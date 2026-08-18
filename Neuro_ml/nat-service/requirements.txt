@@ -1,0 +1,9 @@
+# NVIDIA NeMo Agent Toolkit (Apache-2.0) + the LangChain agent framework and
+# MCP client support it uses. It already brings compatible fastapi/uvicorn/pyyaml,
+# so we list those unpinned to avoid version conflicts.
+# [eval] is needed because NAT's agents plugin eagerly imports the eval/profiler
+# machinery (nat.eval.utils.weave_eval) — without it the react_agent won't register.
+nvidia-nat[langchain,mcp,eval]==1.4.0
+fastapi
+uvicorn[standard]
+pyyaml

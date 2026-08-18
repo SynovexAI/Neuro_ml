@@ -1,0 +1,42 @@
+# Render Blueprint — AI Workbench (free-tier friendly).
+#
+# This deploys the WHOLE platform as ONE free web service: all labs, RAG,
+# knowledge bases, chat, admin, and IN-BROWSER agents. No paid services required.
+#
+# The optional NAT agent sidecar (live MCP tool execution + external-DB chat) is
+# NOT included here because it needs >512 MB and a private service — both paid on
+# Render. Leave NAT_SERVICE_URL unset and the app runs fine without it (agents use
+# the in-browser runtime). To add NAT later, deploy nat-service/render.yaml on a
+# paid Standard instance and set NAT_SERVICE_URL / NAT_SHARED_SECRET here.
+#
+# DB migrations: run `npm run db:push` once locally (with DATABASE_URL set) after
+# any schema change — it syncs schema.ts to the DB, including the new indexes.
+# (Kept manual rather than a preDeploy hook so a headless deploy can't hang on a
+# drizzle confirmation prompt.)
+
+services:
+  - type: web
+    name: ai-workbench
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL          # TiDB Cloud (mysql://…). Put the cluster in the SAME region as this service.
+        sync: false
+      - key: ENCRYPTION_KEY        # 64 hex chars (32 bytes). NEVER change after first deploy.
+        sync: false
+      - key: APP_URL               # https://<this-service>.onrender.com
+        sync: false
+      - key: NEXT_PUBLIC_APP_URL   # same public URL
+        sync: false
+      - key: DEFAULT_MONTHLY_TOKEN_LIMIT
+        value: "200000"
+      # --- optional: only if you later add the paid NAT sidecar ---
+      # - key: NAT_SERVICE_URL     # http://nat-service:8000  (leave UNSET on free)
+      #   sync: false
+      # - key: NAT_SHARED_SECRET
+      #   sync: false
