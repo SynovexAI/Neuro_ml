@@ -2,11 +2,28 @@
 // or via the existing server proxies), no mocks. Plus ReAct prompt/parse helpers.
 
 import { chunkText, buildIndex, retrieve, type RagIndex } from "./ragUtils";
+import type { Table } from "./etlUtils";
 
 export interface ToolCtx {
   knowledgeIndex?: RagIndex | null;
   knowledgeChunks?: string[];
   requestApproval?: (question: string) => Promise<string>;
+  selectedRagId?: string;
+  dbTable?: Table | null;
+  dbTableName?: string;
+  dbCustomSchema?: string;
+  a2ui?: boolean; // when true, structured tool results are wrapped as A2UI ```ui blocks
+}
+
+// If `text` contains a pipe-delimited table (header + rows), wrap it as an A2UI
+// ```ui table block so the UI renders it as a real table. Otherwise return as-is.
+export function wrapUiTable(text: string): string {
+  const rows = text.split("\n").filter((l) => l.includes("|")).map((l) => l.split("|").map((c) => c.trim()));
+  if (rows.length < 2) return text;
+  const columns = rows[0];
+  const body = rows.slice(1).filter((r) => r.length === columns.length);
+  if (!body.length) return text;
+  return "```ui\n" + JSON.stringify([{ type: "table", columns, rows: body }]) + "\n```";
 }
 export interface AgentTool {
   id: string;
@@ -139,10 +156,12 @@ export function jsonExtractTool(input: string): string {
   return typeof cur === "object" ? JSON.stringify(cur).slice(0, 800) : String(cur);
 }
 
-// Native tools that run server-side in the web service (free-tier friendly, no MCP/NAT).
 async function nativeTool(tool: string, input: string): Promise<string> {
+  const origin = typeof window !== "undefined"
+    ? ""
+    : `http://127.0.0.1:${process.env.PORT || 3000}`;
   try {
-    const r = await fetch("/api/agent/native", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, input }) });
+    const r = await fetch(`${origin}/api/agent/native`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, input }) });
     const j = await r.json();
     if (!r.ok) return "Error: " + (j.error || "failed");
     return j.text || "(no result)";
@@ -157,19 +176,75 @@ async function mcpPost(body: object): Promise<string> {
     return j.text || "(no result)";
   } catch (e) { return "Error: " + (e as Error).message; }
 }
-// Convenience wrapper bound to one server (e.g. GitHub). "list" discovers tools;
-// JSON {"tool":"…","args":{…}} calls one.
-async function mcpTool(server: string, input: string): Promise<string> {
+// In-memory cache: server → real tool names (populated on first use, avoids re-listing)
+const mcpToolCache: Record<string, string[]> = {};
+
+function fixCommonArgMismatches(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  // Exa web_fetch_exa expects urls[] not url string
+  if ("url" in args && !("urls" in args) && typeof args.url === "string") {
+    const { url, ...rest } = args;
+    return { ...rest, urls: [url] };
+  }
+  return args;
+}
+
+function fuzzyMatchTool(requested: string, available: string[]): string | null {
+  // Exact match first
+  if (available.includes(requested)) return requested;
+  const req = requested.toLowerCase();
+  // Contains check (e.g. "search" → "web_search_exa")
+  const contains = available.find((t) => t.toLowerCase().includes(req) || req.includes(t.toLowerCase().replace(/^.*_/, "")));
+  if (contains) return contains;
+  // Suffix match (e.g. "fetch" → "web_fetch_exa")
+  const suffix = available.find((t) => t.toLowerCase().endsWith(req) || t.toLowerCase().includes("_" + req));
+  return suffix || null;
+}
+
+export async function mcpTool(server: string, input: string): Promise<string> {
   const s = (input || "").trim();
-  if (!s || /^list$/i.test(s)) return mcpPost({ server, action: "list" });
+  if (!s || /^list$/i.test(s)) {
+    const result = await mcpPost({ server, action: "list" });
+    // Cache the tool names for future calls
+    const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+    if (names.length) mcpToolCache[server] = names;
+    return result;
+  }
   if (s.startsWith("{")) {
-    try { const p = JSON.parse(s) as { tool?: string; args?: unknown }; return mcpPost({ server, action: "call", tool: p.tool, args: p.args }); }
+    try {
+      const p = JSON.parse(s) as { tool?: string; args?: Record<string, unknown> };
+      if (p.tool === "list" || p.tool === "tools/list") {
+        const result = await mcpPost({ server, action: "list" });
+        const names = [...result.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+        if (names.length) mcpToolCache[server] = names;
+        return result;
+      }
+      const args = p.args ? fixCommonArgMismatches(p.tool || "", p.args) : p.args;
+      const result = await mcpPost({ server, action: "call", tool: p.tool, args });
+      // Auto-retry: if tool not found, discover real names and retry with best match
+      if (result.includes("-32602") && result.toLowerCase().includes("not found") && p.tool) {
+        // Fetch and cache tool list if not already cached
+        if (!mcpToolCache[server]) {
+          const listResult = await mcpPost({ server, action: "list" });
+          const names = [...listResult.matchAll(/^- (\S+?):/gm)].map((m) => m[1]);
+          if (names.length) mcpToolCache[server] = names;
+          else return `${result}\n\nAvailable tools:\n${listResult}`;
+        }
+        const bestMatch = fuzzyMatchTool(p.tool, mcpToolCache[server]);
+        if (bestMatch && bestMatch !== p.tool) {
+          const retryArgs = args ? fixCommonArgMismatches(bestMatch, args) : args;
+          const retryResult = await mcpPost({ server, action: "call", tool: bestMatch, args: retryArgs });
+          return retryResult;
+        }
+        return `${result}\n\nAvailable tools on "${server}": ${mcpToolCache[server].join(", ")}`;
+      }
+      return result;
+    }
     catch { return 'Error: input must be "list" or JSON like {"tool":"search_repositories","args":{"query":"nextjs"}}.'; }
   }
   return mcpPost({ server, action: "call", tool: s });
 }
 // Generic tool over ANY connected hosted MCP server (DeepWiki, Context7, HF, …).
-async function mcpAnyTool(input: string): Promise<string> {
+export async function mcpAnyTool(input: string): Promise<string> {
   const s = (input || "").trim();
   if (!s || /^servers?$/i.test(s)) return mcpPost({ action: "servers" });
   if (s.startsWith("{")) {
@@ -185,12 +260,80 @@ function memoryTool(input: string): string {
   if (typeof localStorage === "undefined") return "Memory unavailable here.";
   const NS = "agent_mem_"; const s = (input || "").trim();
   const all = () => { const o: Record<string, string> = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; if (k.startsWith(NS)) o[k.slice(NS.length)] = localStorage.getItem(k) || ""; } return o; };
-  const setM = s.match(/^set\s+([^:=]+)[:=]\s*([\s\S]+)$/i); if (setM) { localStorage.setItem(NS + setM[1].trim(), setM[2].trim()); return `Saved "${setM[1].trim()}".`; }
+  if (/^set\s+/i.test(s)) {
+    const raw = s.replace(/^set\s+/i, "");
+    const pairs = raw.split(/\n|,(?=\s*[\w_]+[:=])/).map((p) => p.trim()).filter(Boolean);
+    const saved: string[] = [];
+    for (const pair of pairs) {
+      const m = pair.match(/^([^:=]+)[:=]\s*([\s\S]+)$/);
+      if (m) {
+        const k = m[1].trim();
+        const v = m[2].trim();
+        localStorage.setItem(NS + k, v);
+        saved.push(`"${k}"`);
+      }
+    }
+    if (saved.length) return `Saved ${saved.join(", ")}.`;
+  }
   const getM = s.match(/^get\s+(.+)$/i); if (getM) { const v = localStorage.getItem(NS + getM[1].trim()); return v != null ? `${getM[1].trim()} = ${v}` : `No memory for "${getM[1].trim()}".`; }
   const delM = s.match(/^(?:delete|del|forget)\s+(.+)$/i); if (delM) { localStorage.removeItem(NS + delM[1].trim()); return `Forgot "${delM[1].trim()}".`; }
   if (/^list\b/i.test(s) || !s) { const o = all(); const ks = Object.keys(o); return ks.length ? ks.map((k) => `${k} = ${o[k]}`).join("\n") : "Memory is empty."; }
   return 'Use: "set key: value", "get key", "list", or "delete key".';
 }
+
+async function ragTool(input: string, ctx: ToolCtx): Promise<string> {
+  if (!ctx.selectedRagId) {
+    return "Error: No RAG model is connected to the RAG tool. Click on the RAG tool node and select a deployed RAG model.";
+  }
+  try {
+    const res = await fetch("/api/rag/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: ctx.selectedRagId, query: input }),
+    });
+    const j = await res.json();
+    if (!res.ok) return "Error: " + (j.error || "RAG query failed");
+    return j.answer || "(no response)";
+  } catch (e) {
+    return "Error: " + (e as Error).message;
+  }
+}
+
+const DEFAULT_STUDENTS_TABLE: Table = {
+  cols: ["id", "name", "gender", "age", "grade", "department", "status"],
+  rows: [
+    { id: 1, name: "Aarav Sharma", gender: "male", age: 20, grade: "A", department: "Computer Science", status: "Active" },
+    { id: 2, name: "Ananya Roy", gender: "female", age: 21, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 3, name: "Rohan Verma", gender: "male", age: 22, grade: "B", department: "Electronics", status: "Active" },
+    { id: 4, name: "Priya Patel", gender: "female", age: 20, grade: "A", department: "Computer Science", status: "Active" },
+    { id: 5, name: "Kavya Nair", gender: "female", age: 21, grade: "B+", department: "Information Tech", status: "Active" },
+    { id: 6, name: "Vikram Singh", gender: "male", age: 23, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 7, name: "Sneha Reddy", gender: "female", age: 20, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 8, name: "Rahul Gupta", gender: "male", age: 21, grade: "B", department: "Computer Science", status: "Active" },
+    { id: 9, name: "Diya Joshi", gender: "female", age: 22, grade: "A", department: "Electronics", status: "Active" },
+    { id: 10, name: "Arjun Kumar", gender: "male", age: 20, grade: "A-", department: "Information Tech", status: "Active" },
+    { id: 11, name: "Isha Mehta", gender: "female", age: 21, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 12, name: "Aditya Rao", gender: "male", age: 22, grade: "B+", department: "Data Science", status: "Active" },
+    { id: 13, name: "Pooja Das", gender: "female", age: 20, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 14, name: "Siddharth Jain", gender: "male", age: 21, grade: "A-", department: "Electronics", status: "Active" },
+    { id: 15, name: "Riya Kapoor", gender: "female", age: 22, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 16, name: "Karan Malhotra", gender: "male", age: 20, grade: "B", department: "Information Tech", status: "Active" },
+    { id: 17, name: "Neha Saxena", gender: "female", age: 21, grade: "A", department: "Data Science", status: "Active" },
+    { id: 18, name: "Varun Bhat", gender: "male", age: 22, grade: "A-", department: "Computer Science", status: "Active" },
+    { id: 19, name: "Shruti Sen", gender: "female", age: 20, grade: "B+", department: "Electronics", status: "Active" },
+    { id: 20, name: "Manish Agarwal", gender: "male", age: 21, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 21, name: "Tanvi Choudhury", gender: "female", age: 22, grade: "A+", department: "Computer Science", status: "Active" },
+    { id: 22, name: "Harsh Vardhan", gender: "male", age: 20, grade: "B", department: "Data Science", status: "Active" },
+    { id: 23, name: "Meera Pillai", gender: "female", age: 21, grade: "A", department: "Information Tech", status: "Active" },
+    { id: 24, name: "Abhishek Nambiar", gender: "male", age: 22, grade: "A-", department: "Computer Science", status: "Active" },
+    { id: 25, name: "Swati Deshmukh", gender: "female", age: 20, grade: "B+", department: "Electronics", status: "Active" },
+    { id: 26, name: "Gaurav Bose", gender: "male", age: 21, grade: "A", department: "Mechanical", status: "Active" },
+    { id: 27, name: "Simran Kaur", gender: "female", age: 22, grade: "A+", department: "Data Science", status: "Active" },
+    { id: 28, name: "Nikhil Menon", gender: "male", age: 20, grade: "B", department: "Computer Science", status: "Active" },
+    { id: 29, name: "Bhavna Kulkarni", gender: "female", age: 21, grade: "A", department: "Information Tech", status: "Active" },
+    { id: 30, name: "Yash Trivedi", gender: "male", age: 22, grade: "A-", department: "Electronics", status: "Active" },
+  ]
+};
 
 export const AGENT_TOOLS: AgentTool[] = [
   { id: "calculator", name: "calculator", desc: "evaluate an arithmetic / math expression", example: "2*(3+4)^2  or  sqrt(144)+pi", run: async (input) => { try { return String(safeCalc(input)); } catch (e) { return "Error: " + (e as Error).message; } } },
@@ -204,12 +347,39 @@ export const AGENT_TOOLS: AgentTool[] = [
   { id: "json_extract", name: "json_extract", desc: "read a value from JSON by dot-path (line 1 = path, rest = JSON) — pairs with http_request", example: "stargazers_count\\n{ …json… }", run: async (input) => jsonExtractTool(input) },
   { id: "web_search", name: "web_search", desc: "search the web (DuckDuckGo) — returns the top results with links", example: "latest mars rover mission", run: async (input) => nativeTool("web_search", input) },
   { id: "wikipedia", name: "wikipedia", desc: "search Wikipedia and read article summaries", example: "retrieval augmented generation", run: async (input) => nativeTool("wikipedia", input) },
-  { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (title, abstract, link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
+  { id: "arxiv", name: "arxiv", desc: "search arXiv research papers (returns detailed title, authors, full abstract, subject, publication date, and direct PDF download link)", example: "transformer attention mechanism", run: async (input) => nativeTool("arxiv", input) },
   { id: "memory", name: "memory", desc: 'remember facts across the chat — "set key: value", "get key", "list", or "delete key"', example: "set user_name: Aravindhan", run: async (input) => memoryTool(input) },
-  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async () => nativeTool("db_schema", "") },
-  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input) => nativeTool("db_query", input) },
+  { id: "db_schema", name: "db_schema", desc: "list the tables & columns of your connected database (no input needed)", example: "list tables", run: async (_, ctx) => {
+    if (ctx?.dbCustomSchema && ctx.dbCustomSchema.trim()) {
+      return ctx.dbCustomSchema.trim();
+    }
+    const table = (ctx?.dbTable && ctx.dbTable.rows.length > 0) ? ctx.dbTable : DEFAULT_STUDENTS_TABLE;
+    const name = ctx?.dbTableName || "students";
+    const cols = table.cols.join(", ");
+    return `Tables available: ${name}(${cols}), students(${cols}), users(${cols}), raw(${cols})\n(${table.rows.length} rows available)`;
+  } },
+  { id: "db_query", name: "db_query", desc: "run SQL against your connected database and read the rows back", example: "select count(*) from orders", run: async (input, ctx) => {
+    if (ctx?.dbTable && ctx.dbTable.rows.length > 0) {
+      try {
+        const { runSql } = await import("./sqlEngine");
+        const name = ctx.dbTableName || "students";
+        const extraNames = Array.from(new Set([name, "students", "orders", "customers", "events", "employees", "products", "sensors", "data", "raw"]));
+        const extraTables = extraNames.map((n) => ({ name: n, table: ctx.dbTable! }));
+        const res = await runSql(input, ctx.dbTable, null, extraTables);
+        if (!res.rows.length) return "OK — 0 rows returned.";
+        const header = res.cols.join(" | ");
+        const body = res.rows.map((r) => res.cols.map((c) => (r[c] == null ? "null" : String(r[c]))).join(" | ")).join("\n");
+        const out = `${header}\n${body}\n(${res.rows.length} rows)`;
+        return ctx?.a2ui ? wrapUiTable(out) : out;
+      } catch (e) {
+        return "Error executing SQL on uploaded dataset: " + (e as Error).message;
+      }
+    }
+    const out = await nativeTool("db_query", input);
+    return ctx?.a2ui ? wrapUiTable(out) : out;
+  } },
   { id: "github", name: "github", desc: 'use your connected GitHub MCP server — input "list" to see its tools, or JSON {"tool":"…","args":{…}} to call one', example: '{"tool":"search_repositories","args":{"query":"nextjs stars:>1000"}}', run: async (input) => mcpTool("github", input) },
-  { id: "mcp", name: "mcp", desc: 'use any hosted MCP server you connected (DeepWiki, Context7, Hugging Face, Semgrep, …) — "servers" lists them, "<server> list" shows its tools, JSON {"server":"…","tool":"…","args":{…}} calls one', example: '{"server":"deepwiki","tool":"ask_question","args":{"repoName":"vercel/next.js","question":"what is the app router"}}', run: async (input) => mcpAnyTool(input) },
+  { id: "rag", name: "rag", desc: "query a deployed RAG model for grounded answers", example: "what is the product return policy?", run: async (input, ctx) => ragTool(input, ctx) },
 ];
 
 // Build a TF-IDF knowledge base from pasted text (reuses the RAG backend).
@@ -222,33 +392,104 @@ export function buildKnowledge(text: string): { index: RagIndex; chunks: string[
 }
 
 // ── ReAct prompt + parse ──
-export function reactSystemPrompt(tools: AgentTool[], goal: string): string {
+export function formatFinalAnswer(text: string): string {
+  if (!text) return "";
+  const clean = text
+    .replace(/^Thought:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Action:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Action Input:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Observation:\s*[^\n]*\n?/gmi, "")
+    .replace(/^Final Answer:\s*/i, "")
+    .trim();
+  return clean || text;
+}
+
+export function reactSystemPrompt(tools: AgentTool[], goal: string, opts?: { a2ui?: boolean }): string {
   const list = tools.map((t) => `- ${t.name}: ${t.desc} (example input: ${t.example})`).join("\n");
+  const a2uiBlock = opts?.a2ui ? `
+
+Rich UI (optional): when the Final Answer is clearly structured data (rows of records or a set of metrics), you MAY return it as a single fenced \`\`\`ui block containing a JSON ARRAY of components. Otherwise use plain text. Supported components:
+{"type":"table","columns":["Name","GPA"],"rows":[["Kavya Reddy",3.98],["Ananya Verma",3.92]]}
+{"type":"stats","items":[{"label":"Rows","value":42}]}
+{"type":"heading","text":"Top 5 students"}   {"type":"callout","tone":"info","text":"..."}   {"type":"text","text":"..."}
+Rules for the \`\`\`ui block: default rows-of-data to a "table" (NOT a chart). Put ONLY the real data in rows — no separator lines, no "//" prefixes, no markdown. Emit the block as a JSON array and nothing else.` : "";
   return `You are a ReAct agent that solves tasks by reasoning and using tools.${goal ? `\nYour goal / role: ${goal}` : ""}
 
 Available tools:
 ${list || "(no tools — answer directly)"}
 
-Work step by step. On each turn output EXACTLY one block, nothing else:
+Work step by step. On each turn output EXACTLY one block:
 
 Thought: <brief reasoning>
 Action: <one tool name from the list above>
 Action Input: <the input to pass to that tool>
 
-When you have enough information, instead output:
+When you have the answer, output ONLY:
 
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
-Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.`;
+Example of a tool call block:
+Thought: I need to query the exa tool to search.
+Action: exa
+Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
+
+Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.${a2uiBlock}`;
 }
 
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
 export function parseReAct(text: string): ReActParse {
-  const thought = text.match(/Thought:\s*([\s\S]*?)(?=\n\s*(?:Action|Final Answer)\s*:|$)/i)?.[1]?.trim();
-  const final = text.match(/Final Answer:\s*([\s\S]*)/i)?.[1]?.trim();
-  if (final) return { thought, final };
-  const action = text.match(/Action:\s*([^\n]+)/i)?.[1]?.trim().replace(/[.'"]+$/, "");
-  const input = text.match(/Action Input:\s*([\s\S]*?)(?=\n\s*(?:Thought|Action|Observation)\s*:|$)/i)?.[1]?.trim().replace(/^["']|["']$/g, "");
-  return { thought, action, input };
+  const cleanText = text.trim();
+  if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
+    try {
+      const j = JSON.parse(cleanText);
+      if (j && typeof j === "object") {
+        const act = j.action || j.tool;
+        const inp = j.input || j.args || j.action_input;
+        if (act && typeof act === "string") {
+          return {
+            thought: j.thought || "(JSON tool call fallback)",
+            action: act,
+            input: typeof inp === "object" ? JSON.stringify(inp) : String(inp || "")
+          };
+        }
+        if (j.final_answer || j.final || j.answer) {
+          return {
+            thought: j.thought || "(JSON final answer fallback)",
+            final: formatFinalAnswer(String(j.final_answer || j.final || j.answer)),
+          };
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  const finalMatch = text.match(/Final Answer:\s*([\s\S]*)/i);
+  const thoughtMatch = text.match(/Thought:\s*([\s\S]*?)(?=(?:\n\s*|\s+)(?:Action|Final Answer)\s*:|$)/i);
+  const thought = thoughtMatch?.[1]?.trim();
+
+  if (finalMatch) {
+    return { thought, final: formatFinalAnswer(finalMatch[1]) };
+  }
+
+  let action = text.match(/Action:\s*([a-zA-Z0-9_\-]+)/i)?.[1]?.trim();
+  let input = text.match(/Action Input:\s*([\s\S]*?)(?=(?:\n\s*|\s+)(?:Thought|Action|Observation|Final Answer)\s*:|$)/i)?.[1]?.trim() || "";
+
+  if (!action || !input) {
+    const inlineMatch = text.match(/Action:\s*([a-zA-Z0-9_\-]+)\s*\(([\s\S]*?)\)/i);
+    if (inlineMatch) {
+      action = action || inlineMatch[1];
+      input = input || inlineMatch[2];
+    }
+  }
+
+  if (input.length >= 2 && ((input.startsWith('"') && input.endsWith('"')) || (input.startsWith("'") && input.endsWith("'")))) {
+    input = input.slice(1, -1).trim();
+  }
+  input = input.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
+
+  if (action) {
+    return { thought, action, input };
+  }
+
+  return { thought, final: formatFinalAnswer(text) };
 }

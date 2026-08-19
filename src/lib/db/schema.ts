@@ -74,6 +74,7 @@ export const channels = mysqlTable("channels", {
   projectId: varchar("project_id", { length: 36 }).notNull(),
   type: varchar("type", { length: 24 }).notNull(),   // telegram | api | widget
   secretEnc: text("secret_enc"),                     // encrypted bot token / API key
+  configEnc: text("config_enc"),                     // encrypted per-channel config (e.g. ETL source/target DB URLs)
   enabled: boolean("enabled").notNull().default(true),
   dailyLimit: int("daily_limit"),                    // max runs/day for public channels (NULL = default)
   createdAt: timestamp("created_at").defaultNow(),
@@ -104,6 +105,15 @@ export const rateLimits = mysqlTable("rate_limits", {
   count: int("count").notNull().default(0),
   updatedAt: timestamp("updated_at").defaultNow().onUpdateNow(),
 });
+
+// In-app traffic analytics: one row per page view (server-side, works on any host —
+// unlike Vercel Web Analytics which only collects when hosted on Vercel).
+export const pageViews = mysqlTable("page_views", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }),
+  path: varchar("path", { length: 255 }).notNull(),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("pv_ts_idx").on(t.ts)]);
 
 // Lightweight audit / event log for monitoring (logins, quota hits, admin actions).
 export const auditLog = mysqlTable("audit_log", {
@@ -215,7 +225,43 @@ export const etlDatasetRows = mysqlTable("etl_dataset_rows", {
   data: json("data"),                       // one record
 }, (t) => [index("etl_rows_ds_idx").on(t.datasetId)]);
 
+// RAG Lab experiment tracking. Stores ONLY the pipeline configuration + metrics
+// (no document or embedding copies) so it's storage-cheap — a shared dataset is
+// referenced by name, and each experiment row is a few hundred bytes. Powers the
+// Experiment History + side-by-side comparison in the RAG Lab.
+export const ragExperiments = mysqlTable("rag_experiments", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  label: varchar("label", { length: 160 }).notNull(),
+  dataset: varchar("dataset", { length: 200 }),         // dataset name/description (not the text)
+  question: text("question"),
+  config: json("config"),                                // { backend, size, overlap, strategy, metric, topK, rerank, mmrLambda, embedMode, embModel, kgHops }
+  metrics: json("metrics"),                              // { p, r, mrr, ndcg } for the active strategy, or null if not evaluated
+  chunkCount: int("chunk_count").notNull().default(0),
+  latencyMs: int("latency_ms").notNull().default(0),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("rag_exp_user_ts_idx").on(t.userId, t.ts)]);
+
+// ETL pipeline run log — one row per execution (in-lab load, or API trigger).
+// Powers the "Runs" console: rows in/out/loaded, duration, status. Storage-cheap.
+export const etlRuns = mysqlTable("etl_runs", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: varchar("user_id", { length: 36 }).notNull(),
+  name: varchar("name", { length: 160 }),
+  mode: varchar("mode", { length: 24 }),        // run | load | api | full_run | transform_only
+  target: varchar("target", { length: 200 }),
+  rowsIn: int("rows_in").notNull().default(0),
+  rowsOut: int("rows_out").notNull().default(0),
+  rowsLoaded: int("rows_loaded").notNull().default(0),
+  durationMs: int("duration_ms").notNull().default(0),
+  status: varchar("status", { length: 16 }),    // ok | error
+  error: varchar("error", { length: 300 }),
+  ts: timestamp("ts").defaultNow(),
+}, (t) => [index("etl_runs_user_ts_idx").on(t.userId, t.ts)]);
+
 export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
 export type KbChunk = typeof kbChunks.$inferSelect;
 export type Channel = typeof channels.$inferSelect;
 export type EtlDataset = typeof etlDatasets.$inferSelect;
+export type RagExperiment = typeof ragExperiments.$inferSelect;
+export type EtlRun = typeof etlRuns.$inferSelect;

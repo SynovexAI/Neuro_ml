@@ -20,6 +20,70 @@ export function chunkText(text: string, size: number, overlap: number): string[]
   return chunks;
 }
 
+// ── chunking strategies ──────────────────────────────────────────────────
+// Real RAG systems don't only slide a fixed word window — the boundary choice
+// (sentence / paragraph / semantic) changes what ends up retrievable together.
+export type ChunkStrategy = "fixed" | "sentence" | "paragraph" | "semantic";
+export const CHUNK_STRATEGY_LABEL: Record<ChunkStrategy, string> = {
+  fixed: "Fixed window", sentence: "Sentence", paragraph: "Paragraph", semantic: "Semantic",
+};
+
+function splitSentences(text: string): string[] {
+  return (text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]+|\S[^.!?]*$/g) || []).map((s) => s.trim()).filter(Boolean);
+}
+const wordCount = (s: string) => s.split(/\s+/).filter(Boolean).length;
+
+// Group consecutive units (sentences/paragraphs) into chunks of ~size words, with
+// `overlapUnits` trailing units repeated into the next chunk for context continuity.
+function groupUnits(units: string[], size: number, overlapUnits: number): string[] {
+  const out: string[] = [];
+  let cur: string[] = [], curW = 0;
+  for (let i = 0; i < units.length; i++) {
+    const w = wordCount(units[i]);
+    if (curW && curW + w > size) {
+      out.push(cur.join(" "));
+      cur = overlapUnits > 0 ? cur.slice(-overlapUnits) : [];
+      curW = cur.reduce((a, s) => a + wordCount(s), 0);
+    }
+    cur.push(units[i]); curW += w;
+  }
+  if (cur.length) out.push(cur.join(" "));
+  return out;
+}
+
+// Semantic chunking: start a new chunk when the next sentence's TF-IDF cosine to
+// the running chunk drops below a threshold (a topic shift), or the chunk is full.
+function semanticChunks(text: string, size: number): string[] {
+  const sents = splitSentences(text);
+  if (sents.length <= 1) return sents.length ? [text.trim()] : [];
+  const idx = buildIndex(sents);
+  const out: string[] = [];
+  let cur: number[] = [];
+  const centroid = (ids: number[]): Vec => { const c: Vec = {}; ids.forEach((i) => { const v = idx.vectors[i]; for (const t in v) c[t] = (c[t] || 0) + v[t]; }); const n = ids.length || 1; for (const t in c) c[t] /= n; return c; };
+  for (let i = 0; i < sents.length; i++) {
+    if (!cur.length) { cur.push(i); continue; }
+    const sim = cosine(centroid(cur), idx.vectors[i]);
+    const curWords = cur.reduce((a, j) => a + wordCount(sents[j]), 0);
+    if (sim < 0.12 || curWords >= size) { out.push(cur.map((j) => sents[j]).join(" ")); cur = [i]; }
+    else cur.push(i);
+  }
+  if (cur.length) out.push(cur.map((j) => sents[j]).join(" "));
+  return out;
+}
+
+// Split `text` into chunks using the chosen strategy. `size` is the target word
+// count; `overlap` is in words (fixed) or sentences/paragraphs (grouped strategies).
+export function chunkBy(text: string, strategy: ChunkStrategy, size: number, overlap: number): string[] {
+  if (strategy === "fixed") return chunkText(text, size, overlap);
+  if (strategy === "sentence") return groupUnits(splitSentences(text), size, Math.max(0, Math.min(3, Math.round(overlap / 20))));
+  if (strategy === "paragraph") {
+    const paras = text.split(/\n\s*\n+/).map((p) => p.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const units = paras.length > 1 ? paras : splitSentences(text); // fall back to sentences if no blank-line structure
+    return groupUnits(units, size, Math.max(0, Math.min(2, Math.round(overlap / 30))));
+  }
+  return semanticChunks(text, size);
+}
+
 export function buildIndex(chunks: string[]): RagIndex {
   const docs = chunks.map(tokenize);
   const df: Record<string, number> = {};
@@ -102,14 +166,16 @@ function norm(arr: number[]): number[] {
 
 export type Strategy = "vector" | "keyword" | "hybrid";
 
-export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: number, metric: Metric = "cosine"): { i: number; score: number }[] {
+// `alpha` (hybrid only) weights the dense/semantic side vs keyword/BM25:
+// alpha=1 → pure vector, alpha=0 → pure keyword, 0.5 → even blend (Weaviate-style).
+export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: number, metric: Metric = "cosine", alpha = 0.5): { i: number; score: number }[] {
   const bm = norm(bm25Scores(idx, query));
   const qv = queryVector(idx, query);
   const vec = norm(idx.vectors.map((v) => simSparse(qv, v, metric)));
   let scores: number[];
   if (strategy === "keyword") scores = bm;
   else if (strategy === "vector") scores = vec;
-  else scores = bm.map((s, i) => 0.5 * s + 0.5 * vec[i]);
+  else scores = bm.map((s, i) => (1 - alpha) * s + alpha * vec[i]);
   return scores
     .map((s, i) => ({ i, score: s }))
     .sort((a, b) => b.score - a.score)
@@ -123,13 +189,13 @@ export function denseCos(a: number[], b: number[]): number {
   return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 }
 // Retrieve on dense vectors: keyword = BM25, vector = cosine on neural embeddings, hybrid = blend.
-export function retrieveDense(idx: RagIndex, query: string, qVec: number[], chunkVecs: number[][], strategy: Strategy, k: number, metric: Metric = "cosine"): { i: number; score: number }[] {
+export function retrieveDense(idx: RagIndex, query: string, qVec: number[], chunkVecs: number[][], strategy: Strategy, k: number, metric: Metric = "cosine", alpha = 0.5): { i: number; score: number }[] {
   const bm = norm(bm25Scores(idx, query));
   const vec = norm(chunkVecs.map((v) => simDense(qVec, v, metric)));
   let scores: number[];
   if (strategy === "keyword") scores = bm;
   else if (strategy === "vector") scores = vec;
-  else scores = bm.map((s, i) => 0.5 * s + 0.5 * vec[i]);
+  else scores = bm.map((s, i) => (1 - alpha) * s + alpha * vec[i]);
   return scores.map((s, i) => ({ i, score: s })).sort((a, b) => b.score - a.score).slice(0, k);
 }
 

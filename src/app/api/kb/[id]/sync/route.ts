@@ -6,7 +6,7 @@ import { getSessionUser, uid } from "@/lib/auth";
 import { getActiveProvider, getProviderById } from "@/lib/providers";
 import { rateLimitDb } from "@/lib/ratelimit";
 import { chunkDocs, embedChunks } from "@/lib/kb";
-import { captureError } from "@/lib/monitor";
+import { captureError, audit } from "@/lib/monitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +31,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     : [];
   if (!docs.length) return NextResponse.json({ error: "No documents to sync — add files or URLs first." }, { status: 400 });
 
-  const prov = b.providerId ? await getProviderById(String(b.providerId)) : await getActiveProvider();
+  const inclGlobal = user.role === "admin";
+  const prov = b.providerId ? await getProviderById(String(b.providerId), user.id, inclGlobal) : await getActiveProvider(user.id, inclGlobal);
   if (!prov || !prov.baseUrl) return NextResponse.json({ error: "No LLM provider configured (needed for embeddings)." }, { status: 400 });
 
   await db.update(knowledgeBases).set({ status: "syncing" }).where(eq(knowledgeBases.id, id));
@@ -70,6 +71,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const docCount = (kb.docCount || 0) + docs.length;
     const chunkCount = replaceAll ? rows.length : (kb.chunkCount || 0) + rows.length;
     await db.update(knowledgeBases).set({ status: "ready", docCount, chunkCount, embModel, embMeta }).where(eq(knowledgeBases.id, id));
+    await audit("kb_synced", user.id, { kb: kb.name, docsAdded: docs.length, chunks: chunkCount, embModel }).catch(() => {});
     return NextResponse.json({ ok: true, chunkCount, added: rows.length, embModel });
   } catch (e) {
     captureError(e, { where: "kb.sync", kbId: id });
