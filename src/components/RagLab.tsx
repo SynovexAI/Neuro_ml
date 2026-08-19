@@ -121,6 +121,8 @@ export default function RagLab() {
   const [strategy, setStrategy] = useState<Strategy>("hybrid");
   const [metric, setMetric] = useState<Metric>("cosine");
   const [topK, setTopK] = useState(3);
+  const [selectedDots, setSelectedDots] = useState<number[]>([]);
+  const [pointMetric, setPointMetric] = useState<Metric>("cosine");
   // neural embeddings (real, via provider) + re-ranking + retrieval metrics
   const [embedMode, setEmbedMode] = useState<"tfidf" | "neural">("tfidf");
   const [embModel, setEmbModel] = useState("");
@@ -998,8 +1000,32 @@ export default function RagLab() {
                 {embedMode === "tfidf" && <div className="note" style={{ marginTop: 8 }}>TF-IDF weights each term by rarity. Switch to Neural for real semantic embeddings{provider === null && provKnown ? " (needs a provider — TF-IDF works without one)" : ""} — the pipeline is identical.</div>}
                 {embedMode === "neural" && denseVecs && denseVecs.length > 2 && (() => {
                   const t = plotlyTheme(); const pts = pca2(denseVecs); const asg = clusters?.assign ?? denseVecs.map(() => 0); const K = clusters?.nlist ?? 1;
-                  const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85 }, hovertemplate: "chunk %{text}<extra></extra>" }));
-                  return <div style={{ marginTop: 10 }}><Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} /></div>;
+                  const traces = [...Array(K).keys()].map((c) => ({ type: "scatter", mode: "markers+text", name: `cluster ${c + 1}`, x: pts.map((p, i) => (asg[i] === c ? p.x : null)), y: pts.map((p, i) => (asg[i] === c ? p.y : null)), text: pts.map((_, i) => (asg[i] === c ? String(i + 1) : "")), textposition: "top center", textfont: { size: 9, color: t.muted }, marker: { size: 11, opacity: 0.85, line: { color: pts.map((_, i) => selectedDots.includes(i) ? "#fff" : "transparent"), width: pts.map((_, i) => selectedDots.includes(i) ? 2 : 0) } }, hovertemplate: "chunk %{text}<extra></extra>" }));
+                  return (
+                    <div style={{ marginTop: 10 }}>
+                      <Plot data={traces} layout={{ ...pLayout(t, "Embedding space (PCA → 2-D) — semantically similar chunks sit close together", { showlegend: true, legend: { orientation: "h", y: -0.2 }, height: 340, xaxis: { visible: false }, yaxis: { visible: false } }) }} style={{ height: 340, width: "100%" }} onClick={(e) => { if (!e.points?.length) return; const p = e.points[0]; const i = parseInt(p.text) - 1; if (isNaN(i)) return; setSelectedDots(prev => { if (prev.includes(i)) return prev.filter(x => x !== i); if (prev.length === 2) return [prev[1], i]; return [...prev, i]; }); }} />
+                      {selectedDots.length === 2 && (() => {
+                        const [i1, i2] = selectedDots;
+                        const score = simDense(denseVecs[i1], denseVecs[i2], pointMetric);
+                        return (
+                          <div style={{ marginTop: 16, padding: 16, background: "var(--panel)", borderRadius: 8, border: "1px solid var(--border)" }}>
+                            <div style={{ fontWeight: 600, marginBottom: 12 }}>Compare Selected Chunks ({i1 + 1} and {i2 + 1})</div>
+                            <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+                              {(["cosine", "euclidean", "dot"] as Metric[]).map(m => (
+                                <button key={m} className={`chip ${pointMetric === m ? "on" : ""}`} onClick={() => setPointMetric(m)}>{METRIC_LABEL[m]}</button>
+                              ))}
+                              <button className="btn ghost sm" onClick={() => setSelectedDots([])} style={{ marginLeft: "auto" }}>Clear Selection</button>
+                            </div>
+                            <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                              The <b>{METRIC_LABEL[pointMetric]}</b> between chunk {i1 + 1} and chunk {i2 + 1} is <b>{score.toFixed(4)}</b>.
+                              <br/>
+                              <span className="note">Calculated using the {embedInfo?.dim}-dimensional neural embeddings.</span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  );
                 })()}
               </div>
             </div>

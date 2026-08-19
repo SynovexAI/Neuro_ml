@@ -24,12 +24,14 @@ export default function Plot({
   config,
   className,
   style,
+  onClick,
 }: {
   data: Fig[];
   layout?: Fig;
   config?: Fig;
   className?: string;
   style?: React.CSSProperties;
+  onClick?: (event: any) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -45,11 +47,15 @@ export default function Plot({
         layout ?? {},
         config ?? { responsive: true, displaylogo: false, displayModeBar: "hover", scrollZoom: false }
       );
+      if (onClick && ref.current) {
+        (ref.current as any).removeAllListeners?.('plotly_click');
+        (ref.current as any).on?.('plotly_click', onClick);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [data, layout, config]);
+  }, [data, layout, config, onClick]);
 
   // Tear down the Plotly instance (removes listeners / WebGL contexts) on unmount.
   useEffect(() => {

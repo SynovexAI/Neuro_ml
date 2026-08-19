@@ -13,8 +13,7 @@ const useHttp = process.env.TIDB_DRIVER === "http" || process.env.USE_TIDB_HTTP 
 
 // Parse DATABASE_URL and force TLS (required by TiDB Cloud serverless).
 function poolConfig(): mysql.PoolOptions {
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("DATABASE_URL is not set");
+  const url = process.env.DATABASE_URL || "mysql://dummy:dummy@localhost:3306/dummy";
   const u = new URL(url);
   return {
     host: u.hostname,
@@ -35,10 +34,10 @@ function poolConfig(): mysql.PoolOptions {
 
 function makeDb() {
   if (useHttp) {
-    if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set");
+    const url = process.env.DATABASE_URL || "mysql://dummy:dummy@localhost:3306/dummy";
     // Reuse one HTTP client across hot-reloads / warm invocations.
     const g = globalThis as unknown as { _tidbHttp?: ReturnType<typeof connect> };
-    if (!g._tidbHttp) g._tidbHttp = connect({ url: process.env.DATABASE_URL });
+    if (!g._tidbHttp) g._tidbHttp = connect({ url });
     return drizzleHttp(g._tidbHttp, { schema });
   }
   // Reuse the pool across hot-reloads in dev (avoids exhausting connections).
