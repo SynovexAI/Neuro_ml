@@ -89,6 +89,29 @@ export default function RagPlayground() {
   const [bpRunning, setBpRunning] = useState(false);
   const [bpLoss, setBpLoss] = useState(0.42);
 
+  useEffect(() => {
+    if (!bpRunning) return;
+    const interval = setInterval(() => {
+      setBpStep((prev) => {
+        if (prev < 5) return prev + 1;
+        
+        setBpEpoch((ep) => {
+          if (ep >= 10) {
+            setBpRunning(false);
+            return 10;
+          }
+          return ep + 1;
+        });
+        
+        // Mock a decaying loss
+        setBpLoss((loss) => Math.max(0.1, loss * 0.85));
+        
+        return 1;
+      });
+    }, 1200);
+    return () => clearInterval(interval);
+  }, [bpRunning]);
+
   const renderStepper = () => {
     const items: { id: Module; ic: string; t: string; s: string }[] = [
       { id: "chunk", ic: "🧩", t: "Chunk", s: "Split text into chunks" },
