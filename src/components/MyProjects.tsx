@@ -103,10 +103,20 @@ export default function MyProjects() {
                     <div className="proj-name" title={p.name}>{p.name}</div>
                     <div className="acts" style={{ marginTop: 12, flexWrap: "wrap" }}>
                       <Link className="btn sm" href={`${m.href}?project=${p.id}`}>Open</Link>
-                      {(p.lab === "agent" || p.lab === "agent-nat") && (
+                      {(p.lab === "agent" || p.lab === "agent-nat" || p.lab === "rag") && (
                         p.published
-                          ? <><Link className="btn ghost sm" href={`/workroom/${p.id}`}>Open in Workroom</Link><button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>Unpublish</button></>
-                          : <button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>🚀 Publish</button>
+                          ? (
+                            <>
+                              {p.lab !== "rag" && <Link className="btn ghost sm" href={`/workroom/${p.id}`}>Open in Workroom</Link>}
+                              <button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>
+                                {p.lab === "rag" ? "Undeploy" : "Unpublish"}
+                              </button>
+                            </>
+                          ) : (
+                            <button className="btn ghost sm" disabled={busy === p.id} onClick={() => togglePublish(p)}>
+                              {p.lab === "rag" ? "🚀 Deploy" : "🚀 Publish"}
+                            </button>
+                          )
                       )}
                       <button className="btn ghost sm" disabled={busy === p.id} onClick={() => rename(p)}>Rename</button>
                       <button className="btn ghost sm danger" disabled={busy === p.id} onClick={() => remove(p)}>Delete</button>

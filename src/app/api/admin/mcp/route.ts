@@ -29,6 +29,12 @@ export async function POST(req: Request) {
   const transport = TRANSPORTS.includes(b.transport) ? b.transport : "http";
   const authType = AUTH_TYPES.includes(b.authType) ? b.authType : "none";
   if (!name) return NextResponse.json({ error: "A server name is required." }, { status: 400 });
+  // stdio MCP servers need a local process (the self-hosted NAT runtime) and can't run
+  // on the serverless deploy. Only the built-in "database" connector may use it (it's
+  // served over HTTP by the in-app db tools, not executed as an MCP). Everything else
+  // must be a hosted HTTP/SSE server.
+  if (transport === "stdio" && name !== "database")
+    return NextResponse.json({ error: "stdio MCP servers can't run on this deployment. Connect a hosted HTTP or SSE server instead — or use the built-in Database tool for databases." }, { status: 400 });
   if ((transport === "http" || transport === "sse") && !String(b.url || "").trim())
     return NextResponse.json({ error: "A server URL is required for HTTP/SSE." }, { status: 400 });
   if (transport === "stdio" && !String(b.command || "").trim())

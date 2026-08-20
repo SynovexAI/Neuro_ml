@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 // Apply the saved theme before paint so there's no flash. No stored choice →
 // the CSS prefers-color-scheme media query drives it (system default).
-const themeInit = `(function(){try{var t=localStorage.getItem('awb_theme');if(t==='light'||t==='dark'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();`;
+const themeInit = `(function(){try{var t=localStorage.getItem('awb_theme');if(t==='light'||t==='dark'||t==='cosmic'){document.documentElement.setAttribute('data-theme',t);}else if(window.matchMedia('(prefers-color-scheme: dark)').matches){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (

@@ -13,11 +13,14 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   parseRecords, sampleSources, runPipeline, toCSV, tableFromRecords, OP_META,
-  type Table, type EtlOp, type OpType,
+  profile, evaluate, lineage, RULE_META, ACTION_META,
+  type Table, type EtlOp, type OpType, type Expectation, type RuleType, type RuleAction,
 } from "@/lib/etlUtils";
+import { toPython, type CodegenSpec } from "@/lib/etlCodegen";
 import { runSql } from "@/lib/sqlEngine";
 import { toast, confirmDialog } from "@/lib/toast";
-import { OP_INFO } from "@/lib/etlNodeInfo";
+import { OP_INFO, SRC_INFO, LOAD_INFO } from "@/lib/etlNodeInfo";
+import DataVizExplorer from "./visualization/DataVizExplorer";
 
 type Mode = "etl" | "elt" | "streaming" | "reverse";
 type Kind = "source" | "op" | "load" | "analytics" | "sql";
@@ -40,18 +43,27 @@ const rid = () => Math.random().toString(36).slice(2, 9);
 type PalItem = { key: string; label: string; icon: string; cat: Cat; kind: Kind; opType?: OpType; srcType?: string; target?: string };
 const SOURCES: PalItem[] = [
   { key: "s-sample", label: "Sample / CSV", icon: "📄", cat: "extraction", kind: "source", srcType: "csv" },
+  { key: "s-excel", label: "Excel", icon: "📗", cat: "extraction", kind: "source", srcType: "excel" },
   { key: "s-pg", label: "PostgreSQL", icon: "🐘", cat: "extraction", kind: "source", srcType: "postgres" },
   { key: "s-mysql", label: "MySQL / TiDB", icon: "🗄", cat: "extraction", kind: "source", srcType: "mysql" },
+  { key: "s-rest", label: "REST / API", icon: "🌐", cat: "extraction", kind: "source", srcType: "rest" },
   { key: "s-json", label: "JSON", icon: "🧾", cat: "extraction", kind: "source", srcType: "json" },
+  { key: "s-mongo", label: "MongoDB", icon: "🍃", cat: "extraction", kind: "source", srcType: "mongodb" },
+  { key: "s-api", label: "REST API", icon: "🌐", cat: "extraction", kind: "source", srcType: "rest" },
+  { key: "s-s3", label: "Amazon S3", icon: "🪣", cat: "extraction", kind: "source", srcType: "s3" },
 ];
 const STREAM_SOURCES: PalItem[] = [
   { key: "s-kafka", label: "Kafka", icon: "📡", cat: "streaming", kind: "source", srcType: "kafka" },
-  { key: "s-rabbit", label: "RabbitMQ", icon: "📨", cat: "streaming", kind: "source", srcType: "kafka" },
+  { key: "s-rabbit", label: "RabbitMQ", icon: "📨", cat: "streaming", kind: "source", srcType: "rabbitmq" },
 ];
 const opItem = (t: OpType, cat: Cat = "transformation"): PalItem => ({ key: "op-" + t, label: OP_META[t].label, icon: OP_META[t].icon, cat, kind: "op", opType: t });
 const TRANSFORMS: PalItem[] = [
-  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse"] as OpType[]).map((t) => opItem(t, "transformation")),
+  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse", "scd2", "fuzzydedupe", "quality"] as OpType[]).map((t) => opItem(t, "transformation")),
   opItem("join", "integration"), opItem("union", "integration"),
+  // New integration ops
+  opItem("lookup", "integration"),
+  opItem("merge", "integration"),
+  opItem("append", "integration"),
 ];
 const LOADS: PalItem[] = [
   { key: "l-internal", label: "Platform DB", icon: "🗃", cat: "loading", kind: "load", target: "platform" },
@@ -59,6 +71,8 @@ const LOADS: PalItem[] = [
   { key: "l-mysql", label: "MySQL / TiDB", icon: "🗄", cat: "loading", kind: "load", target: "mysql" },
   { key: "l-snow", label: "Snowflake", icon: "❄", cat: "loading", kind: "load", target: "snowflake" },
   { key: "l-bq", label: "BigQuery", icon: "📊", cat: "loading", kind: "load", target: "bigquery" },
+  { key: "l-mongo", label: "MongoDB", icon: "🍃", cat: "loading", kind: "load", target: "mongodb" },
+  { key: "l-redshift", label: "Redshift", icon: "☁", cat: "loading", kind: "load", target: "redshift" },
   { key: "l-csv", label: "CSV file", icon: "📄", cat: "loading", kind: "load", target: "csv" },
   { key: "l-xlsx", label: "Excel file", icon: "📗", cat: "loading", kind: "load", target: "xlsx" },
 ];
@@ -66,6 +80,60 @@ const ANALYTICS: PalItem[] = [
   { key: "a-dash", label: "Dashboard", icon: "📈", cat: "analytics", kind: "analytics", target: "dashboard" },
 ];
 const SQL_ITEM: PalItem = { key: "sql-model", label: "SQL model", icon: "🧮", cat: "transformation", kind: "sql" };
+
+type ExtractionField = { id: string; label: string; type: "text" | "password" | "number" | "textarea" | "select"; placeholder?: string; required?: boolean; options?: string[]; tooltip?: string; };
+type ExtractionSource = { name: string; category: "Database" | "File" | "Streaming" | "API" | "Cloud Storage"; difficulty: "Beginner" | "Intermediate" | "Advanced"; apiKeyRequired: boolean; oauthRequired: boolean; fields: ExtractionField[]; };
+
+const extractionConfig: Record<string, ExtractionSource> = {
+  csv: { name: "CSV", category: "File", difficulty: "Beginner", apiKeyRequired: false, oauthRequired: false, fields: [] },
+  excel: { name: "Excel", category: "File", difficulty: "Beginner", apiKeyRequired: false, oauthRequired: false, fields: [{ id: "sheet", label: "Sheet selector (optional)", type: "text", placeholder: "e.g., Sheet1" }] },
+  json: { name: "JSON", category: "File", difficulty: "Beginner", apiKeyRequired: false, oauthRequired: false, fields: [{ id: "jsonUrl", label: "JSON URL (optional)", type: "text", placeholder: "https://api.example.com/data.json" }] },
+  mysql: { name: "MySQL", category: "Database", difficulty: "Intermediate", apiKeyRequired: false, oauthRequired: false, fields: [
+    { id: "dbHost", label: "Host", type: "text", required: true, placeholder: "db.example.com" },
+    { id: "dbPort", label: "Port", type: "number", required: true, placeholder: "3306" },
+    { id: "dbName", label: "Database name", type: "text", required: true, placeholder: "production_db" },
+    { id: "dbUser", label: "Username", type: "text", required: true },
+    { id: "dbPass", label: "Password", type: "password", required: true },
+    { id: "dbTable", label: "Table name", type: "text", required: true }
+  ] },
+  postgres: { name: "PostgreSQL", category: "Database", difficulty: "Intermediate", apiKeyRequired: false, oauthRequired: false, fields: [
+    { id: "dbHost", label: "Host", type: "text", required: true, placeholder: "db.example.com" },
+    { id: "dbPort", label: "Port", type: "number", required: true, placeholder: "5432" },
+    { id: "dbName", label: "Database", type: "text", required: true, placeholder: "production_db" },
+    { id: "dbUser", label: "Username", type: "text", required: true },
+    { id: "dbPass", label: "Password", type: "password", required: true },
+    { id: "dbSchema", label: "Schema", type: "text", required: true, placeholder: "public" },
+    { id: "dbTable", label: "Table", type: "text", required: true }
+  ] },
+  mongodb: { name: "MongoDB", category: "Database", difficulty: "Intermediate", apiKeyRequired: false, oauthRequired: false, fields: [
+    { id: "mongoConn", label: "Connection string", type: "text", required: true, placeholder: "mongodb+srv://user:pass@cluster..." },
+    { id: "mongoDb", label: "Database", type: "text", required: true },
+    { id: "mongoColl", label: "Collection", type: "text", required: true }
+  ] },
+  kafka: { name: "Kafka", category: "Streaming", difficulty: "Advanced", apiKeyRequired: false, oauthRequired: false, fields: [
+    { id: "kafkaBroker", label: "Broker URL", type: "text", required: true, placeholder: "broker:9092" },
+    { id: "kafkaTopic", label: "Topic", type: "text", required: true },
+    { id: "kafkaGroup", label: "Consumer group", type: "text", required: true }
+  ] },
+  rabbitmq: { name: "RabbitMQ", category: "Streaming", difficulty: "Intermediate", apiKeyRequired: false, oauthRequired: false, fields: [
+    { id: "rabbitUrl", label: "Queue URL", type: "text", required: true, placeholder: "amqp://localhost" },
+    { id: "rabbitQueue", label: "Queue name", type: "text", required: true }
+  ] },
+  rest: { name: "REST API", category: "API", difficulty: "Beginner", apiKeyRequired: true, oauthRequired: false, fields: [
+    { id: "apiUrl", label: "Endpoint URL", type: "text", required: true, placeholder: "https://api.domain.com/v1/data", tooltip: "The full URL endpoint to fetch data from." },
+    { id: "apiMethod", label: "HTTP Method", type: "select", options: ["GET", "POST"], required: true },
+    { id: "apiHeaders", label: "Headers (JSON)", type: "textarea", placeholder: '{"Authorization": "Bearer token"}' },
+    { id: "apiKey", label: "API Key (optional)", type: "password" },
+    { id: "apiParams", label: "Query parameters (JSON)", type: "textarea", placeholder: '{"limit": 100}' }
+  ] },
+  s3: { name: "Amazon S3", category: "Cloud Storage", difficulty: "Intermediate", apiKeyRequired: true, oauthRequired: false, fields: [
+    { id: "s3Access", label: "Access key", type: "text", required: true },
+    { id: "s3Secret", label: "Secret key", type: "password", required: true },
+    { id: "s3Bucket", label: "Bucket name", type: "text", required: true },
+    { id: "s3Region", label: "Region", type: "text", required: true, placeholder: "us-east-1" },
+    { id: "s3Folder", label: "Folder path", type: "text", placeholder: "data/logs/" }
+  ] }
+};
 
 type StepDef = { label: string; items: PalItem[] };
 const MODES: Record<Mode, { accent: string; label: string; steps: StepDef[] }> = {
@@ -109,13 +177,16 @@ function makeOp(type: OpType, cols: string[], rows: Record<string, unknown>[], b
   else if (type === "map") a(base, { col: numCol, fn: "round" });
   else if (type === "fillna") a(base, { col: "", value: "0" });
   else if (type === "bucket") a(base, { col: numCol, name: numCol + "_bin", value: "4" });
-  else if (type === "join") a(base, { joinType: "inner", col: cols[0], rightKey: bCols[0] || cols[0] });
-  else if (type === "union") a(base, { mode: "all" });
+  else if (type === "join" || type === "lookup" || type === "merge") a(base, { joinType: type === "join" ? "inner" : "left", col: cols[0], rightKey: bCols[0] || cols[0] });
+  else if (type === "union" || type === "append") a(base, { mode: "all" });
   else if (type === "pivot") a(base, { groupBy: cols[0], col: cols[1] || cols[0], agg: "sum", aggCol: numCol });
   else if (type === "unpivot") a(base, { cols: [numCol], name: "variable", value: "value" });
   else if (type === "window") a(base, { groupBy: "(none)", col: numCol, fn: "running_sum", name: "running_sum" });
   else if (type === "regex") a(base, { col: cols[0], value: "(\\d+)", name: (cols[0] || "col") + "_match" });
   else if (type === "dateparse") a(base, { col: cols[0], fn: "year", name: (cols[0] || "col") + "_year" });
+  else if (type === "scd2") a(base, { businessKey: cols[0] });
+  else if (type === "fuzzydedupe") a(base, { col: cols[0], threshold: 0.8 });
+  else if (type === "quality") a(base, { qualityCol: cols[0], rule: "not_null", name: "_quality_status" });
   return base;
 }
 function opSummary(o: EtlOp): string {
@@ -136,19 +207,94 @@ type NData = {
   op?: EtlOp; table?: Table; srcType?: string; srcName?: string; target?: string;
   dbUrl?: string; dbQuery?: string; jsonText?: string; sqlText?: string;
   extUrl?: string; extTable?: string; extMode?: string;
+  extHost?: string; extPort?: string; extDb?: string; extUser?: string; extPass?: string;
+  restUrl?: string; restPath?: string;
   count?: number | null; run?: "running" | "done";
 };
 type FNode = Node<NData>;
 type SavedWF = { mode?: Mode; nodes?: { id: string; position?: { x: number; y: number }; data: NData }[]; edges?: { id?: string; source: string; target: string }[] };
 type PlayNode = { label: string; rule: string; input: Table; steps: number; capped: boolean; outAt: (k: number) => Table; state: (i: number, cur: number) => string; cap: (cur: number) => string; hlOut?: boolean };
 
-function FlowNode({ data, selected }: NodeProps<FNode>) {
+function FlowNode({ id, data, selected }: NodeProps<FNode>) {
+  const { setNodes, setEdges } = useReactFlow();
+  const [hover, setHover] = useState(false);
   const c = data.color;
   const running = data.run === "running", done = data.run === "done";
   const border = running ? "#f59e0b" : done ? "#3ecf7f" : selected ? c : "var(--border)";
   const shadow = running ? "0 0 18px rgba(245,158,11,.45)" : selected ? `0 0 0 3px color-mix(in srgb, ${c} 30%, transparent)` : "var(--shadow-sm)";
   return (
-    <div style={{ width: 158, borderRadius: 12, border: `1px solid ${border}`, background: "var(--panel)", boxShadow: shadow, padding: "10px 11px", position: "relative", transition: "box-shadow .2s, border-color .2s" }}>
+    <div className="flow-node-wrapper" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} style={{ width: 158, borderRadius: 12, border: `1px solid ${border}`, background: "var(--panel)", boxShadow: shadow, padding: "10px 11px", position: "relative", transition: "box-shadow .2s, border-color .2s" }}>
+      <button 
+        className="node-info-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          window.dispatchEvent(new CustomEvent("open-node-info", { detail: id }));
+        }}
+        style={{
+          position: "absolute", top: -8, left: -8, width: 22, height: 22, borderRadius: "50%",
+          background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)",
+          boxShadow: "0 0 0 4px #0e121d, 0 2px 6px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", 
+          cursor: "pointer", zIndex: 10, opacity: hover ? 1 : 0, transform: hover ? "scale(1)" : "scale(0.8)", 
+          transition: "all 0.15s cubic-bezier(0.4, 0, 0.2, 1)", pointerEvents: hover ? "auto" : "none"
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.borderColor = "var(--accent)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.borderColor = "var(--border)"; }}
+        title="View details"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+      </button>
+      <button 
+        className="node-del-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          setNodes((nds) => nds.filter((n) => n.id !== id));
+          setEdges((eds) => eds.filter((edge) => edge.source !== id && edge.target !== id));
+        }}
+        style={{
+          position: "absolute", top: -8, right: -8, width: 22, height: 22, borderRadius: "50%",
+          background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)",
+          boxShadow: "0 0 0 4px #0e121d, 0 2px 6px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", 
+          cursor: "pointer", zIndex: 10, opacity: hover ? 1 : 0, transform: hover ? "scale(1)" : "scale(0.8)", 
+          transition: "all 0.15s cubic-bezier(0.4, 0, 0.2, 1)", pointerEvents: hover ? "auto" : "none"
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.borderColor = "#ef4444"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.borderColor = "var(--border)"; }}
+        title="Remove node"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+      {/* Row count badge (Extract -> Transform -> Load) */}
+      {data.count != null && (
+        <div
+          className="node-count-badge"
+          title={`${data.count.toLocaleString()} rows in node output`}
+          style={{
+            position: "absolute",
+            top: -9,
+            right: hover ? 18 : -6,
+            minWidth: 20,
+            height: 19,
+            padding: "0 6px",
+            borderRadius: 10,
+            background: done ? "rgba(16,185,129,0.25)" : "var(--surface)",
+            border: `1px solid ${done ? "#10b981" : "var(--border-strong)"}`,
+            color: done ? "#3ecf7f" : "var(--text)",
+            fontSize: 10,
+            fontFamily: "var(--mono)",
+            fontWeight: 700,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9,
+            boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            transition: "all 0.15s cubic-bezier(0.4, 0, 0.2, 1)",
+            pointerEvents: "none",
+          }}
+        >
+          {data.count.toLocaleString()}
+        </div>
+      )}
+
       {data.kind !== "source" && <Handle type="target" position={Position.Left} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       {data.kind !== "analytics" && <Handle type="source" position={Position.Right} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
@@ -158,7 +304,6 @@ function FlowNode({ data, selected }: NodeProps<FNode>) {
           <div style={{ fontSize: 9, color: c, textTransform: "uppercase", letterSpacing: ".04em", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 96 }}>{data.op ? opSummary(data.op) : data.cat}</div>
         </div>
       </div>
-      {data.count != null && <span style={{ position: "absolute", top: -8, right: -7, background: "var(--surface)", border: "1px solid var(--border-strong)", color: "var(--muted)", fontSize: 9.5, fontFamily: "var(--mono)", borderRadius: 20, padding: "1px 7px" }}>{data.count}</span>}
     </div>
   );
 }
@@ -181,12 +326,26 @@ function Inner() {
   const [loadOpen, setLoadOpen] = useState(false);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  // Deploy-as-API state
+  const [deploy, setDeploy] = useState<{ open: boolean; busy: boolean; key?: string; chId?: string; err?: string; mode?: string; hasTarget?: boolean } | null>(null);
+  const [apiLang, setApiLang] = useState<"curl" | "js" | "python">("curl");
+  const [runs, setRuns] = useState<{ id: string; name: string | null; mode: string | null; target: string | null; rowsOut: number; rowsLoaded: number; durationMs: number; status: string | null; ts: string | null }[]>([]);
+  const [showQuality, setShowQuality] = useState(false);
+  const [showRuns, setShowRuns] = useState(false);
+  const [rules, setRules] = useState<Expectation[]>([]);
   const [renameText, setRenameText] = useState("");
   const runTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const { screenToFlowPosition } = useReactFlow();
   const accent = MODES[mode].accent;
+  
+  const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
+  useEffect(() => {
+    const h = (e: Event) => setInfoNodeId((e as CustomEvent<string>).detail);
+    window.addEventListener("open-node-info", h);
+    return () => window.removeEventListener("open-node-info", h);
+  }, []);
 
   // ── compute the live pipeline over the current chain (ordered left→right) ──
   const sources = useMemo(() => nodes.filter((n) => n.data.kind === "source" && n.data.table), [nodes]);
@@ -194,9 +353,19 @@ function Inner() {
   const secondary = sources[1]?.data.table || null;
   const opNodes = useMemo(() => nodes.filter((n) => n.data.kind === "op").sort((a, b) => a.position.x - b.position.x), [nodes]);
   const pipe = useMemo(() => (primary ? runPipeline(primary, opNodes.map((n) => n.data.op!).filter(Boolean), { secondary }) : null), [primary, secondary, opNodes]);
-  // A SQL model node (ELT) computes its own result on Run — when present, it's the output.
   const sqlNode = useMemo(() => nodes.find((n) => n.data.kind === "sql" && n.data.table), [nodes]);
   const finalTable = sqlNode?.data.table || pipe?.final || primary;
+  const activeTable = useMemo(() => {
+    if (!selId) return finalTable;
+    const s = nodes.find((n) => n.id === selId);
+    if (!s) return finalTable;
+    if (s.data.kind === "source" || s.data.kind === "sql") return s.data.table || finalTable;
+    if (s.data.kind === "op" && pipe) {
+      const idx = opNodes.findIndex((n) => n.id === selId);
+      if (idx >= 0 && pipe.stages[idx + 1]) return pipe.stages[idx + 1].table;
+    }
+    return finalTable;
+  }, [selId, nodes, finalTable, pipe, opNodes]);
 
   // Node-by-node execution model for the Play walkthrough. Each node's input is
   // the previous node's output; partial output per row is real (runPipeline on a
@@ -246,11 +415,22 @@ function Inner() {
   // counts per node id, for the badge
   const counts = useMemo(() => {
     const m: Record<string, number> = {};
-    sources.forEach((s) => { m[s.id] = s.data.table!.rows.length; });
-    opNodes.forEach((n, i) => { m[n.id] = pipe?.stages[i + 1]?.table.rows.length ?? 0; });
-    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => { m[n.id] = n.data.table?.rows.length ?? finalTable?.rows.length ?? 0; });
+    sources.forEach((s) => { if (s.data.table) m[s.id] = s.data.table.rows.length; });
+    opNodes.forEach((n, i) => { if (pipe?.stages[i + 1]?.table) m[n.id] = pipe.stages[i + 1].table.rows.length; });
+    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => {
+      if (n.data.table) {
+        m[n.id] = n.data.table.rows.length;
+      } else {
+        const inEdge = edges.find((e) => e.target === n.id);
+        if (inEdge && m[inEdge.source] != null) {
+          m[n.id] = m[inEdge.source];
+        } else if (finalTable) {
+          m[n.id] = finalTable.rows.length;
+        }
+      }
+    });
     return m;
-  }, [sources, opNodes, pipe, nodes, finalTable]);
+  }, [sources, opNodes, pipe, nodes, finalTable, edges]);
 
   const displayNodes = useMemo(() => nodes.map((n) => ({ ...n, data: { ...n.data, count: counts[n.id] ?? null, run: runStatus[n.id] } })), [nodes, counts, runStatus]);
   const sel = nodes.find((n) => n.id === selId) || null;
@@ -378,6 +558,39 @@ function Inner() {
   // Start a fresh, unsaved workflow.
   function newWorkflow() { setNodes([]); setEdges([]); setCurrentId(null); setSelId(null); setRunStatus({}); setMetrics(null); setRunMsg(""); }
   function exportJson() { download(JSON.stringify(buildWorkflow(), null, 2), "etl-workflow.json", "application/json"); }
+  // Build a codegen spec from the current canvas (primary source → ordered ops → load node).
+  function currentSpec(): CodegenSpec {
+    const src = sources[0]?.data;
+    const loadNode = nodes.find((n) => n.data.kind === "load")?.data;
+    return {
+      source: { type: src?.srcType || "csv", url: src?.dbUrl, query: src?.dbQuery, restUrl: src?.restUrl },
+      ops: opNodes.map((n) => n.data.op!).filter(Boolean),
+      load: loadNode ? { target: loadNode.target, url: loadNode.extUrl, table: loadNode.extTable, mode: loadNode.extMode } : undefined,
+      secondary: sources.length > 1,
+    };
+  }
+  function exportPython() { download(toPython(currentSpec()), "etl_pipeline.py", "text/x-python"); toast("Downloaded runnable Python ✓", "success"); }
+  // Deploy the pipeline as a Bearer-key API: save + publish the project, then mint an api channel.
+  async function deployApi() {
+    if (!opNodes.length) { setDeploy({ open: true, busy: false, err: "Add at least one transform before deploying." }); return; }
+    setDeploy({ open: true, busy: true });
+    try {
+      let pid = currentId;
+      const cfg = buildWorkflow();
+      if (pid) {
+        await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pid, config: cfg, published: true }) });
+      } else {
+        const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "etl", name: wfName(), config: cfg, published: true }) });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || "save failed"); pid = j.id; setCurrentId(pid); loadProjects();
+      }
+      // Build the connection config for a full extract→transform→load run (only if a real DB source URL is set).
+      const src = sources[0]?.data; const loadNode = nodes.find((n) => n.data.kind === "load")?.data;
+      const conn = src?.dbUrl ? { sourceUrl: src.dbUrl, query: src.dbQuery || "", srcType: src.srcType || "", targetUrl: loadNode?.extUrl || "", table: loadNode?.extTable || "etl_output", mode: loadNode?.extMode || "append", keyCol: primary?.cols?.[0] || "" } : null;
+      const rc = await fetch("/api/etl/deploy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: pid, conn, dailyLimit: 200 }) });
+      const jc = await rc.json(); if (!rc.ok) throw new Error(jc.error || "deploy failed");
+      setDeploy({ open: true, busy: false, key: jc.apiKey, chId: jc.id, mode: jc.mode, hasTarget: jc.hasTarget });
+    } catch (e) { setDeploy({ open: true, busy: false, err: (e as Error).message }); }
+  }
   async function importJson(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
     try { applyWorkflow(JSON.parse(await f.text()) as SavedWF); setCurrentId(null); setSavedMsg("Imported ✓"); } catch { setSavedMsg("Bad JSON file"); }
@@ -386,6 +599,7 @@ function Inner() {
   // Load the saved project list, and any ?project=<id> deep link, on mount.
   useEffect(() => {
     loadProjects();
+    loadRuns();
     const id = new URLSearchParams(window.location.search).get("project");
     if (id) loadProject(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -393,11 +607,11 @@ function Inner() {
   async function runLoad() {
     if (!sel || !finalTable) return;
     const target = sel.data.target;
-    if (target === "csv") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Downloaded CSV ✓"); return; }
-    if (target === "xlsx") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Exported (CSV; xlsx export next) ✓"); return; }
+    if (target === "csv") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Downloaded CSV ✓"); logRun({ mode: "load", target: "csv", rowsOut: finalTable.rows.length, rowsLoaded: finalTable.rows.length, status: "ok" }); return; }
+    if (target === "xlsx") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Exported (CSV; xlsx export next) ✓"); logRun({ mode: "load", target: "csv", rowsOut: finalTable.rows.length, status: "ok" }); return; }
     if (target === "platform") {
-      try { const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "ETL flow output", cols: finalTable.cols, rows: finalTable.rows, mode: "new" }) }); setRunMsg(r.ok ? "Stored in platform DB ✓" : "Store failed"); }
-      catch (err) { setRunMsg((err as Error).message); }
+      try { const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "ETL flow output", cols: finalTable.cols, rows: finalTable.rows, mode: "new" }) }); const ok = r.ok; setRunMsg(ok ? "Stored in platform DB ✓" : "Store failed"); logRun({ mode: "load", target: "platform DB", rowsOut: finalTable.rows.length, rowsLoaded: ok ? finalTable.rows.length : 0, status: ok ? "ok" : "error" }); }
+      catch (err) { setRunMsg((err as Error).message); logRun({ mode: "load", target: "platform DB", status: "error", error: (err as Error).message }); }
       return;
     }
     setRunMsg(`${target} connector — configure credentials in Admin → Providers (wiring next).`);
@@ -413,6 +627,23 @@ function Inner() {
       setRunMsg(`loaded ${j.rows} rows ✓`);
     } catch (e) { setRunMsg((e as Error).message); }
   }
+  // REST/API source: GET a public JSON endpoint and load its records.
+  async function runRestSource() {
+    if (!sel) return;
+    setRunMsg("fetching…");
+    try {
+      const r = await fetch("/api/etl/fetch-json", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: sel.data.restUrl || "", path: sel.data.restPath || "" }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || "fetch failed");
+      const t = tableFromRecords(j.records || []);
+      patchSel({ table: t, srcName: "REST", label: "REST source" });
+      setRunMsg(`loaded ${t.rows.length} rows ✓`);
+    } catch (e) { setRunMsg((e as Error).message); }
+  }
+  // Fire-and-forget: record a run in the log (etl_runs) so the Runs console shows history.
+  function logRun(r: { mode: string; target?: string; rowsOut?: number; rowsLoaded?: number; status?: string; error?: string; durationMs?: number }) {
+    fetch("/api/etl/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: wfName(), ...r }) }).then(() => loadRuns()).catch(() => {});
+  }
+  async function loadRuns() { try { const j = await fetch("/api/etl/runs").then((x) => x.json()); setRuns(j.runs || []); } catch { /* ignore */ } }
   // ELT: run the SQL model node against the raw source (real in-browser SQL).
   async function runSqlNode() {
     if (!sel || !primary) { setRunMsg("Add a source with data first."); return; }
@@ -436,10 +667,12 @@ function Inner() {
     if (!sel || !finalTable) return;
     setRunMsg("loading…");
     try {
-      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: sel.data.extUrl || "", table: sel.data.extTable || "etl_output", cols: finalTable.cols, rows: finalTable.rows, mode: sel.data.extMode || "append", keyCol: finalTable.cols[0] }) });
+      const dbUrl = sel.data.extUrl || "";
+      const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: dbUrl, table: sel.data.extTable || "etl_output", cols: finalTable.cols, rows: finalTable.rows, mode: sel.data.extMode || "append", keyCol: finalTable.cols[0], db: sel.data.extDb }) });
       const j = await r.json().catch(() => null);
       setRunMsg(r.ok ? `${(sel.data.extMode === "upsert" ? "Upserted" : "Loaded")} ${j.rowCount} rows into \`${j.table}\` ✓` : (j?.error || "load failed"));
-    } catch (e) { setRunMsg((e as Error).message); }
+      logRun({ mode: "load", target: `${sel.data.target || "db"}:${j?.table || sel.data.extTable || "etl_output"}`, rowsOut: finalTable.rows.length, rowsLoaded: r.ok ? (j?.rowCount || finalTable.rows.length) : 0, status: r.ok ? "ok" : "error", error: r.ok ? undefined : (j?.error || "load failed") });
+    } catch (e) { setRunMsg((e as Error).message); logRun({ mode: "load", target: "external db", status: "error", error: (e as Error).message }); }
   }
 
   const paletteItems = MODES[mode].steps[step].items;
@@ -473,11 +706,176 @@ function Inner() {
               </div>
             </>}
           </div>
-          <button className="btn ghost sm" onClick={exportJson}>⤓ Export</button>
+          <button className="btn ghost sm" onClick={exportPython} title="Download a runnable pandas + SQLAlchemy script — run it in your own project">⤓ Python</button>
+          <button className="btn ghost sm" onClick={exportJson} title="Export the workflow as JSON">⤓ JSON</button>
           <button className="btn ghost sm" onClick={() => importRef.current?.click()}>⤒ Import</button>
+          <button className="btn sm" onClick={deployApi} title="Deploy this pipeline as a callable API (small data)">🚀 Deploy as API</button>
         </div>
       </div>
       <input ref={importRef} type="file" accept=".json,application/json" onChange={importJson} style={{ display: "none" }} />
+
+      {deploy?.open && (
+        <div style={{ border: "1px solid var(--border-strong)", borderRadius: 12, background: "var(--panel)", padding: 14, marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <b style={{ fontSize: 13 }}>🚀 Deploy as API {deploy.busy ? "· publishing…" : ""}</b>
+            <button className="btn ghost sm" onClick={() => setDeploy(null)}>✕ close</button>
+          </div>
+          {deploy.err && <div className="err">{deploy.err}</div>}
+          {deploy.busy && <div className="note"><span className="busy-dot" /> saving, publishing & minting a key…</div>}
+          {deploy.key && deploy.chId && (() => {
+            const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
+            const url = `${origin}/api/etl/public/${deploy.chId}`;
+            const cols = (primary?.cols && primary.cols.length ? primary.cols : ["col1", "col2"]).slice(0, 6);
+            const sample: Record<string, unknown> = {};
+            cols.forEach((c) => { sample[c] = primary?.rows?.[0]?.[c] ?? "value"; });
+            const full = deploy.mode === "full_run"; const hasTarget = !!deploy.hasTarget;
+            const curl = full
+              ? `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${deploy.key}" \\\n  -H "content-type: application/json" \\\n  -d '{}'`
+              : `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${deploy.key}" \\\n  -H "content-type: application/json" \\\n  -d '${JSON.stringify({ data: [sample] })}'`;
+            const js = full
+              ? `const res = await fetch(${JSON.stringify(url)}, {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${deploy.key}", "content-type": "application/json" },\n  body: "{}",\n});\nconst summary = await res.json();\nconsole.log(summary); // { rowsExtracted, rowsOut, rowsLoaded }`
+              : `const res = await fetch(${JSON.stringify(url)}, {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${deploy.key}", "content-type": "application/json" },\n  body: JSON.stringify({ data: [${JSON.stringify(sample)}] }),\n});\nconst { cols, rows } = await res.json();\nconsole.log(rows);`;
+            const python = full
+              ? `import requests\n\nr = requests.post(\n    ${JSON.stringify(url)},\n    headers={"Authorization": "Bearer ${deploy.key}", "content-type": "application/json"},\n    json={},\n)\nprint(r.json())  # {"rowsExtracted": .., "rowsLoaded": ..}`
+              : `import requests\n\nr = requests.post(\n    ${JSON.stringify(url)},\n    headers={"Authorization": "Bearer ${deploy.key}", "content-type": "application/json"},\n    json={"data": [${JSON.stringify(sample)}]},\n)\nprint(r.json())  # {"cols": [...], "rows": [...]}`;
+            const snippet = apiLang === "curl" ? curl : apiLang === "js" ? js : python;
+            const respStr = full
+              ? JSON.stringify(hasTarget ? { ok: true, mode: "full_run", pipeline: wfName(), rowsExtracted: 1000, rowsOut: 42, rowsLoaded: 42, loadedTable: "etl_output" } : { ok: true, mode: "full_run", pipeline: wfName(), rowsExtracted: 1000, rowsOut: 42, cols, rows: [sample] }, null, 2)
+              : JSON.stringify({ ok: true, mode: "transform_only", pipeline: wfName(), cols, rows: [sample], rowsIn: 1, rowsOut: 1 }, null, 2);
+            const codeBox: React.CSSProperties = { fontFamily: "var(--mono)", fontSize: 11, background: "var(--panel-2)", padding: "10px 12px", borderRadius: 8, overflowX: "auto", margin: 0, lineHeight: 1.5, whiteSpace: "pre" };
+            const label = (t: string) => <div className="k" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", margin: "10px 0 4px" }}>{t}</div>;
+            return (
+              <div>
+                <div className="note" style={{ color: "var(--good)", marginBottom: 6 }}>✓ Deployed — {full ? (hasTarget ? "full run: extract → transform → load, server-side." : "full run: extract → transform, returns rows.") : "transform-only: POST rows, get rows back."} Your pipeline is now a live API.</div>
+
+                {label("① API key — copy now, shown only once")}
+                <div className="row" style={{ gap: 6 }}><code style={{ flex: 1, ...codeBox, whiteSpace: "nowrap", color: "var(--warn)" }}>{deploy.key}</code><button className="btn ghost sm" onClick={() => { navigator.clipboard?.writeText(deploy.key!); toast("Key copied", "success"); }}>copy</button></div>
+
+                {label("② How to connect")}
+                <div style={codeBox}>{`POST   ${url}\nAuth   Authorization: Bearer <your-key>\nType   application/json`}</div>
+
+                {label("③ Input — what to send")}
+                {full ? (
+                  <>
+                    <div style={codeBox}>{`# No body needed — just call with your key.\n# The server extracts from your source DB, transforms,\n# and ${hasTarget ? "loads into your warehouse table." : "returns the rows."}\n\n# Optional: override the source SELECT for this run\n{ "query": "SELECT * FROM orders WHERE created_at > '2026-01-01'" }`}</div>
+                    <div className="note" style={{ marginTop: 4, lineHeight: 1.5 }}>No data goes over the wire — your source & target URLs are stored <b>encrypted</b> with your pipeline and used server-side.</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={codeBox}>{`{
+  "data": [        // an array of row objects (≤ 5000)
+    {
+${cols.map((c) => `      ${JSON.stringify(c)}: ${JSON.stringify(sample[c])}`).join(",\n")}
+    }
+  ]
+}`}</div>
+                    <div className="note" style={{ marginTop: 4, lineHeight: 1.5 }}>Each row is a JSON object. The fields above are the columns this pipeline expects. Extra fields are ignored; missing ones become null.</div>
+                  </>
+                )}
+
+                {label("④ Example call")}
+                <div className="row" style={{ gap: 4, marginBottom: 6 }}>
+                  {(["curl", "js", "python"] as const).map((l) => <button key={l} className={`btn sm ${apiLang === l ? "" : "ghost"}`} onClick={() => setApiLang(l)}>{l === "js" ? "JavaScript" : l === "python" ? "Python" : "cURL"}</button>)}
+                  <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => { navigator.clipboard?.writeText(snippet); toast("Copied", "success"); }}>copy</button>
+                </div>
+                <pre style={codeBox}>{snippet}</pre>
+
+                {label("⑤ Response")}
+                <pre style={codeBox}>{respStr}</pre>
+
+                <div className="note" style={{ marginTop: 10, lineHeight: 1.5 }}><b>Limits:</b> ≤5000 rows/request, 60s, 200 calls/day. For bigger jobs use <b>⤓ Python</b>. Revoke or re-issue the key in <b>Workroom → Channels</b>. On a deployed app the host is your Vercel domain (not localhost).</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Runs console */}
+      {runs.length > 0 && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-h" onClick={() => setShowRuns((s) => !s)} style={{ cursor: "pointer" }}><span className="t">🗂 Runs</span><span className="mono r">{runs.length} logged · {showRuns ? "▾ hide" : "▸ show"}</span></div>
+          {showRuns && <div className="card-b" style={{ overflowX: "auto" }}>
+            <table className="dtable" style={{ width: "100%", fontSize: 12 }}><tbody>
+              <tr><th style={{ textAlign: "left" }}>when</th><th style={{ textAlign: "left" }}>pipeline</th><th style={{ textAlign: "left" }}>mode</th><th style={{ textAlign: "left" }}>target</th><th style={{ textAlign: "right" }}>out</th><th style={{ textAlign: "right" }}>loaded</th><th style={{ textAlign: "left" }}>status</th></tr>
+              {runs.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{r.ts ? new Date(r.ts).toLocaleString() : "—"}</td>
+                  <td>{r.name || "—"}</td>
+                  <td style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{r.mode || "—"}</td>
+                  <td style={{ fontSize: 11.5 }}>{r.target || "—"}</td>
+                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{r.rowsOut}</td>
+                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{r.rowsLoaded}</td>
+                  <td style={{ color: r.status === "ok" ? "var(--good)" : "var(--crit)", fontWeight: 600 }}>{r.status || "—"}</td>
+                </tr>
+              ))}
+            </tbody></table>
+          </div>}
+        </div>
+      )}
+
+      {/* Data quality · profile · lineage */}
+      {finalTable && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-h" onClick={() => setShowQuality((s) => !s)} style={{ cursor: "pointer" }}><span className="t">🔎 Quality · Profile · Lineage</span><span className="mono r">{finalTable.rows.length} rows · {showQuality ? "▾ hide" : "▸ show"}</span></div>
+          {showQuality && (() => {
+            const ops = opNodes.map((n) => n.data.op!).filter(Boolean);
+            const prof = profile(finalTable);
+            const lin = lineage(primary?.cols || [], ops, secondary?.cols || []);
+            const ev = rules.length ? evaluate(finalTable, rules) : null;
+            const rid = () => Math.random().toString(36).slice(2, 9);
+            const box: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" };
+            return (
+              <div className="card-b">
+                <label className="fld">Column profile — types, nulls, distinct, stats</label>
+                <div style={box}>
+                  <table className="dtable" style={{ width: "100%", fontSize: 11.5 }}><tbody>
+                    <tr><th style={{ textAlign: "left" }}>column</th><th>type</th><th>nulls</th><th>distinct</th><th>min</th><th>max</th><th>mean</th><th style={{ textAlign: "left" }}>top values</th></tr>
+                    {prof.map((c) => (
+                      <tr key={c.name}>
+                        <td style={{ fontWeight: 600 }}>{c.name}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)", color: "var(--accent)" }}>{c.type}</td>
+                        <td style={{ textAlign: "center", color: c.nulls ? "var(--warn)" : "var(--muted)" }}>{c.nulls}</td>
+                        <td style={{ textAlign: "center" }}>{c.distinct}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.min ?? "—"}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.max ?? "—"}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.mean != null ? Math.round(c.mean * 100) / 100 : "—"}</td>
+                        <td style={{ fontSize: 10.5, color: "var(--muted)" }}>{c.top.slice(0, 3).map((t) => `${t.v}(${t.count})`).join(", ")}</td>
+                      </tr>
+                    ))}
+                  </tbody></table>
+                </div>
+
+                <label className="fld" style={{ marginTop: 14 }}>Validation rules — expectations with an action on failure</label>
+                <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <button className="btn ghost sm" onClick={() => setRules((rs) => [...rs, { id: rid(), col: finalTable.cols[0], type: "not_null", action: "reject" }])}>+ Add rule</button>
+                  {rules.length > 0 && <button className="btn ghost sm" onClick={() => setRules([])}>clear</button>}
+                  {ev && <span className="note">clean <b style={{ color: "var(--good)" }}>{ev.clean.rows.length}</b> · rejected <b style={{ color: "var(--crit)" }}>{ev.rejects.length}</b> · dropped {ev.dropped} · fixed {ev.fixedCells}</span>}
+                </div>
+                {rules.map((r) => (
+                  <div key={r.id} className="row" style={{ gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <select value={r.col} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, col: e.target.value } : x))} style={{ width: 130 }}>{finalTable.cols.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+                    <select value={r.type} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, type: e.target.value as RuleType } : x))} style={{ width: 130 }}>{(Object.keys(RULE_META) as RuleType[]).map((t) => <option key={t} value={t}>{RULE_META[t].label}</option>)}</select>
+                    {r.type === "in_range" && <><input placeholder="min" value={r.min ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, min: e.target.value } : x))} style={{ width: 66 }} /><input placeholder="max" value={r.max ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, max: e.target.value } : x))} style={{ width: 66 }} /></>}
+                    {r.type === "regex" && <input placeholder="pattern" value={r.pattern ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, pattern: e.target.value } : x))} style={{ width: 150 }} />}
+                    {r.type === "in_set" && <input placeholder="a, b, c" value={r.set ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, set: e.target.value } : x))} style={{ width: 150 }} />}
+                    <select value={r.action} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, action: e.target.value as RuleAction } : x))} style={{ width: 120 }}>{(Object.keys(ACTION_META) as RuleAction[]).map((a) => <option key={a} value={a}>{ACTION_META[a].label}</option>)}</select>
+                    {ev && (() => { const rep = ev.report.find((x) => x.id === r.id); return rep ? <span className="note" style={{ color: rep.ok ? "var(--good)" : "var(--warn)" }}>{rep.ok ? "✓ pass" : `✗ ${rep.fails} fail`}</span> : null; })()}
+                    <button onClick={() => setRules((rs) => rs.filter((x) => x.id !== r.id))} style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 15, cursor: "pointer" }}>×</button>
+                  </div>
+                ))}
+                {rules.length === 0 && <div className="note">No rules — add expectations like <b>not-null</b>, <b>in-range</b>, or <b>unique</b>, and pick an action (reject / drop / fix / warn) on failure.</div>}
+
+                <label className="fld" style={{ marginTop: 14 }}>Column lineage — where each output column came from</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {lin.map((l) => (
+                    <div key={l.col} style={{ fontSize: 12, fontFamily: "var(--mono)" }}><span style={{ color: "var(--accent)", fontWeight: 600 }}>{l.col}</span> <span style={{ color: "var(--faint)" }}>←</span> <span style={{ color: "var(--muted)" }}>{l.from.length ? l.from.join(", ") : "constant / new"}</span></div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* mode selector */}
       <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -532,7 +930,7 @@ function Inner() {
             <button onClick={runAll} disabled={running || !finalTable} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#06210f", background: running ? "#9fe1cb" : "#3ecf7f", border: "none", borderRadius: 9, padding: "8px 15px", cursor: running || !finalTable ? "default" : "pointer", opacity: !finalTable ? 0.5 : 1 }}>{running ? "● running…" : "▶ Run pipeline"}</button>
           </div>
           <div style={{ height: 480 }} onDrop={onCanvasDrop} onDragOver={onCanvasDragOver}>
-            <ReactFlow nodes={displayNodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, n) => setSelId(n.id)} onPaneClick={() => setSelId(null)} fitView proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ animated: true, style: { stroke: accent, strokeWidth: 2 } }}>
+            <ReactFlow nodes={displayNodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={(_, n) => setSelId(n.id)} onPaneClick={() => setSelId(null)} proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ animated: true, style: { stroke: accent, strokeWidth: 2 } }} zoomOnDoubleClick={false}>
               <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} color="var(--border-strong)" />
               <Controls />
               <MiniMap nodeColor={(n) => (n.data as NData).color} nodeStrokeWidth={2} bgColor="#0e121d" maskColor="rgba(8,11,19,0.72)" style={{ background: "#0e121d", border: "1px solid var(--border)", borderRadius: 8, width: 150, height: 96 }} pannable zoomable />
@@ -544,7 +942,7 @@ function Inner() {
         <div className="card"><div className="card-h"><span className="t">Node details</span>{sel && <button className="btn ghost sm" onClick={removeSel}>Remove</button>}</div>
           <div className="card-b" style={{ maxHeight: 460, overflowY: "auto" }}>
             {!sel && <div className="note">Add a node from the palette, then click it to configure.</div>}
-            {sel && <NodeConfig node={sel} cols={cols} bCols={secondary?.cols || []} patchSel={patchSel} patchOp={patchOp} onUpload={() => fileRef.current?.click()} runLoad={runLoad} runSourceQuery={runSourceQuery} loadJsonSource={loadJsonSource} runExternal={runExternal} runSqlNode={runSqlNode} openDash={() => setDashOpen(true)} />}
+            {sel && <NodeConfig node={sel} cols={cols} bCols={secondary?.cols || []} patchSel={patchSel} patchOp={patchOp} onUpload={() => fileRef.current?.click()} runLoad={runLoad} runSourceQuery={runSourceQuery} runRestSource={runRestSource} loadJsonSource={loadJsonSource} runExternal={runExternal} runSqlNode={runSqlNode} openDash={() => setDashOpen(true)} />}
           </div>
         </div>
       </div>
@@ -552,15 +950,15 @@ function Inner() {
 
       {/* always-on output */}
       <div className="card" style={{ marginTop: 12 }}>
-        <div className="card-h"><span className="t">Output — live result</span><span className="mono r">{metrics ? `ran · ${metrics.inn}→${metrics.out} rows · ${metrics.ms}ms${metrics.batches ? ` · ${metrics.batches} micro-batches · ${metrics.thr}/s` : ""}` : finalTable ? `${finalTable.rows.length} rows · ${finalTable.cols.length} cols` : "no source yet"}{runMsg ? ` · ${runMsg}` : ""}</span></div>
+        <div className="card-h"><span className="t">Output — live result{sel ? ` (${sel.data.label})` : ""}</span><span className="mono r">{metrics ? `ran · ${metrics.inn}→${metrics.out} rows · ${metrics.ms}ms${metrics.batches ? ` · ${metrics.batches} micro-batches · ${metrics.thr}/s` : ""}` : activeTable ? `${activeTable.rows.length} rows · ${activeTable.cols.length} cols` : "no source yet"}{runMsg ? ` · ${runMsg}` : ""}</span></div>
         <div className="card-b" style={{ maxHeight: 260, overflow: "auto" }}>
-          {!finalTable ? <div className="note">Add a source node and upload / pick data to see the output.</div> : (
-            sel?.data.kind === "analytics" ? <AnalyticsView table={finalTable} /> : (
+          {!activeTable ? <div className="note">Add a source node and upload / pick data to see the output.</div> : (
+            sel?.data.kind === "analytics" ? <AnalyticsView table={activeTable} /> : (
               <>
-                {sel?.data.kind === "load" && <div className="note" style={{ marginBottom: 8 }}>→ Table being loaded into <b>{sel.data.target}</b> · {finalTable.rows.length} rows × {finalTable.cols.length} cols</div>}
+                {sel?.data.kind === "load" && <div className="note" style={{ marginBottom: 8 }}>→ Table being loaded into <b>{sel.data.target}</b> · {activeTable.rows.length} rows × {activeTable.cols.length} cols</div>}
                 <div style={{ overflowX: "auto" }}><table className="dtable"><tbody>
-                  <tr>{finalTable.cols.map((c) => <th key={c}>{c}</th>)}</tr>
-                  {finalTable.rows.slice(0, 8).map((r, i) => <tr key={i}>{finalTable.cols.map((c) => <td key={c}>{r[c] == null ? "—" : String(r[c])}</td>)}</tr>)}
+                  <tr>{activeTable.cols.map((c) => <th key={c}>{c}</th>)}</tr>
+                  {activeTable.rows.slice(0, 8).map((r, i) => <tr key={i}>{activeTable.cols.map((c) => <td key={c}>{r[c] == null ? "—" : String(r[c])}</td>)}</tr>)}
                 </tbody></table></div>
               </>
             )
@@ -568,19 +966,39 @@ function Inner() {
         </div>
       </div>
 
+      {/* Data Visualization Explorer */}
+      {finalTable && (
+        <details className="collapsible" style={{ marginTop: 12 }} open>
+          <summary style={{ cursor: "pointer", fontWeight: "bold", padding: "10px 0" }}>Data Visualization Explorer</summary>
+          <div style={{ marginTop: 8 }}>
+            <DataVizExplorer
+              sourceTable={primary || finalTable}
+              finalTable={finalTable}
+              ops={opNodes.map((n) => n.data.op!).filter(Boolean)}
+              rules={[]}
+            />
+          </div>
+        </details>
+      )}
+
       {/* Power BI-style interactive dashboard modal */}
       {dashOpen && finalTable && <DashboardModal table={finalTable} title={sel?.data.kind === "analytics" ? sel.data.label : "Pipeline dashboard"} onClose={() => setDashOpen(false)} />}
 
       {/* Animated node-by-node, row-by-row pipeline walkthrough */}
       {playOpen && finalTable && primary && <PlayModal raw={primary} nodes={playNodes} final={finalTable} onClose={() => setPlayOpen(false)} />}
+
+      {infoNodeId && (() => {
+        const infoNode = nodes.find((n) => n.id === infoNodeId);
+        return infoNode ? <NodeInfoModal node={infoNode} onClose={() => setInfoNodeId(null)} /> : null;
+      })()}
     </div>
   );
 }
 
 // ── per-node config editor ──
-function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, runSourceQuery, loadJsonSource, runExternal, runSqlNode, openDash }: { node: FNode; cols: string[]; bCols: string[]; patchSel: (p: Partial<NData>) => void; patchOp: (p: Partial<EtlOp>) => void; onUpload: () => void; runLoad: () => void; runSourceQuery: () => void; loadJsonSource: () => void; runExternal: () => void; runSqlNode: () => void; openDash: () => void }) {
+function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, runSourceQuery, runRestSource, loadJsonSource, runExternal, runSqlNode, openDash }: { node: FNode; cols: string[]; bCols: string[]; patchSel: (p: Partial<NData>) => void; patchOp: (p: Partial<EtlOp>) => void; onUpload: () => void; runLoad: () => void; runSourceQuery: () => void; runRestSource: () => void; loadJsonSource: () => void; runExternal: () => void; runSqlNode: () => void; openDash: () => void }) {
   const d = node.data; const c = d.color;
-  const isExternalDb = d.kind === "load" && ["mysql", "postgres", "snowflake", "bigquery"].includes(d.target || "");
+  const isExternalDb = d.kind === "load" && ["mysql", "postgres", "snowflake", "bigquery", "mongodb", "redshift"].includes(d.target || "");
   const nameField = (
     <div className="insp-field"><div className="k">Node name</div><input type="text" value={d.label} onChange={(e) => patchSel({ label: e.target.value })} /></div>
   );
@@ -595,22 +1013,68 @@ function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, r
       {nameField}
 
       {d.kind === "source" && (
-        <>
-          {d.srcType === "csv" && <><div className="note" style={{ marginBottom: 8 }}>{d.srcName ? `Loaded: ${d.srcName}` : "Pick a sample or upload a file."}</div>
+        <div className="fade-in">
+          {extractionConfig[d.srcType!] && (
+            <div style={{ padding: "12px", background: "var(--panel)", borderRadius: "10px", marginBottom: "16px", border: "1px solid var(--border)", boxShadow: "var(--shadow-sm)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                <b style={{ fontSize: 14 }}>{extractionConfig[d.srcType!].name} Setup</b>
+                <span className={`badge ${extractionConfig[d.srcType!].difficulty === "Beginner" ? "good" : extractionConfig[d.srcType!].difficulty === "Intermediate" ? "accent" : "warn"}`}>{extractionConfig[d.srcType!].difficulty}</span>
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", fontSize: 11, color: "var(--faint)" }}>
+                <span>🗂 {extractionConfig[d.srcType!].category}</span>
+                {extractionConfig[d.srcType!].apiKeyRequired && <span title="API Key Required">🔑 API Key</span>}
+                {extractionConfig[d.srcType!].oauthRequired && <span title="OAuth Required">🛡️ OAuth</span>}
+              </div>
+            </div>
+          )}
+
+          {/* Dynamic Fields */}
+          {extractionConfig[d.srcType!]?.fields.map((field) => {
+            const val = String((d as unknown as Record<string, unknown>)[field.id] || "");
+            const isValid = field.required && val.length > 0;
+            return (
+              <div key={field.id} className="insp-field group-section">
+                <div className="k" title={field.tooltip} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>{field.label} {field.required && <span style={{ color: "var(--warn)" }}>*</span>} {field.tooltip && <span style={{ cursor: "help", color: "var(--muted)" }}>ⓘ</span>}</span>
+                  {isValid && <span style={{ color: "var(--good)" }}>✓</span>}
+                </div>
+                {field.type === "textarea" ? (
+                  <textarea rows={3} value={val} placeholder={field.placeholder} onChange={(e) => patchSel({ [field.id]: e.target.value })} />
+                ) : field.type === "select" ? (
+                  <select value={val} onChange={(e) => patchSel({ [field.id]: e.target.value })}>
+                    <option value="" disabled>Select...</option>
+                    {field.options?.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                ) : (
+                  <input type={field.type} value={val} placeholder={field.placeholder} onChange={(e) => patchSel({ [field.id]: e.target.value })} />
+                )}
+              </div>
+            );
+          })}
+
+          {/* Preserve Existing Actions */}
+          {d.srcType === "csv" && <>
+            <div className="note" style={{ marginBottom: 8, marginTop: 8 }}>{d.srcName ? `Loaded: ${d.srcName}` : "Pick a sample or upload a file."}</div>
             <div className="insp-field"><div className="k">Sample dataset</div><select onChange={(e) => { const s = sampleSources().find((x) => x.key === e.target.value)!; patchSel({ table: parseRecords(s.csv), srcName: s.label, label: s.label.slice(0, 14) }); }} defaultValue="">{[<option key="" value="" disabled>choose…</option>, ...sampleSources().map((s) => <option key={s.key} value={s.key}>{s.label}</option>)]}</select></div>
-            <button className="btn sm" onClick={onUpload}>⬆ Upload CSV / Excel / JSON</button></>}
+            <button className="btn sm block" onClick={onUpload}>⬆ Upload CSV / Excel / JSON</button>
+          </>}
           {(d.srcType === "mysql" || d.srcType === "postgres") && <>
-            <div className="insp-field"><div className="k">Connection URL</div><input type="text" value={d.dbUrl ?? ""} placeholder={d.srcType === "postgres" ? "postgres://user:pass@host:5432/db" : "mysql://user:pass@host:4000/db"} onChange={(e) => patchSel({ dbUrl: e.target.value })} /></div>
             <div className="insp-field"><div className="k">Query</div><textarea rows={2} value={d.dbQuery ?? "SELECT * FROM orders LIMIT 500;"} onChange={(e) => patchSel({ dbQuery: e.target.value })} /></div>
-            <button className="btn sm" onClick={runSourceQuery}>▶ Run query &amp; load</button>
+            <button className="btn sm block" onClick={runSourceQuery}>▶ Run query &amp; load</button>
             <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🔒</span><span>Runs a read-only SELECT against your <b>{d.srcType === "postgres" ? "Postgres" : "MySQL / TiDB"}</b> (private hosts blocked, capped at 2000 rows).</span></div>
+          </>}
+          {d.srcType === "rest" && <>
+            <div className="insp-field"><div className="k">API URL (GET, returns JSON)</div><input type="text" value={d.restUrl ?? ""} placeholder="https://api.example.com/v1/orders" onChange={(e) => patchSel({ restUrl: e.target.value })} /></div>
+            <div className="insp-field"><div className="k">JSON path (optional)</div><input type="text" value={d.restPath ?? ""} placeholder="data.items" onChange={(e) => patchSel({ restPath: e.target.value })} /></div>
+            <button className="btn sm" onClick={runRestSource}>▶ Fetch &amp; load</button>
+            <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🌐</span><span>GETs a public JSON API and flattens it to rows (array, or <code>data</code>/<code>rows</code>/<code>results</code>, or a dot-path). Private hosts blocked, capped at 5000 rows.</span></div>
           </>}
           {d.srcType === "json" && <>
             <div className="insp-field"><div className="k">JSON array of objects</div><textarea rows={5} value={d.jsonText ?? '[\n  {"id": 1, "region": "US", "amount": 120}\n]'} onChange={(e) => patchSel({ jsonText: e.target.value })} /></div>
-            <button className="btn sm" onClick={loadJsonSource}>Load JSON</button>
+            <button className="btn sm block" onClick={loadJsonSource}>Load JSON</button>
           </>}
           {d.srcType === "kafka" && <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">📡</span><span>Streaming source — micro-batches over your rows. Attach a sample table to simulate the stream.</span></div>}
-        </>
+        </div>
       )}
 
       {d.kind === "op" && d.op && <OpConfig op={d.op} cols={cols} bCols={bCols} patchOp={patchOp} colSel={colSel} />}
@@ -628,11 +1092,32 @@ function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, r
           {isExternalDb && (() => {
             const coming = d.target === "snowflake" || d.target === "bigquery";
             return <>
-              <div className="insp-field"><div className="k">Connection URL{coming ? ` (${d.target}: coming; use mysql:// or postgres://)` : ""}</div><input type="text" value={d.extUrl ?? ""} placeholder={d.target === "postgres" ? "postgres://user:pass@host:5432/db" : "mysql://user:pass@host:4000/db"} onChange={(e) => patchSel({ extUrl: e.target.value })} /></div>
-              <div className="insp-field"><div className="k">Target table</div><input type="text" value={d.extTable ?? "etl_output"} onChange={(e) => patchSel({ extTable: e.target.value })} /></div>
-              <div className="insp-field"><div className="k">Mode</div><select value={d.extMode ?? "append"} onChange={(e) => patchSel({ extMode: e.target.value })}><option value="append">append</option><option value="upsert">upsert (on first column)</option></select></div>
-              <button className="btn sm" onClick={runExternal}>▶ Load to my DB</button>
-              <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">{coming ? "🔒" : "🛢"}</span><span>{coming ? <><b>{d.target}</b> connector lands next — <b>MySQL / TiDB</b> and <b>Postgres</b> load for real now.</> : <>Loads into your <b>{d.target === "postgres" ? "Postgres" : "MySQL / TiDB"}</b> — creates the table if missing, warns on schema drift, {d.extMode === "upsert" ? "upserts on the first column" : "appends rows"}.</>}</span></div>
+              {coming ? (
+                <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🔒</span><span><b>{d.target}</b> connector lands next.</span></div>
+              ) : (
+                <>
+                  <div className="insp-field"><div className="k">Host / URI</div><input type="text" value={d.extHost ?? ""} placeholder={d.target === "mongodb" ? "mongodb+srv://..." : "db.example.com"} onChange={(e) => patchSel({ extHost: e.target.value })} /></div>
+                  {d.target !== "mongodb" && <div className="insp-field"><div className="k">Port</div><input type="text" value={d.extPort ?? ""} placeholder={d.target === "postgres" || d.target === "redshift" ? "5432" : "3306"} onChange={(e) => patchSel({ extPort: e.target.value })} /></div>}
+                  <div className="insp-field"><div className="k">Database</div><input type="text" value={d.extDb ?? ""} placeholder="production_db" onChange={(e) => patchSel({ extDb: e.target.value })} /></div>
+                  {d.target !== "mongodb" && <div className="insp-field"><div className="k">Username</div><input type="text" value={d.extUser ?? ""} onChange={(e) => patchSel({ extUser: e.target.value })} /></div>}
+                  {d.target !== "mongodb" && <div className="insp-field"><div className="k">Password</div><input type="password" value={d.extPass ?? ""} onChange={(e) => patchSel({ extPass: e.target.value })} /></div>}
+                  
+                  <div className="insp-field"><div className="k">{d.target === "mongodb" ? "Target collection" : "Target table"}</div><input type="text" value={d.extTable ?? "etl_output"} onChange={(e) => patchSel({ extTable: e.target.value })} /></div>
+                  <div className="insp-field"><div className="k">Mode</div><select value={d.extMode ?? "append"} onChange={(e) => patchSel({ extMode: e.target.value })}><option value="append">append</option><option value="upsert">upsert (on first column)</option></select></div>
+                  <button className="btn sm" onClick={() => {
+                    let url = "";
+                    if (d.target === "mongodb") {
+                      url = d.extHost || "";
+                      if (!url.includes("://")) url = "mongodb+srv://" + url;
+                    } else {
+                      url = `${d.target}://${d.extUser || ""}:${d.extPass || ""}@${d.extHost || ""}:${d.extPort || (d.target==="mysql" ? "3306" : "5432")}/${d.extDb || ""}`;
+                    }
+                    patchSel({ extUrl: url });
+                    setTimeout(runExternal, 0);
+                  }}>▶ Load to my DB</button>
+                  <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🛢</span><span>Loads into your <b>{d.target}</b> — creates the {d.target === "mongodb" ? "collection" : "table"} if missing, {d.extMode === "upsert" ? "upserts on the first column" : "appends rows"}.</span></div>
+                </>
+              )}
             </>;
           })()}
         </>
@@ -695,13 +1180,13 @@ function OpConfig({ op, cols, bCols, patchOp, colSel }: { op: EtlOp; cols: strin
         <div className="insp-field"><div className="k">New column name</div><input type="text" value={o.name ?? ""} onChange={(e) => patchOp({ name: e.target.value })} /></div>
         <div className="insp-field"><div className="k">Number of buckets</div><input type="text" value={o.value ?? ""} onChange={(e) => patchOp({ value: e.target.value })} /></div>
       </>}
-      {o.type === "join" && <>
+      {["join", "lookup", "merge"].includes(o.type) && <>
         {!bCols.length && <div className="warnbar" style={{ marginBottom: 8 }}>Add a <b>second source</b> node (Source B) to join against.</div>}
-        <div className="insp-field"><div className="k">Join type</div><select value={o.joinType} onChange={(e) => patchOp({ joinType: e.target.value })}><option value="inner">inner</option><option value="left">left</option><option value="right">right</option></select></div>
+        {o.type === "join" && <div className="insp-field"><div className="k">Join type</div><select value={o.joinType} onChange={(e) => patchOp({ joinType: e.target.value })}><option value="inner">inner</option><option value="left">left</option><option value="right">right</option></select></div>}
         <div className="insp-field"><div className="k">Left key (this table)</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
         <div className="insp-field"><div className="k">Right key (Source B)</div>{colSel(o.rightKey, (v) => patchOp({ rightKey: v }), bCols)}</div>
       </>}
-      {o.type === "union" && <>
+      {["union", "append"].includes(o.type) && <>
         {!bCols.length && <div className="warnbar" style={{ marginBottom: 8 }}>Add a <b>second source</b> node (Source B) to union with.</div>}
         <div className="insp-field"><div className="k">Mode</div><select value={o.mode} onChange={(e) => patchOp({ mode: e.target.value })}><option value="all">union all (keep dupes)</option><option value="distinct">distinct</option></select></div>
       </>}
@@ -731,6 +1216,19 @@ function OpConfig({ op, cols, bCols, patchOp, colSel }: { op: EtlOp; cols: strin
         <div className="insp-field"><div className="k">Date column</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
         <div className="insp-field"><div className="k">Extract</div><select value={o.fn} onChange={(e) => patchOp({ fn: e.target.value })}><option value="year">year</option><option value="month">month</option><option value="day">day</option><option value="weekday">weekday</option><option value="iso">ISO date</option><option value="days_since">days since</option></select></div>
         <div className="insp-field"><div className="k">Output column</div><input type="text" value={o.name ?? ""} onChange={(e) => patchOp({ name: e.target.value })} /></div>
+      </>}
+      {o.type === "scd2" && <>
+        <div className="insp-field"><div className="k">Business Key</div>{colSel(o.businessKey || o.col, (v) => patchOp({ businessKey: v, col: v }))}</div>
+        <div className="note" style={{ marginTop: 6, fontSize: 11 }}>Adds effective_start, effective_end, and is_current tracking fields automatically.</div>
+      </>}
+      {o.type === "fuzzydedupe" && <>
+        <div className="insp-field"><div className="k">Column to Deduplicate</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
+        <div className="insp-field"><div className="k">Similarity Threshold ({o.threshold ?? 0.8})</div><input type="range" min="0.5" max="1.0" step="0.05" value={o.threshold ?? 0.8} onChange={(e) => patchOp({ threshold: parseFloat(e.target.value) })} style={{ width: "100%" }} /></div>
+      </>}
+      {o.type === "quality" && <>
+        <div className="insp-field"><div className="k">Column to Validate</div>{colSel(o.qualityCol || o.col, (v) => patchOp({ qualityCol: v, col: v }))}</div>
+        <div className="insp-field"><div className="k">Validation Rule</div><select value={o.rule || "not_null"} onChange={(e) => patchOp({ rule: e.target.value })}><option value="not_null">Not Null</option><option value="positive">Numeric &gt; 0</option><option value="numeric">Is Numeric</option></select></div>
+        <div className="insp-field"><div className="k">Status Column Name</div><input type="text" value={o.name ?? "_quality_status"} onChange={(e) => patchOp({ name: e.target.value })} /></div>
       </>}
     </>
   );
@@ -969,6 +1467,118 @@ function AnalyticsView({ table }: { table: Table }) {
             <span style={{ width: 56, textAlign: "right", fontSize: 11, fontFamily: "var(--mono)", color: "var(--muted)" }}>{Math.round(v * 100) / 100}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── NodeInfoModal (Detailed Reference Panel) ──
+function NodeInfoModal({ node, onClose }: { node: FNode; onClose: () => void }) {
+  const d = node.data;
+  const c = d.color;
+  let def = "", purp = "", adv: string[] = [], dis: string[] = [], speed = "", mem = "", scale = "", cost = "", py = "", sp = "";
+
+  if (d.op && OP_INFO[d.op.type]) {
+    const i = OP_INFO[d.op.type];
+    def = i.definition; purp = i.purpose; adv = i.advantages; dis = i.disadvantages;
+    speed = i.speed; mem = i.memory; scale = i.scalability; cost = i.cost; py = i.pandas; sp = i.spark;
+  } else if (d.kind === "source") {
+    let key: "sample" | "upload" | "json" | "db" | "" = "";
+    if (["csv", "excel"].includes(d.srcType || "")) key = "upload";
+    if (["postgres", "mysql"].includes(d.srcType || "")) key = "db";
+    if (d.srcType === "json") key = "json";
+    if (key && SRC_INFO[key]) {
+      const i = SRC_INFO[key];
+      def = i.definition; adv = i.advantages; dis = i.disadvantages; py = i.code;
+    } else def = "Source node configuration.";
+  } else if (d.kind === "load") {
+    const key = d.target === "platform" ? "platform" : "external";
+    const i = LOAD_INFO[key];
+    if (i) { def = i.definition; adv = i.advantages; dis = i.disadvantages; py = i.code; }
+  }
+
+  const Section = ({ title, icon, children }: { title: string, icon: string, children: React.ReactNode }) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: ".06em", color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>
+        <span style={{ fontSize: 13 }}>{icon}</span> {title}
+      </div>
+      <div style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text)" }}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(4,6,12,.78)", backdropFilter: "blur(4px)", display: "flex", justifyContent: "flex-end" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: 420, height: "100%", background: "#0a0c10", borderLeft: "1px solid var(--border)", boxShadow: "-10px 0 30px rgba(0,0,0,.5)", display: "flex", flexDirection: "column" }}>
+        
+        {/* Header */}
+        <div style={{ padding: "20px 24px", display: "flex", alignItems: "flex-start", gap: 16, borderBottom: "1px solid var(--border)" }}>
+          <span style={{ width: 44, height: 44, borderRadius: 12, display: "grid", placeItems: "center", fontSize: 22, background: `color-mix(in srgb, ${c} 15%, transparent)`, color: c }}>{d.icon}</span>
+          <div style={{ flex: 1 }}>
+            <h2 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 4px", color: "#fff" }}>{d.op ? OP_META[d.op.type].label : d.label}</h2>
+            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase", color: c }}>{d.cat} Node</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 20 }}>×</button>
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px" }}>
+          {def && <Section title="1. Definition" icon="💡">{def}</Section>}
+          {purp && <Section title="2. Purpose" icon="🎯">{purp}</Section>}
+
+          {speed && (
+            <Section title="3. Performance Metrics" icon="⏱">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[
+                  { label: "Speed", value: speed, icon: "⚡" },
+                  { label: "Memory", value: mem, icon: "💾" },
+                  { label: "Scalability", value: scale, icon: "📈" },
+                  { label: "Cost", value: cost, icon: "💰" }
+                ].map(m => (
+                  <div key={m.label} style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.06)", borderRadius: 8 }}>
+                    <span style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}><span>{m.icon}</span> {m.label}</span>
+                    <strong style={{ color: "#fff" }}>{m.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {(py || sp) && (
+            <Section title="4. Examples" icon="💻">
+              {py && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>PYTHON / PANDAS</div>
+                  <pre style={{ background: "#000", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 12, color: "#4ade80", overflowX: "auto" }}>{py}</pre>
+                </div>
+              )}
+              {sp && (
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>APACHE SPARK</div>
+                  <pre style={{ background: "#000", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)", fontSize: 12, color: "#facc15", overflowX: "auto" }}>{sp}</pre>
+                </div>
+              )}
+            </Section>
+          )}
+
+          {(adv.length > 0 || dis.length > 0) && (
+            <Section title="5. Pros & Cons" icon="⚖">
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div style={{ background: "rgba(62,207,127,.05)", border: "1px solid rgba(62,207,127,.15)", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ color: "var(--good)", fontSize: 10, fontWeight: 700, marginBottom: 8, textTransform: "uppercase" }}>Advantages</div>
+                  <ul style={{ margin: 0, paddingLeft: 16, color: "var(--text)", fontSize: 12 }}>
+                    {adv.map(a => <li key={a} style={{ marginBottom: 4 }}>{a}</li>)}
+                  </ul>
+                </div>
+                <div style={{ background: "rgba(239,68,68,.05)", border: "1px solid rgba(239,68,68,.15)", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ color: "var(--crit)", fontSize: 10, fontWeight: 700, marginBottom: 8, textTransform: "uppercase" }}>Disadvantages</div>
+                  <ul style={{ margin: 0, paddingLeft: 16, color: "var(--text)", fontSize: 12 }}>
+                    {dis.map(a => <li key={a} style={{ marginBottom: 4 }}>{a}</li>)}
+                  </ul>
+                </div>
+              </div>
+            </Section>
+          )}
+        </div>
       </div>
     </div>
   );

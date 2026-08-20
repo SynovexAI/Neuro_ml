@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import AddKeyBanner from "@/components/AddKeyBanner";
+import TrackPageView from "@/components/TrackPageView";
+import StorageAlertBanner from "@/components/StorageAlertBanner";
 import { useEffect, useState } from "react";
 import { logoutAction } from "@/app/actions/auth";
 import Toaster from "./Toaster";
@@ -11,7 +13,7 @@ import ThemeToggle from "./ThemeToggle";
 type Role = "admin" | "student";
 export type ShellUser = { name?: string | null; email: string; role: Role };
 
-type Zone = { id: string; label: string; desc: string; icon: string; home: string; adminOnly?: boolean; items: { href: string; label: string }[] };
+type Zone = { id: string; label: string; desc: string; icon: string; home: string; adminOnly?: boolean; items: { href: string; label: string; adminOnly?: boolean; studentOnly?: boolean }[] };
 
 const ZONES: Zone[] = [
   {
@@ -21,8 +23,8 @@ const ZONES: Zone[] = [
       { href: "/compose", label: "Compose" },
       { href: "/kb", label: "Knowledge bases" },
       { href: "/studio/mcp", label: "MCP servers" },
-      { href: "/admin/providers", label: "Providers & models" },
-      { href: "/settings/keys", label: "My API keys" },
+      { href: "/admin/providers", label: "Providers & models", adminOnly: true },
+      { href: "/settings/keys", label: "My API keys", studentOnly: true },
       { href: "/projects", label: "My Projects" },
       { href: "/templates", label: "Templates" },
     ],
@@ -53,6 +55,7 @@ const ZONES: Zone[] = [
       { href: "/admin/usage", label: "Usage & Monitoring" },
       { href: "/admin/agents", label: "Agent analytics" },
       { href: "/admin/analytics", label: "Analytics" },
+      { href: "/admin/audit", label: "Audit log" },
       { href: "/admin/storage", label: "Storage" },
     ],
   },
@@ -73,7 +76,14 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
 
   const [focus, setFocus] = useState(false);
   const [menu, setMenu] = useState(false);
-  useEffect(() => { setFocus(localStorage.getItem("awb_focus") === "1"); }, []);
+
+  useEffect(() => {
+    setFocus(localStorage.getItem("awb_focus") === "1");
+    
+    // Cursor glow tracking removed for a cleaner look
+
+  }, []);
+
   const toggleFocus = () => setFocus((f) => { const n = !f; localStorage.setItem("awb_focus", n ? "1" : "0"); return n; });
 
   const zones = ZONES.filter((z) => !z.adminOnly || user.role === "admin");
@@ -81,8 +91,16 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
 
   return (
     <div className={`app${focus ? " focus" : ""}`}>
+
       <aside className="side">
-        <div className="brand"><div className="logo">◆</div><div><b>AI Workbench</b><small>build · not read</small></div></div>
+        <div className="brand">
+          <div className="logo">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 2L22 12L12 22L2 12L12 2Z" fill="currentColor"/>
+            </svg>
+          </div>
+          <div><b>AI Workbench</b><small>BUILD &bull; NOT READ</small></div>
+        </div>
 
         <div className="zone-switch">
           <button className="zone-btn" onClick={() => setMenu((m) => !m)} aria-expanded={menu}>
@@ -104,7 +122,7 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
           </>)}
         </div>
 
-        <nav className="nav">{zone.items.map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
+        <nav className="nav">{zone.items.filter((l) => (!l.adminOnly || user.role === "admin") && (!l.studentOnly || user.role !== "admin")).map((l) => <Link key={l.href} href={l.href} className={on(l.href) ? "on" : ""}>{l.label}</Link>)}</nav>
 
         <div className="side-account">
           <div className="avatar">{initial}</div>
@@ -116,12 +134,15 @@ export default function Shell({ user, title, children }: { user: ShellUser; titl
       <div className="main">
         <header className="top">
           <button className="iconbtn" onClick={toggleFocus} title={focus ? "Show sidebar" : "Focus mode — full-screen view"} aria-label="Toggle focus mode">{focus ? "☰" : "⛶"}</button>
-          <h1>{title}</h1>
+          <div>
+            <p className="eyebrow">Futuristic AI lab</p>
+            <h1>{title}</h1>
+          </div>
           <div className="spacer" />
-          <span className={`badge ${user.role === "admin" ? "accent" : ""}`}>{zone.label}</span>
+          <span className="badge accent">{zone.label}</span>
           <ThemeToggle />
         </header>
-        <div className="work"><AddKeyBanner />{children}</div>
+        <div className="work"><TrackPageView /><AddKeyBanner />{user.role === "admin" && <StorageAlertBanner />}{children}</div>
       </div>
       <Toaster />
     </div>

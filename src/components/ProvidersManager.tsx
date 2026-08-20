@@ -30,7 +30,7 @@ export default function ProvidersManager({ initial, basePath = "/api/admin/provi
   const [baseUrl, setBaseUrl] = useState(CATALOG.groq.baseUrl);
   const [apiKey, setApiKey] = useState("");
   const [models, setModels] = useState<string[]>([]);
-  const [defaultModel, setDefaultModel] = useState("");
+  const [defaultModel, setDefaultModel] = useState(CATALOG.groq?.defaultModels?.[0] || "llama-3.3-70b-versatile");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<Msg>(null);
 
@@ -39,9 +39,9 @@ export default function ProvidersManager({ initial, basePath = "/api/admin/provi
   const [addOpenKey, setAddOpenKey] = useState(0);   // auto-open add-form picker after Load models
   const [editOpenKey, setEditOpenKey] = useState(0); // auto-open edit picker after Load models
 
-  const meta = (key: string) => CATALOG[key] || { label: key, baseUrl: "", free: false, embeddings: false, keyHint: undefined };
+  const meta = (key: string) => CATALOG[key] || { label: key, baseUrl: "", free: false, embeddings: false, keyHint: undefined, defaultModels: [] };
 
-  function pick(p: string) { setProvider(p); setBaseUrl(CATALOG[p].baseUrl); setModels([]); setDefaultModel(""); setMsg(null); }
+  function pick(p: string) { setProvider(p); setBaseUrl(CATALOG[p].baseUrl); setModels([]); setDefaultModel(CATALOG[p]?.defaultModels?.[0] || ""); setMsg(null); }
 
   async function loadModels() {
     setBusy(true); setMsg(null);
@@ -132,8 +132,8 @@ export default function ProvidersManager({ initial, basePath = "/api/admin/provi
           <div className="field"><label className="fld">Base URL</label><input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…/v1" /></div>
           <div className="field"><label className="fld">API key {provider === "ollama" && "(usually blank for local Ollama)"}</label><input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Paste the API key" /></div>
           <div className="row" style={{ margin: "4px 0 12px" }}><button className="btn ghost sm" onClick={loadModels} disabled={busy}>{busy ? "Loading…" : "Load models"}</button><span className="note">Fetches the real model list from the provider</span></div>
-          <div className="field"><label className="fld">Default model {models.length > 0 && <span className="note">· {models.length} available · type to search</span>}</label>
-            <ModelPicker models={models} value={defaultModel} onChange={setDefaultModel} placeholder="Load models, or type a model id" openKey={addOpenKey} />
+          <div className="field"><label className="fld">Default model {(models.length > 0 || cur.defaultModels.length > 0) && <span className="note">· {models.length || cur.defaultModels.length} available · click or type to search</span>}</label>
+            <ModelPicker models={models} presetModels={cur.defaultModels || []} value={defaultModel} onChange={setDefaultModel} placeholder="Select a model, or type a custom model id" openKey={addOpenKey} />
           </div>
           <button className="btn" onClick={save} disabled={busy}>Save provider</button>
         </div>
@@ -165,8 +165,8 @@ export default function ProvidersManager({ initial, basePath = "/api/admin/provi
                     <div className="field"><label className="fld">Base URL</label><input type="text" value={edit.baseUrl} onChange={(e) => patchEdit({ baseUrl: e.target.value })} placeholder="https://…/v1" /></div>
                     <div className="field"><label className="fld">API key</label><input type="password" value={edit.apiKey} onChange={(e) => patchEdit({ apiKey: e.target.value })} placeholder={p.maskedKey ? `current: ${p.maskedKey} — leave blank to keep` : "no key set — paste one"} /><span className="note">Stored AES-256-GCM encrypted; the real key is never sent back to the browser.</span></div>
                     <div className="row" style={{ margin: "4px 0 12px" }}><button className="btn ghost sm" onClick={() => editLoadModels(p)} disabled={edit.busy}>{edit.busy ? "Loading…" : "↻ Load models"}</button><span className="note">Uses the saved key (or the new one above)</span></div>
-                    <div className="field"><label className="fld">Default model {edit.models.length > 0 && <span className="note">· {edit.models.length} available · type to search</span>}</label>
-                      <ModelPicker models={edit.models} value={edit.defaultModel} onChange={(v) => patchEdit({ defaultModel: v })} placeholder="Load models, or type a model id" openKey={editOpenKey} />
+                    <div className="field"><label className="fld">Default model {(edit.models.length > 0 || m.defaultModels.length > 0) && <span className="note">· {edit.models.length || m.defaultModels.length} available · click or type to search</span>}</label>
+                      <ModelPicker models={edit.models} presetModels={m.defaultModels || []} value={edit.defaultModel} onChange={(v) => patchEdit({ defaultModel: v })} placeholder="Select a model, or type a custom model id" openKey={editOpenKey} />
                     </div>
                     <div className="row" style={{ gap: 8 }}>
                       <button className="btn" onClick={() => saveEdit(p)} disabled={edit.busy}>Save changes</button>

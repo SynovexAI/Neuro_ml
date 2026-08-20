@@ -19,7 +19,7 @@ export type StoredFile = { key: string; url: string; size: number; uploadedAt?: 
 export async function putFile(key: string, body: Buffer | Uint8Array, contentType = "application/octet-stream"): Promise<{ key: string; url: string }> {
   if (hasBlob()) {
     const { put } = await import("@vercel/blob");
-    const res = await put(key, body as Buffer, { access: "public", contentType, addRandomSuffix: false });
+    const res = await put(key, body as Buffer, { access: "public", contentType, addRandomSuffix: true, allowOverwrite: true });
     return { key: res.pathname, url: res.url };
   }
   if (r2Configured()) return r2Put(key, body, contentType);

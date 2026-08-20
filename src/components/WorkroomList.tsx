@@ -4,7 +4,23 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { toast, confirmDialog } from "@/lib/toast";
 
-type Agent = { id: string; name: string; model: string; runtime: string; kind: string; toolCount: number; kbCount: number; runs: number; tokens: number; lastUsed: string | null };
+type Agent = { id: string; name: string; model: string; runtime: string; kind: string; toolCount: number; kbCount: number; runs: number; tokens: number; lastUsed: string | null; updatedAt?: string | null; createdAt?: string | null };
+
+function formatRealTime(s: string | null | undefined): string {
+  if (!s) return "";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return "";
+  const dateFormatted = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const timeFormatted = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: true });
+  return `${dateFormatted}, ${timeFormatted}`;
+}
+
+function fullTimestamp(s: string | null | undefined): string {
+  if (!s) return "";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
 
 function ago(s: string | null): string {
   if (!s) return "never used";
@@ -43,22 +59,39 @@ export default function WorkroomList() {
 
   return (
     <div className="card-grid" style={{ marginTop: 18 }}>
-      {agents.map((a) => (
-        <div key={a.id} className="agent-card-wrap">
-          <button className="card-unpub" title="Remove from Workroom" onClick={(e) => unpublish(e, a)}>×</button>
-          <Link href={`/workroom/${a.id}`} className="agent-card">
-            <div className="agent-card-top"><span className="agent-ic">🤖</span><b>{a.name}</b></div>
-            <div className="note" style={{ marginTop: 4 }}>{a.kind} · {a.model || "no model"}</div>
-            <div className="agent-card-meta">
-              <span className="chip">{a.runtime === "nat" ? "⚡ NAT" : "🌐 In-browser"}</span>
-              <span className="chip">{a.toolCount} tool{a.toolCount === 1 ? "" : "s"}</span>
-              {a.kbCount > 0 && <span className="chip">📚 knowledge</span>}
-            </div>
-            <div className="agent-card-stats">{a.runs} run{a.runs === 1 ? "" : "s"} · {fmt(a.tokens)} tokens · {ago(a.lastUsed)}</div>
-            <span className="agent-card-cta">Open chat →</span>
-          </Link>
-        </div>
-      ))}
+      {agents.map((a) => {
+        const pubTime = a.updatedAt || a.createdAt;
+        const pubFormatted = formatRealTime(pubTime);
+        const pubFull = fullTimestamp(pubTime);
+        const lastUsedFull = fullTimestamp(a.lastUsed);
+
+        return (
+          <div key={a.id} className="agent-card-wrap">
+            <button className="card-unpub" title="Remove from Workroom" onClick={(e) => unpublish(e, a)}>×</button>
+            <Link href={`/workroom/${a.id}`} className="agent-card">
+              <div className="agent-card-top"><span className="agent-ic">🤖</span><b>{a.name}</b></div>
+              <div className="note" style={{ marginTop: 4 }}>{a.kind} · {a.model || "no model"}</div>
+              <div className="agent-card-meta">
+                <span className="chip">{a.runtime === "nat" ? "⚡ NAT" : "🌐 In-browser"}</span>
+                <span className="chip">{a.toolCount} tool{a.toolCount === 1 ? "" : "s"}</span>
+                {a.kbCount > 0 && <span className="chip">📚 knowledge</span>}
+              </div>
+              <div className="agent-card-stats">
+                {a.runs} run{a.runs === 1 ? "" : "s"} · {fmt(a.tokens)} tokens
+                {pubFormatted && (
+                  <span title={`Published: ${pubFull}`}>
+                    {" · "}Pub: <b>{pubFormatted}</b>
+                  </span>
+                )}
+                <span title={`Last used: ${lastUsedFull || "never"}`}>
+                  {" · "}{ago(a.lastUsed)}
+                </span>
+              </div>
+              <span className="agent-card-cta">Open chat →</span>
+            </Link>
+          </div>
+        );
+      })}
     </div>
   );
 }
