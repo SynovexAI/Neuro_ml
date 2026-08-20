@@ -30,7 +30,6 @@ try {
 } catch {
   // Ignore failure if the env file is missing or unreadable.
 }
-
 // Two ways to talk to TiDB, chosen by env so the SAME code runs on both hosts:
 //  • default  → mysql2 TCP pool  (works great on a persistent server like Render)
 //  • http     → TiDB Cloud serverless HTTP driver, when TIDB_DRIVER=http

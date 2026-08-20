@@ -32,7 +32,7 @@ type Entry = {
 // Web search, Wikipedia, arXiv and memory are already built into the Agent Lab as
 // native tools, so they're no longer listed here as servers-to-connect.
 const CATALOG: Entry[] = [
-  { id: "database", title: "Connect your database", icon: "🐘", iconRgb: "62,207,127", desc: "Chat with your Postgres — the agent queries it live", transport: "stdio", command: "uvx postgres-mcp", envName: "DATABASE_URI", authType: "none", native: true, needs: "works free", keyLabel: "Your database URL", keyPlaceholder: "postgresql://user:pass@host:5432/dbname", note: "Free Postgres: Supabase, Neon, or Render. Reachable from the internet (not localhost). Pick read-only or read-write below." },
+  { id: "database", title: "Connect your database", icon: "🐘", iconRgb: "62,207,127", desc: "Chat with your Postgres or Turso — the agent queries it live", transport: "stdio", command: "uvx postgres-mcp", envName: "DATABASE_URI", authType: "none", native: true, needs: "works free", keyLabel: "Your database URL", keyPlaceholder: "postgresql://user:pass@host:5432/db   —or—   libsql://<db>.turso.io?authToken=…", note: "Free, no card: Turso (libsql://, SQLite-compatible) or Neon/Supabase (Postgres). Must be reachable from the internet (not localhost). Pick read-only or read-write below." },
   { id: "github", title: "GitHub", icon: "🐙", iconRgb: "160,160,170", desc: "Repos, issues, PRs, code search", transport: "http", url: "https://api.githubcopilot.com/mcp", authType: "bearer", headerName: "Authorization", hosted: true, needs: "free token", keyLabel: "Your GitHub personal access token", keyPlaceholder: "ghp_…", note: "Create one at github.com → Settings → Developer settings → Personal access tokens. No deploy — GitHub hosts it." },
   { id: "deepwiki", title: "DeepWiki", icon: "📘", iconRgb: "91,124,255", desc: "Ask questions about any public GitHub repo's docs", transport: "http", url: "https://mcp.deepwiki.com/mcp", authType: "none", hosted: true, needs: "no key", note: "Fully free — no account, no token. Great for exploring open-source projects." },
   { id: "context7", title: "Context7", icon: "📗", iconRgb: "62,207,127", desc: "Up-to-date docs for thousands of libraries & frameworks", transport: "http", url: "https://mcp.context7.com/mcp", authType: "none", hosted: true, needs: "no key", note: "Free & keyless. Pulls current API docs so the agent doesn't rely on stale training data." },
@@ -187,7 +187,7 @@ export default function McpManager() {
         </div>
       </div>
 
-      <div className="note" style={{ marginTop: 12, lineHeight: 1.6 }}>Keys are stored encrypted. <b>Your database and the built-in Agent Lab tools run in-app and work on Render&apos;s free tier.</b> Hosted MCP (like GitHub) and any custom <span className="mono">stdio</span> command execute through the NAT agent runtime — a small always-on service that isn&apos;t on the free tier — so those are configured now and become executable once the NAT runtime (a paid instance) is online.</div>
+      <div className="note" style={{ marginTop: 12, lineHeight: 1.6 }}>Keys are stored encrypted. <b>Everything here runs on the free tier:</b> the built-in Agent Lab tools and your database query in-app, and hosted <b>HTTP / SSE</b> MCP servers (like GitHub) are proxied server-side — no extra runtime needed. Local <span className="mono">stdio</span> command servers aren&apos;t supported on this deployment (they need a self-hosted process), so only hosted HTTP/SSE servers can be added.</div>
 
       {connectOpen && (
         <div className="modal-wrap show" onClick={(e) => { if (e.target === e.currentTarget) { setConnectOpen(false); setActive(null); } }}>
@@ -225,7 +225,7 @@ export default function McpManager() {
                     <div><label className="fld">Name</label><input type="text" placeholder="my-server" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
                     <div><label className="fld">Transport</label>
                       <select value={f.transport} onChange={(e) => setF({ ...f, transport: e.target.value as typeof f.transport })}>
-                        <option value="http">Streamable HTTP</option><option value="sse">SSE</option><option value="stdio">stdio (local command)</option>
+                        <option value="http">Streamable HTTP</option><option value="sse">SSE</option>
                       </select>
                     </div>
                   </div>

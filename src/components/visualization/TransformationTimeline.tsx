@@ -16,7 +16,7 @@ export default function TransformationTimeline({ ops, sourceTable, finalTable }:
     return runPipeline(sourceTable, ops).stages;
   }, [sourceTable, ops]);
 
-  const getOpDescription = (op: any) => {
+  const getOpDescription = (op: EtlOp) => {
     switch (op.type) {
       case "filter": return `Kept rows where '${op.col}' ${op.op} '${op.value}'`;
       case "select": return `Selected columns: ${(op.cols || []).join(", ") || "all"}`;

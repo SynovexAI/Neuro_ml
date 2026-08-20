@@ -29,7 +29,8 @@ export async function runPublishedAgent(opts: { userId: string; config: unknown;
   const [u] = await db.select().from(users).where(eq(users.id, opts.userId));
   if (u) { const q = await checkQuota(u); if (!q.ok) return { ok: false, status: 429, error: `Monthly token limit reached (${q.used.toLocaleString()} / ${q.limit.toLocaleString()}).` }; }
 
-  const prov = c.provider ? await getProviderById(String(c.provider)) : await getActiveProvider();
+  let prov = c.provider ? await getProviderById(String(c.provider), opts.userId) : await getActiveProvider(opts.userId);
+  if (!prov) prov = await getActiveProvider(opts.userId);
   if (!prov || !prov.baseUrl) return { ok: false, status: 400, error: "No LLM provider is configured." };
   const model = c.model || prov.model;
   if (!model) return { ok: false, status: 400, error: "No model selected for this agent." };

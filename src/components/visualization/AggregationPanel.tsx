@@ -15,7 +15,7 @@ export default function AggregationPanel({ table }: AggregationPanelProps) {
   }
 
   const computeAggregation = () => {
-    const groups: Record<string, any[]> = {};
+    const groups: Record<string, unknown[]> = {};
     table.rows.forEach((row) => {
       const key = row[groupByCol] == null ? "—" : String(row[groupByCol]);
       if (!groups[key]) groups[key] = [];
@@ -59,7 +59,7 @@ export default function AggregationPanel({ table }: AggregationPanelProps) {
 
         <div className="row" style={{ gap: 6, alignItems: "center" }}>
           <label className="fld" style={{ margin: 0 }}>Function:</label>
-          <select value={aggFunc} onChange={(e) => setAggFunc(e.target.value as any)}>
+          <select value={aggFunc} onChange={(e) => setAggFunc(e.target.value as "count" | "sum" | "avg" | "min" | "max")}>
             <option value="count">COUNT</option>
             <option value="sum">SUM</option>
             <option value="avg">AVERAGE</option>

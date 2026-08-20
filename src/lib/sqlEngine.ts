@@ -1,4 +1,4 @@
-import type { Table, Cell, Rec } from "./etlUtils";
+import { pipelineToSql, type EtlOp, type Table, type Cell, type Rec } from "./etlUtils";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -20,10 +20,25 @@ export async function runSql(sql: string, raw: Table, b?: Table | null, extra?: 
   const mod: any = await import("alasql");
   const alasql = mod.default || mod;
   const db = new alasql.Database();
-  const register = (name: string, t: Table) => { if (!IDENT.test(name)) return; db.exec(`CREATE TABLE ${name}`); db.tables[name].data = t.rows.map((r) => ({ ...r })); };
+  const register = (name: string, t: Table) => {
+    if (!IDENT.test(name)) return;
+    if (!db.tables[name]) {
+      db.exec(`CREATE TABLE ${name}`);
+    }
+    db.tables[name].data = t.rows.map((r) => ({ ...r }));
+  };
   register("raw", raw);
   if (b && b.cols.length) register("b", b);
   (extra || []).forEach((e) => register(e.name, e.table));
+
+  // Dynamically register any table name referenced in the SQL query (e.g. FROM tableid, FROM student_performance_dataset)
+  const referencedTables = Array.from(sql.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+([A-Za-z0-9_]+)/gi)).map((m) => m[1]);
+  referencedTables.forEach((tblName) => {
+    if (IDENT.test(tblName) && !db.tables[tblName]) {
+      register(tblName, raw);
+    }
+  });
+
   const res = db.exec(sql);
   if (!Array.isArray(res)) return { cols: [], rows: [] };
   const out = res as Record<string, unknown>[];
@@ -31,4 +46,10 @@ export async function runSql(sql: string, raw: Table, b?: Table | null, extra?: 
   out.forEach((r) => Object.keys(r).forEach((k) => { if (!cols.includes(k)) cols.push(k); }));
   const rows: Rec[] = out.map((r) => { const o: Rec = {}; cols.forEach((c) => (o[c] = cell(r[c]))); return o; });
   return { cols, rows };
+}
+
+export async function runPushdownPipeline(raw: Table, ops: EtlOp[], b?: Table | null): Promise<{ sql: string; result: Table }> {
+  const sql = pipelineToSql("raw", ops);
+  const result = await runSql(sql, raw, b);
+  return { sql, result };
 }

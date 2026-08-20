@@ -4,6 +4,7 @@ import { Client as PgClient } from "pg";
 import { getSessionUser } from "@/lib/auth";
 import { resolvesToPrivate } from "@/lib/net";
 import { rateLimitDb } from "@/lib/ratelimit";
+import { audit } from "@/lib/monitor";
 import { MongoClient } from "mongodb";
 
 export const runtime = "nodejs";
@@ -37,8 +38,9 @@ export async function POST(req: Request) {
 
   const isPg = /^(postgres(ql)?|redshift):\/\//i.test(url);
   const isMy = /^mysql:\/\//i.test(url);
+  const isLibsql = /^libsql:\/\//i.test(url) || /\.turso\.io/i.test(url);
   const isMongo = /^mongodb(\+srv)?:\/\//i.test(url);
-  if (!isPg && !isMy && !isMongo) return NextResponse.json({ error: "Provide a valid mysql://, postgres://, redshift://, or mongodb:// connection URL." }, { status: 400 });
+  if (!isPg && !isMy && !isLibsql && !isMongo) return NextResponse.json({ error: "Provide a valid mysql://, postgres://, redshift://, libsql:// (Turso), or mongodb:// connection URL." }, { status: 400 });
   if (!ident(table)) return NextResponse.json({ error: "Table name must be letters/digits/underscore and start with a letter." }, { status: 400 });
   if (!cols.length || (!isMongo && !cols.every(ident))) return NextResponse.json({ error: "Column names must be valid SQL identifiers." }, { status: 400 });
   if (mode === "upsert" && (!keyCol || !cols.includes(keyCol))) return NextResponse.json({ error: "Upsert needs a key column that exists in the output." }, { status: 400 });
@@ -55,6 +57,39 @@ export async function POST(req: Request) {
   const colTypes = cols.map((c) => { const ov = typeOverrides[c]; const ty = ov && ov !== "auto" && ALLOWED_TYPES.has(ov) ? ov : typeOf(c); return `\`${c}\` ${ty}`; });
 
   try {
+    // ── Turso / libSQL path (SQLite dialect: double-quoted idents, ? params, ON CONFLICT upsert) ──
+    if (isLibsql) {
+      const host = (url.match(/\/\/(?:[^/?@]+@)?([^/?:]+)/) || [])[1] || "";
+      if (host && await resolvesToPrivate(host)) return NextResponse.json({ error: "That host is blocked (internal / private address)." }, { status: 400 });
+      const m = url.match(/[?&]authToken=([^&]+)/i);
+      const authToken = m ? decodeURIComponent(m[1]) : undefined;
+      const clean = url.replace(/([?&])authToken=[^&]+/i, "$1").replace(/[?&]+$/, "");
+      const { createClient } = await import("@libsql/client");
+      const client = createClient({ url: clean, authToken });
+      const sqliteType = (c: string): string => { const ov = typeOverrides[c]; const t = ov && ov !== "auto" && ALLOWED_TYPES.has(ov) ? ov : typeOf(c); return t === "BIGINT" ? "INTEGER" : t === "DOUBLE" ? "REAL" : "TEXT"; };
+      try {
+        const info = await client.execute(`PRAGMA table_info("${table}")`);
+        const existingCols = info.rows.map((r) => String((r as unknown as Record<string, unknown>).name));
+        const tableExisted = existingCols.length > 0;
+        if (tableExisted) {
+          const missing = cols.filter((c) => !existingCols.includes(c));
+          if (missing.length) return NextResponse.json({ error: `Schema drift — the existing table "${table}" is missing column(s): ${missing.join(", ")}. Load into a new table, or add those columns first.`, drift: { missing, extra: existingCols.filter((c) => !cols.includes(c)) } }, { status: 409 });
+        } else {
+          await client.execute(`CREATE TABLE "${table}" (${cols.map((c) => `"${c}" ${sqliteType(c)}`).join(", ")})`);
+        }
+        if (mode === "upsert") await client.execute(`CREATE UNIQUE INDEX IF NOT EXISTS "uk_${keyCol}" ON "${table}"("${keyCol}")`).catch(() => {});
+        const colList = cols.map((c) => `"${c}"`).join(", ");
+        const onConf = mode === "upsert" ? ` ON CONFLICT("${keyCol}") DO UPDATE SET ${cols.filter((c) => c !== keyCol).map((c) => `"${c}"=excluded."${c}"`).join(", ")}` : "";
+        const ph = `(${cols.map(() => "?").join(", ")})`;
+        const toVal = (v: unknown) => (v == null ? null : typeof v === "object" ? JSON.stringify(v) : (v as string | number));
+        for (let i = 0; i < rows.length; i += 200) {
+          const batch = rows.slice(i, i + 200).map((r) => ({ sql: `INSERT INTO "${table}" (${colList}) VALUES ${ph}${onConf}`, args: cols.map((c) => toVal(r[c])) }));
+          await client.batch(batch, "write");
+        }
+        { await audit("etl_stored", user.id, { table, rows: rows.length, mode, backend: isLibsql ? "turso" : isPg ? "postgres" : "mysql" }).catch(() => {}); return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted }); }
+      } finally { client.close(); }
+    }
+
     const u = new URL(url);
     if (await resolvesToPrivate(u.hostname)) return NextResponse.json({ error: "That host is blocked (internal / private address)." }, { status: 400 });
 
@@ -68,12 +103,12 @@ export async function POST(req: Request) {
         const coll = db.collection(table);
         if (mode === "upsert") {
           const bulkOps = rows.map((r) => {
-            const filter: any = {}; filter[keyCol] = r[keyCol];
+            const filter: Record<string, unknown> = {}; filter[keyCol] = r[keyCol];
             return { updateOne: { filter, update: { $set: r }, upsert: true } };
           });
           await coll.bulkWrite(bulkOps);
         } else {
-          await coll.insertMany(rows as any[]);
+          await coll.insertMany(rows as Record<string, unknown>[]);
         }
         return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: false });
       } finally { await client.close(); }
@@ -106,7 +141,7 @@ export async function POST(req: Request) {
           const tuples = batch.map((r, ri) => { cols.forEach((c) => params.push(toVal(r[c]))); return `(${cols.map((_, ci) => `$${ri * cols.length + ci + 1}`).join(", ")})`; });
           await client.query(`INSERT INTO "${table}" (${colList}) VALUES ${tuples.join(", ")}${onConf}`, params);
         }
-        return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted });
+        { await audit("etl_stored", user.id, { table, rows: rows.length, mode, backend: isLibsql ? "turso" : isPg ? "postgres" : "mysql" }).catch(() => {}); return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted }); }
       } finally { await client.end().catch(() => {}); }
     }
 
@@ -143,7 +178,7 @@ export async function POST(req: Request) {
       const batch = rows.slice(i, i + 500).map((r) => cols.map((c) => toVal(r[c])));
       await conn.query(`INSERT INTO \`${table}\` (${colList}) VALUES ?${onDup}`, [batch]);
     }
-    return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted });
+    { await audit("etl_stored", user.id, { table, rows: rows.length, mode, backend: isLibsql ? "turso" : isPg ? "postgres" : "mysql" }).catch(() => {}); return NextResponse.json({ ok: true, table, rowCount: rows.length, mode, created: !tableExisted }); }
     } finally {
       if (conn) await conn.end().catch(() => {});
     }

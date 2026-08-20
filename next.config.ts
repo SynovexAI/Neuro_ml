@@ -14,7 +14,7 @@ const nextConfig: NextConfig = {
     // Use in‑memory cache during development to avoid filesystem rename errors
     config.cache = dev ? { type: 'memory' } : { type: 'filesystem' };
     // Keep existing alias and fallback settings
-    config.resolve = config.resolve || ({} as any);
+    config.resolve = config.resolve || {};
     config.resolve.alias = Object.assign({}, config.resolve.alias || {}, {
       "react-native-fs": false,
       "react-native-fetch-blob": false,

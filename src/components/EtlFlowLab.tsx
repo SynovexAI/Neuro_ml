@@ -13,8 +13,10 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   parseRecords, sampleSources, runPipeline, toCSV, tableFromRecords, OP_META,
-  type Table, type EtlOp, type OpType,
+  profile, evaluate, lineage, RULE_META, ACTION_META,
+  type Table, type EtlOp, type OpType, type Expectation, type RuleType, type RuleAction,
 } from "@/lib/etlUtils";
+import { toPython, type CodegenSpec } from "@/lib/etlCodegen";
 import { runSql } from "@/lib/sqlEngine";
 import { toast, confirmDialog } from "@/lib/toast";
 import { OP_INFO, SRC_INFO, LOAD_INFO } from "@/lib/etlNodeInfo";
@@ -44,6 +46,7 @@ const SOURCES: PalItem[] = [
   { key: "s-excel", label: "Excel", icon: "📗", cat: "extraction", kind: "source", srcType: "excel" },
   { key: "s-pg", label: "PostgreSQL", icon: "🐘", cat: "extraction", kind: "source", srcType: "postgres" },
   { key: "s-mysql", label: "MySQL / TiDB", icon: "🗄", cat: "extraction", kind: "source", srcType: "mysql" },
+  { key: "s-rest", label: "REST / API", icon: "🌐", cat: "extraction", kind: "source", srcType: "rest" },
   { key: "s-json", label: "JSON", icon: "🧾", cat: "extraction", kind: "source", srcType: "json" },
   { key: "s-mongo", label: "MongoDB", icon: "🍃", cat: "extraction", kind: "source", srcType: "mongodb" },
   { key: "s-api", label: "REST API", icon: "🌐", cat: "extraction", kind: "source", srcType: "rest" },
@@ -55,7 +58,7 @@ const STREAM_SOURCES: PalItem[] = [
 ];
 const opItem = (t: OpType, cat: Cat = "transformation"): PalItem => ({ key: "op-" + t, label: OP_META[t].label, icon: OP_META[t].icon, cat, kind: "op", opType: t });
 const TRANSFORMS: PalItem[] = [
-  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse"] as OpType[]).map((t) => opItem(t, "transformation")),
+  ...(["filter", "select", "derive", "aggregate", "sort", "dedupe", "clean", "rename", "limit", "sample", "map", "fillna", "bucket", "pivot", "unpivot", "window", "regex", "dateparse", "scd2", "fuzzydedupe", "quality"] as OpType[]).map((t) => opItem(t, "transformation")),
   opItem("join", "integration"), opItem("union", "integration"),
   // New integration ops
   opItem("lookup", "integration"),
@@ -181,6 +184,9 @@ function makeOp(type: OpType, cols: string[], rows: Record<string, unknown>[], b
   else if (type === "window") a(base, { groupBy: "(none)", col: numCol, fn: "running_sum", name: "running_sum" });
   else if (type === "regex") a(base, { col: cols[0], value: "(\\d+)", name: (cols[0] || "col") + "_match" });
   else if (type === "dateparse") a(base, { col: cols[0], fn: "year", name: (cols[0] || "col") + "_year" });
+  else if (type === "scd2") a(base, { businessKey: cols[0] });
+  else if (type === "fuzzydedupe") a(base, { col: cols[0], threshold: 0.8 });
+  else if (type === "quality") a(base, { qualityCol: cols[0], rule: "not_null", name: "_quality_status" });
   return base;
 }
 function opSummary(o: EtlOp): string {
@@ -201,6 +207,8 @@ type NData = {
   op?: EtlOp; table?: Table; srcType?: string; srcName?: string; target?: string;
   dbUrl?: string; dbQuery?: string; jsonText?: string; sqlText?: string;
   extUrl?: string; extTable?: string; extMode?: string;
+  extHost?: string; extPort?: string; extDb?: string; extUser?: string; extPass?: string;
+  restUrl?: string; restPath?: string;
   count?: number | null; run?: "running" | "done";
 };
 type FNode = Node<NData>;
@@ -255,6 +263,38 @@ function FlowNode({ id, data, selected }: NodeProps<FNode>) {
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
+      {/* Row count badge (Extract -> Transform -> Load) */}
+      {data.count != null && (
+        <div
+          className="node-count-badge"
+          title={`${data.count.toLocaleString()} rows in node output`}
+          style={{
+            position: "absolute",
+            top: -9,
+            right: hover ? 18 : -6,
+            minWidth: 20,
+            height: 19,
+            padding: "0 6px",
+            borderRadius: 10,
+            background: done ? "rgba(16,185,129,0.25)" : "var(--surface)",
+            border: `1px solid ${done ? "#10b981" : "var(--border-strong)"}`,
+            color: done ? "#3ecf7f" : "var(--text)",
+            fontSize: 10,
+            fontFamily: "var(--mono)",
+            fontWeight: 700,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9,
+            boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            transition: "all 0.15s cubic-bezier(0.4, 0, 0.2, 1)",
+            pointerEvents: "none",
+          }}
+        >
+          {data.count.toLocaleString()}
+        </div>
+      )}
+
       {data.kind !== "source" && <Handle type="target" position={Position.Left} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       {data.kind !== "analytics" && <Handle type="source" position={Position.Right} style={{ background: "#0a0d17", border: `2px solid ${c}`, width: 9, height: 9 }} />}
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
@@ -286,6 +326,13 @@ function Inner() {
   const [loadOpen, setLoadOpen] = useState(false);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  // Deploy-as-API state
+  const [deploy, setDeploy] = useState<{ open: boolean; busy: boolean; key?: string; chId?: string; err?: string; mode?: string; hasTarget?: boolean } | null>(null);
+  const [apiLang, setApiLang] = useState<"curl" | "js" | "python">("curl");
+  const [runs, setRuns] = useState<{ id: string; name: string | null; mode: string | null; target: string | null; rowsOut: number; rowsLoaded: number; durationMs: number; status: string | null; ts: string | null }[]>([]);
+  const [showQuality, setShowQuality] = useState(false);
+  const [showRuns, setShowRuns] = useState(false);
+  const [rules, setRules] = useState<Expectation[]>([]);
   const [renameText, setRenameText] = useState("");
   const runTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -295,7 +342,7 @@ function Inner() {
   
   const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
   useEffect(() => {
-    const h = (e: any) => setInfoNodeId(e.detail);
+    const h = (e: Event) => setInfoNodeId((e as CustomEvent<string>).detail);
     window.addEventListener("open-node-info", h);
     return () => window.removeEventListener("open-node-info", h);
   }, []);
@@ -368,11 +415,22 @@ function Inner() {
   // counts per node id, for the badge
   const counts = useMemo(() => {
     const m: Record<string, number> = {};
-    sources.forEach((s) => { m[s.id] = s.data.table!.rows.length; });
-    opNodes.forEach((n, i) => { m[n.id] = pipe?.stages[i + 1]?.table.rows.length ?? 0; });
-    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => { m[n.id] = n.data.table?.rows.length ?? finalTable?.rows.length ?? 0; });
+    sources.forEach((s) => { if (s.data.table) m[s.id] = s.data.table.rows.length; });
+    opNodes.forEach((n, i) => { if (pipe?.stages[i + 1]?.table) m[n.id] = pipe.stages[i + 1].table.rows.length; });
+    nodes.filter((n) => n.data.kind === "load" || n.data.kind === "analytics" || n.data.kind === "sql").forEach((n) => {
+      if (n.data.table) {
+        m[n.id] = n.data.table.rows.length;
+      } else {
+        const inEdge = edges.find((e) => e.target === n.id);
+        if (inEdge && m[inEdge.source] != null) {
+          m[n.id] = m[inEdge.source];
+        } else if (finalTable) {
+          m[n.id] = finalTable.rows.length;
+        }
+      }
+    });
     return m;
-  }, [sources, opNodes, pipe, nodes, finalTable]);
+  }, [sources, opNodes, pipe, nodes, finalTable, edges]);
 
   const displayNodes = useMemo(() => nodes.map((n) => ({ ...n, data: { ...n.data, count: counts[n.id] ?? null, run: runStatus[n.id] } })), [nodes, counts, runStatus]);
   const sel = nodes.find((n) => n.id === selId) || null;
@@ -500,6 +558,39 @@ function Inner() {
   // Start a fresh, unsaved workflow.
   function newWorkflow() { setNodes([]); setEdges([]); setCurrentId(null); setSelId(null); setRunStatus({}); setMetrics(null); setRunMsg(""); }
   function exportJson() { download(JSON.stringify(buildWorkflow(), null, 2), "etl-workflow.json", "application/json"); }
+  // Build a codegen spec from the current canvas (primary source → ordered ops → load node).
+  function currentSpec(): CodegenSpec {
+    const src = sources[0]?.data;
+    const loadNode = nodes.find((n) => n.data.kind === "load")?.data;
+    return {
+      source: { type: src?.srcType || "csv", url: src?.dbUrl, query: src?.dbQuery, restUrl: src?.restUrl },
+      ops: opNodes.map((n) => n.data.op!).filter(Boolean),
+      load: loadNode ? { target: loadNode.target, url: loadNode.extUrl, table: loadNode.extTable, mode: loadNode.extMode } : undefined,
+      secondary: sources.length > 1,
+    };
+  }
+  function exportPython() { download(toPython(currentSpec()), "etl_pipeline.py", "text/x-python"); toast("Downloaded runnable Python ✓", "success"); }
+  // Deploy the pipeline as a Bearer-key API: save + publish the project, then mint an api channel.
+  async function deployApi() {
+    if (!opNodes.length) { setDeploy({ open: true, busy: false, err: "Add at least one transform before deploying." }); return; }
+    setDeploy({ open: true, busy: true });
+    try {
+      let pid = currentId;
+      const cfg = buildWorkflow();
+      if (pid) {
+        await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: pid, config: cfg, published: true }) });
+      } else {
+        const r = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lab: "etl", name: wfName(), config: cfg, published: true }) });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || "save failed"); pid = j.id; setCurrentId(pid); loadProjects();
+      }
+      // Build the connection config for a full extract→transform→load run (only if a real DB source URL is set).
+      const src = sources[0]?.data; const loadNode = nodes.find((n) => n.data.kind === "load")?.data;
+      const conn = src?.dbUrl ? { sourceUrl: src.dbUrl, query: src.dbQuery || "", srcType: src.srcType || "", targetUrl: loadNode?.extUrl || "", table: loadNode?.extTable || "etl_output", mode: loadNode?.extMode || "append", keyCol: primary?.cols?.[0] || "" } : null;
+      const rc = await fetch("/api/etl/deploy", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: pid, conn, dailyLimit: 200 }) });
+      const jc = await rc.json(); if (!rc.ok) throw new Error(jc.error || "deploy failed");
+      setDeploy({ open: true, busy: false, key: jc.apiKey, chId: jc.id, mode: jc.mode, hasTarget: jc.hasTarget });
+    } catch (e) { setDeploy({ open: true, busy: false, err: (e as Error).message }); }
+  }
   async function importJson(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return;
     try { applyWorkflow(JSON.parse(await f.text()) as SavedWF); setCurrentId(null); setSavedMsg("Imported ✓"); } catch { setSavedMsg("Bad JSON file"); }
@@ -508,6 +599,7 @@ function Inner() {
   // Load the saved project list, and any ?project=<id> deep link, on mount.
   useEffect(() => {
     loadProjects();
+    loadRuns();
     const id = new URLSearchParams(window.location.search).get("project");
     if (id) loadProject(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -515,11 +607,11 @@ function Inner() {
   async function runLoad() {
     if (!sel || !finalTable) return;
     const target = sel.data.target;
-    if (target === "csv") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Downloaded CSV ✓"); return; }
-    if (target === "xlsx") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Exported (CSV; xlsx export next) ✓"); return; }
+    if (target === "csv") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Downloaded CSV ✓"); logRun({ mode: "load", target: "csv", rowsOut: finalTable.rows.length, rowsLoaded: finalTable.rows.length, status: "ok" }); return; }
+    if (target === "xlsx") { download(toCSV(finalTable), "etl_output.csv", "text/csv"); setRunMsg("Exported (CSV; xlsx export next) ✓"); logRun({ mode: "load", target: "csv", rowsOut: finalTable.rows.length, status: "ok" }); return; }
     if (target === "platform") {
-      try { const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "ETL flow output", cols: finalTable.cols, rows: finalTable.rows, mode: "new" }) }); setRunMsg(r.ok ? "Stored in platform DB ✓" : "Store failed"); }
-      catch (err) { setRunMsg((err as Error).message); }
+      try { const r = await fetch("/api/etl/store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "ETL flow output", cols: finalTable.cols, rows: finalTable.rows, mode: "new" }) }); const ok = r.ok; setRunMsg(ok ? "Stored in platform DB ✓" : "Store failed"); logRun({ mode: "load", target: "platform DB", rowsOut: finalTable.rows.length, rowsLoaded: ok ? finalTable.rows.length : 0, status: ok ? "ok" : "error" }); }
+      catch (err) { setRunMsg((err as Error).message); logRun({ mode: "load", target: "platform DB", status: "error", error: (err as Error).message }); }
       return;
     }
     setRunMsg(`${target} connector — configure credentials in Admin → Providers (wiring next).`);
@@ -535,6 +627,23 @@ function Inner() {
       setRunMsg(`loaded ${j.rows} rows ✓`);
     } catch (e) { setRunMsg((e as Error).message); }
   }
+  // REST/API source: GET a public JSON endpoint and load its records.
+  async function runRestSource() {
+    if (!sel) return;
+    setRunMsg("fetching…");
+    try {
+      const r = await fetch("/api/etl/fetch-json", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: sel.data.restUrl || "", path: sel.data.restPath || "" }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error || "fetch failed");
+      const t = tableFromRecords(j.records || []);
+      patchSel({ table: t, srcName: "REST", label: "REST source" });
+      setRunMsg(`loaded ${t.rows.length} rows ✓`);
+    } catch (e) { setRunMsg((e as Error).message); }
+  }
+  // Fire-and-forget: record a run in the log (etl_runs) so the Runs console shows history.
+  function logRun(r: { mode: string; target?: string; rowsOut?: number; rowsLoaded?: number; status?: string; error?: string; durationMs?: number }) {
+    fetch("/api/etl/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: wfName(), ...r }) }).then(() => loadRuns()).catch(() => {});
+  }
+  async function loadRuns() { try { const j = await fetch("/api/etl/runs").then((x) => x.json()); setRuns(j.runs || []); } catch { /* ignore */ } }
   // ELT: run the SQL model node against the raw source (real in-browser SQL).
   async function runSqlNode() {
     if (!sel || !primary) { setRunMsg("Add a source with data first."); return; }
@@ -562,7 +671,8 @@ function Inner() {
       const r = await fetch("/api/etl/store-external", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: dbUrl, table: sel.data.extTable || "etl_output", cols: finalTable.cols, rows: finalTable.rows, mode: sel.data.extMode || "append", keyCol: finalTable.cols[0], db: sel.data.extDb }) });
       const j = await r.json().catch(() => null);
       setRunMsg(r.ok ? `${(sel.data.extMode === "upsert" ? "Upserted" : "Loaded")} ${j.rowCount} rows into \`${j.table}\` ✓` : (j?.error || "load failed"));
-    } catch (e) { setRunMsg((e as Error).message); }
+      logRun({ mode: "load", target: `${sel.data.target || "db"}:${j?.table || sel.data.extTable || "etl_output"}`, rowsOut: finalTable.rows.length, rowsLoaded: r.ok ? (j?.rowCount || finalTable.rows.length) : 0, status: r.ok ? "ok" : "error", error: r.ok ? undefined : (j?.error || "load failed") });
+    } catch (e) { setRunMsg((e as Error).message); logRun({ mode: "load", target: "external db", status: "error", error: (e as Error).message }); }
   }
 
   const paletteItems = MODES[mode].steps[step].items;
@@ -596,11 +706,176 @@ function Inner() {
               </div>
             </>}
           </div>
-          <button className="btn ghost sm" onClick={exportJson}>⤓ Export</button>
+          <button className="btn ghost sm" onClick={exportPython} title="Download a runnable pandas + SQLAlchemy script — run it in your own project">⤓ Python</button>
+          <button className="btn ghost sm" onClick={exportJson} title="Export the workflow as JSON">⤓ JSON</button>
           <button className="btn ghost sm" onClick={() => importRef.current?.click()}>⤒ Import</button>
+          <button className="btn sm" onClick={deployApi} title="Deploy this pipeline as a callable API (small data)">🚀 Deploy as API</button>
         </div>
       </div>
       <input ref={importRef} type="file" accept=".json,application/json" onChange={importJson} style={{ display: "none" }} />
+
+      {deploy?.open && (
+        <div style={{ border: "1px solid var(--border-strong)", borderRadius: 12, background: "var(--panel)", padding: 14, marginBottom: 12 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <b style={{ fontSize: 13 }}>🚀 Deploy as API {deploy.busy ? "· publishing…" : ""}</b>
+            <button className="btn ghost sm" onClick={() => setDeploy(null)}>✕ close</button>
+          </div>
+          {deploy.err && <div className="err">{deploy.err}</div>}
+          {deploy.busy && <div className="note"><span className="busy-dot" /> saving, publishing & minting a key…</div>}
+          {deploy.key && deploy.chId && (() => {
+            const origin = typeof window !== "undefined" ? window.location.origin : "https://your-app.vercel.app";
+            const url = `${origin}/api/etl/public/${deploy.chId}`;
+            const cols = (primary?.cols && primary.cols.length ? primary.cols : ["col1", "col2"]).slice(0, 6);
+            const sample: Record<string, unknown> = {};
+            cols.forEach((c) => { sample[c] = primary?.rows?.[0]?.[c] ?? "value"; });
+            const full = deploy.mode === "full_run"; const hasTarget = !!deploy.hasTarget;
+            const curl = full
+              ? `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${deploy.key}" \\\n  -H "content-type: application/json" \\\n  -d '{}'`
+              : `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${deploy.key}" \\\n  -H "content-type: application/json" \\\n  -d '${JSON.stringify({ data: [sample] })}'`;
+            const js = full
+              ? `const res = await fetch(${JSON.stringify(url)}, {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${deploy.key}", "content-type": "application/json" },\n  body: "{}",\n});\nconst summary = await res.json();\nconsole.log(summary); // { rowsExtracted, rowsOut, rowsLoaded }`
+              : `const res = await fetch(${JSON.stringify(url)}, {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${deploy.key}", "content-type": "application/json" },\n  body: JSON.stringify({ data: [${JSON.stringify(sample)}] }),\n});\nconst { cols, rows } = await res.json();\nconsole.log(rows);`;
+            const python = full
+              ? `import requests\n\nr = requests.post(\n    ${JSON.stringify(url)},\n    headers={"Authorization": "Bearer ${deploy.key}", "content-type": "application/json"},\n    json={},\n)\nprint(r.json())  # {"rowsExtracted": .., "rowsLoaded": ..}`
+              : `import requests\n\nr = requests.post(\n    ${JSON.stringify(url)},\n    headers={"Authorization": "Bearer ${deploy.key}", "content-type": "application/json"},\n    json={"data": [${JSON.stringify(sample)}]},\n)\nprint(r.json())  # {"cols": [...], "rows": [...]}`;
+            const snippet = apiLang === "curl" ? curl : apiLang === "js" ? js : python;
+            const respStr = full
+              ? JSON.stringify(hasTarget ? { ok: true, mode: "full_run", pipeline: wfName(), rowsExtracted: 1000, rowsOut: 42, rowsLoaded: 42, loadedTable: "etl_output" } : { ok: true, mode: "full_run", pipeline: wfName(), rowsExtracted: 1000, rowsOut: 42, cols, rows: [sample] }, null, 2)
+              : JSON.stringify({ ok: true, mode: "transform_only", pipeline: wfName(), cols, rows: [sample], rowsIn: 1, rowsOut: 1 }, null, 2);
+            const codeBox: React.CSSProperties = { fontFamily: "var(--mono)", fontSize: 11, background: "var(--panel-2)", padding: "10px 12px", borderRadius: 8, overflowX: "auto", margin: 0, lineHeight: 1.5, whiteSpace: "pre" };
+            const label = (t: string) => <div className="k" style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", margin: "10px 0 4px" }}>{t}</div>;
+            return (
+              <div>
+                <div className="note" style={{ color: "var(--good)", marginBottom: 6 }}>✓ Deployed — {full ? (hasTarget ? "full run: extract → transform → load, server-side." : "full run: extract → transform, returns rows.") : "transform-only: POST rows, get rows back."} Your pipeline is now a live API.</div>
+
+                {label("① API key — copy now, shown only once")}
+                <div className="row" style={{ gap: 6 }}><code style={{ flex: 1, ...codeBox, whiteSpace: "nowrap", color: "var(--warn)" }}>{deploy.key}</code><button className="btn ghost sm" onClick={() => { navigator.clipboard?.writeText(deploy.key!); toast("Key copied", "success"); }}>copy</button></div>
+
+                {label("② How to connect")}
+                <div style={codeBox}>{`POST   ${url}\nAuth   Authorization: Bearer <your-key>\nType   application/json`}</div>
+
+                {label("③ Input — what to send")}
+                {full ? (
+                  <>
+                    <div style={codeBox}>{`# No body needed — just call with your key.\n# The server extracts from your source DB, transforms,\n# and ${hasTarget ? "loads into your warehouse table." : "returns the rows."}\n\n# Optional: override the source SELECT for this run\n{ "query": "SELECT * FROM orders WHERE created_at > '2026-01-01'" }`}</div>
+                    <div className="note" style={{ marginTop: 4, lineHeight: 1.5 }}>No data goes over the wire — your source & target URLs are stored <b>encrypted</b> with your pipeline and used server-side.</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={codeBox}>{`{
+  "data": [        // an array of row objects (≤ 5000)
+    {
+${cols.map((c) => `      ${JSON.stringify(c)}: ${JSON.stringify(sample[c])}`).join(",\n")}
+    }
+  ]
+}`}</div>
+                    <div className="note" style={{ marginTop: 4, lineHeight: 1.5 }}>Each row is a JSON object. The fields above are the columns this pipeline expects. Extra fields are ignored; missing ones become null.</div>
+                  </>
+                )}
+
+                {label("④ Example call")}
+                <div className="row" style={{ gap: 4, marginBottom: 6 }}>
+                  {(["curl", "js", "python"] as const).map((l) => <button key={l} className={`btn sm ${apiLang === l ? "" : "ghost"}`} onClick={() => setApiLang(l)}>{l === "js" ? "JavaScript" : l === "python" ? "Python" : "cURL"}</button>)}
+                  <button className="btn ghost sm" style={{ marginLeft: "auto" }} onClick={() => { navigator.clipboard?.writeText(snippet); toast("Copied", "success"); }}>copy</button>
+                </div>
+                <pre style={codeBox}>{snippet}</pre>
+
+                {label("⑤ Response")}
+                <pre style={codeBox}>{respStr}</pre>
+
+                <div className="note" style={{ marginTop: 10, lineHeight: 1.5 }}><b>Limits:</b> ≤5000 rows/request, 60s, 200 calls/day. For bigger jobs use <b>⤓ Python</b>. Revoke or re-issue the key in <b>Workroom → Channels</b>. On a deployed app the host is your Vercel domain (not localhost).</div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Runs console */}
+      {runs.length > 0 && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-h" onClick={() => setShowRuns((s) => !s)} style={{ cursor: "pointer" }}><span className="t">🗂 Runs</span><span className="mono r">{runs.length} logged · {showRuns ? "▾ hide" : "▸ show"}</span></div>
+          {showRuns && <div className="card-b" style={{ overflowX: "auto" }}>
+            <table className="dtable" style={{ width: "100%", fontSize: 12 }}><tbody>
+              <tr><th style={{ textAlign: "left" }}>when</th><th style={{ textAlign: "left" }}>pipeline</th><th style={{ textAlign: "left" }}>mode</th><th style={{ textAlign: "left" }}>target</th><th style={{ textAlign: "right" }}>out</th><th style={{ textAlign: "right" }}>loaded</th><th style={{ textAlign: "left" }}>status</th></tr>
+              {runs.map((r) => (
+                <tr key={r.id}>
+                  <td style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{r.ts ? new Date(r.ts).toLocaleString() : "—"}</td>
+                  <td>{r.name || "—"}</td>
+                  <td style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{r.mode || "—"}</td>
+                  <td style={{ fontSize: 11.5 }}>{r.target || "—"}</td>
+                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{r.rowsOut}</td>
+                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>{r.rowsLoaded}</td>
+                  <td style={{ color: r.status === "ok" ? "var(--good)" : "var(--crit)", fontWeight: 600 }}>{r.status || "—"}</td>
+                </tr>
+              ))}
+            </tbody></table>
+          </div>}
+        </div>
+      )}
+
+      {/* Data quality · profile · lineage */}
+      {finalTable && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <div className="card-h" onClick={() => setShowQuality((s) => !s)} style={{ cursor: "pointer" }}><span className="t">🔎 Quality · Profile · Lineage</span><span className="mono r">{finalTable.rows.length} rows · {showQuality ? "▾ hide" : "▸ show"}</span></div>
+          {showQuality && (() => {
+            const ops = opNodes.map((n) => n.data.op!).filter(Boolean);
+            const prof = profile(finalTable);
+            const lin = lineage(primary?.cols || [], ops, secondary?.cols || []);
+            const ev = rules.length ? evaluate(finalTable, rules) : null;
+            const rid = () => Math.random().toString(36).slice(2, 9);
+            const box: React.CSSProperties = { border: "1px solid var(--border)", borderRadius: 8, overflowX: "auto" };
+            return (
+              <div className="card-b">
+                <label className="fld">Column profile — types, nulls, distinct, stats</label>
+                <div style={box}>
+                  <table className="dtable" style={{ width: "100%", fontSize: 11.5 }}><tbody>
+                    <tr><th style={{ textAlign: "left" }}>column</th><th>type</th><th>nulls</th><th>distinct</th><th>min</th><th>max</th><th>mean</th><th style={{ textAlign: "left" }}>top values</th></tr>
+                    {prof.map((c) => (
+                      <tr key={c.name}>
+                        <td style={{ fontWeight: 600 }}>{c.name}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)", color: "var(--accent)" }}>{c.type}</td>
+                        <td style={{ textAlign: "center", color: c.nulls ? "var(--warn)" : "var(--muted)" }}>{c.nulls}</td>
+                        <td style={{ textAlign: "center" }}>{c.distinct}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.min ?? "—"}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.max ?? "—"}</td>
+                        <td style={{ textAlign: "center", fontFamily: "var(--mono)" }}>{c.mean != null ? Math.round(c.mean * 100) / 100 : "—"}</td>
+                        <td style={{ fontSize: 10.5, color: "var(--muted)" }}>{c.top.slice(0, 3).map((t) => `${t.v}(${t.count})`).join(", ")}</td>
+                      </tr>
+                    ))}
+                  </tbody></table>
+                </div>
+
+                <label className="fld" style={{ marginTop: 14 }}>Validation rules — expectations with an action on failure</label>
+                <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <button className="btn ghost sm" onClick={() => setRules((rs) => [...rs, { id: rid(), col: finalTable.cols[0], type: "not_null", action: "reject" }])}>+ Add rule</button>
+                  {rules.length > 0 && <button className="btn ghost sm" onClick={() => setRules([])}>clear</button>}
+                  {ev && <span className="note">clean <b style={{ color: "var(--good)" }}>{ev.clean.rows.length}</b> · rejected <b style={{ color: "var(--crit)" }}>{ev.rejects.length}</b> · dropped {ev.dropped} · fixed {ev.fixedCells}</span>}
+                </div>
+                {rules.map((r) => (
+                  <div key={r.id} className="row" style={{ gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <select value={r.col} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, col: e.target.value } : x))} style={{ width: 130 }}>{finalTable.cols.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+                    <select value={r.type} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, type: e.target.value as RuleType } : x))} style={{ width: 130 }}>{(Object.keys(RULE_META) as RuleType[]).map((t) => <option key={t} value={t}>{RULE_META[t].label}</option>)}</select>
+                    {r.type === "in_range" && <><input placeholder="min" value={r.min ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, min: e.target.value } : x))} style={{ width: 66 }} /><input placeholder="max" value={r.max ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, max: e.target.value } : x))} style={{ width: 66 }} /></>}
+                    {r.type === "regex" && <input placeholder="pattern" value={r.pattern ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, pattern: e.target.value } : x))} style={{ width: 150 }} />}
+                    {r.type === "in_set" && <input placeholder="a, b, c" value={r.set ?? ""} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, set: e.target.value } : x))} style={{ width: 150 }} />}
+                    <select value={r.action} onChange={(e) => setRules((rs) => rs.map((x) => x.id === r.id ? { ...x, action: e.target.value as RuleAction } : x))} style={{ width: 120 }}>{(Object.keys(ACTION_META) as RuleAction[]).map((a) => <option key={a} value={a}>{ACTION_META[a].label}</option>)}</select>
+                    {ev && (() => { const rep = ev.report.find((x) => x.id === r.id); return rep ? <span className="note" style={{ color: rep.ok ? "var(--good)" : "var(--warn)" }}>{rep.ok ? "✓ pass" : `✗ ${rep.fails} fail`}</span> : null; })()}
+                    <button onClick={() => setRules((rs) => rs.filter((x) => x.id !== r.id))} style={{ background: "none", border: "none", color: "var(--faint)", fontSize: 15, cursor: "pointer" }}>×</button>
+                  </div>
+                ))}
+                {rules.length === 0 && <div className="note">No rules — add expectations like <b>not-null</b>, <b>in-range</b>, or <b>unique</b>, and pick an action (reject / drop / fix / warn) on failure.</div>}
+
+                <label className="fld" style={{ marginTop: 14 }}>Column lineage — where each output column came from</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {lin.map((l) => (
+                    <div key={l.col} style={{ fontSize: 12, fontFamily: "var(--mono)" }}><span style={{ color: "var(--accent)", fontWeight: 600 }}>{l.col}</span> <span style={{ color: "var(--faint)" }}>←</span> <span style={{ color: "var(--muted)" }}>{l.from.length ? l.from.join(", ") : "constant / new"}</span></div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* mode selector */}
       <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -667,7 +942,7 @@ function Inner() {
         <div className="card"><div className="card-h"><span className="t">Node details</span>{sel && <button className="btn ghost sm" onClick={removeSel}>Remove</button>}</div>
           <div className="card-b" style={{ maxHeight: 460, overflowY: "auto" }}>
             {!sel && <div className="note">Add a node from the palette, then click it to configure.</div>}
-            {sel && <NodeConfig node={sel} cols={cols} bCols={secondary?.cols || []} patchSel={patchSel} patchOp={patchOp} onUpload={() => fileRef.current?.click()} runLoad={runLoad} runSourceQuery={runSourceQuery} loadJsonSource={loadJsonSource} runExternal={runExternal} runSqlNode={runSqlNode} openDash={() => setDashOpen(true)} />}
+            {sel && <NodeConfig node={sel} cols={cols} bCols={secondary?.cols || []} patchSel={patchSel} patchOp={patchOp} onUpload={() => fileRef.current?.click()} runLoad={runLoad} runSourceQuery={runSourceQuery} runRestSource={runRestSource} loadJsonSource={loadJsonSource} runExternal={runExternal} runSqlNode={runSqlNode} openDash={() => setDashOpen(true)} />}
           </div>
         </div>
       </div>
@@ -721,7 +996,7 @@ function Inner() {
 }
 
 // ── per-node config editor ──
-function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, runSourceQuery, loadJsonSource, runExternal, runSqlNode, openDash }: { node: FNode; cols: string[]; bCols: string[]; patchSel: (p: Partial<NData>) => void; patchOp: (p: Partial<EtlOp>) => void; onUpload: () => void; runLoad: () => void; runSourceQuery: () => void; loadJsonSource: () => void; runExternal: () => void; runSqlNode: () => void; openDash: () => void }) {
+function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, runSourceQuery, runRestSource, loadJsonSource, runExternal, runSqlNode, openDash }: { node: FNode; cols: string[]; bCols: string[]; patchSel: (p: Partial<NData>) => void; patchOp: (p: Partial<EtlOp>) => void; onUpload: () => void; runLoad: () => void; runSourceQuery: () => void; runRestSource: () => void; loadJsonSource: () => void; runExternal: () => void; runSqlNode: () => void; openDash: () => void }) {
   const d = node.data; const c = d.color;
   const isExternalDb = d.kind === "load" && ["mysql", "postgres", "snowflake", "bigquery", "mongodb", "redshift"].includes(d.target || "");
   const nameField = (
@@ -755,7 +1030,7 @@ function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, r
 
           {/* Dynamic Fields */}
           {extractionConfig[d.srcType!]?.fields.map((field) => {
-            const val = (d as Record<string, any>)[field.id] || "";
+            const val = String((d as unknown as Record<string, unknown>)[field.id] || "");
             const isValid = field.required && val.length > 0;
             return (
               <div key={field.id} className="insp-field group-section">
@@ -787,6 +1062,12 @@ function NodeConfig({ node, cols, bCols, patchSel, patchOp, onUpload, runLoad, r
             <div className="insp-field"><div className="k">Query</div><textarea rows={2} value={d.dbQuery ?? "SELECT * FROM orders LIMIT 500;"} onChange={(e) => patchSel({ dbQuery: e.target.value })} /></div>
             <button className="btn sm block" onClick={runSourceQuery}>▶ Run query &amp; load</button>
             <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🔒</span><span>Runs a read-only SELECT against your <b>{d.srcType === "postgres" ? "Postgres" : "MySQL / TiDB"}</b> (private hosts blocked, capped at 2000 rows).</span></div>
+          </>}
+          {d.srcType === "rest" && <>
+            <div className="insp-field"><div className="k">API URL (GET, returns JSON)</div><input type="text" value={d.restUrl ?? ""} placeholder="https://api.example.com/v1/orders" onChange={(e) => patchSel({ restUrl: e.target.value })} /></div>
+            <div className="insp-field"><div className="k">JSON path (optional)</div><input type="text" value={d.restPath ?? ""} placeholder="data.items" onChange={(e) => patchSel({ restPath: e.target.value })} /></div>
+            <button className="btn sm" onClick={runRestSource}>▶ Fetch &amp; load</button>
+            <div className="teach-note" style={{ marginTop: 8 }}><span className="ic">🌐</span><span>GETs a public JSON API and flattens it to rows (array, or <code>data</code>/<code>rows</code>/<code>results</code>, or a dot-path). Private hosts blocked, capped at 5000 rows.</span></div>
           </>}
           {d.srcType === "json" && <>
             <div className="insp-field"><div className="k">JSON array of objects</div><textarea rows={5} value={d.jsonText ?? '[\n  {"id": 1, "region": "US", "amount": 120}\n]'} onChange={(e) => patchSel({ jsonText: e.target.value })} /></div>
@@ -935,6 +1216,19 @@ function OpConfig({ op, cols, bCols, patchOp, colSel }: { op: EtlOp; cols: strin
         <div className="insp-field"><div className="k">Date column</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
         <div className="insp-field"><div className="k">Extract</div><select value={o.fn} onChange={(e) => patchOp({ fn: e.target.value })}><option value="year">year</option><option value="month">month</option><option value="day">day</option><option value="weekday">weekday</option><option value="iso">ISO date</option><option value="days_since">days since</option></select></div>
         <div className="insp-field"><div className="k">Output column</div><input type="text" value={o.name ?? ""} onChange={(e) => patchOp({ name: e.target.value })} /></div>
+      </>}
+      {o.type === "scd2" && <>
+        <div className="insp-field"><div className="k">Business Key</div>{colSel(o.businessKey || o.col, (v) => patchOp({ businessKey: v, col: v }))}</div>
+        <div className="note" style={{ marginTop: 6, fontSize: 11 }}>Adds effective_start, effective_end, and is_current tracking fields automatically.</div>
+      </>}
+      {o.type === "fuzzydedupe" && <>
+        <div className="insp-field"><div className="k">Column to Deduplicate</div>{colSel(o.col, (v) => patchOp({ col: v }))}</div>
+        <div className="insp-field"><div className="k">Similarity Threshold ({o.threshold ?? 0.8})</div><input type="range" min="0.5" max="1.0" step="0.05" value={o.threshold ?? 0.8} onChange={(e) => patchOp({ threshold: parseFloat(e.target.value) })} style={{ width: "100%" }} /></div>
+      </>}
+      {o.type === "quality" && <>
+        <div className="insp-field"><div className="k">Column to Validate</div>{colSel(o.qualityCol || o.col, (v) => patchOp({ qualityCol: v, col: v }))}</div>
+        <div className="insp-field"><div className="k">Validation Rule</div><select value={o.rule || "not_null"} onChange={(e) => patchOp({ rule: e.target.value })}><option value="not_null">Not Null</option><option value="positive">Numeric &gt; 0</option><option value="numeric">Is Numeric</option></select></div>
+        <div className="insp-field"><div className="k">Status Column Name</div><input type="text" value={o.name ?? "_quality_status"} onChange={(e) => patchOp({ name: e.target.value })} /></div>
       </>}
     </>
   );

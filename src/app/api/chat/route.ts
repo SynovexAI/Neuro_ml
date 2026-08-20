@@ -27,8 +27,9 @@ export async function POST(req: Request) {
   let prov: Awaited<ReturnType<typeof getActiveProvider>>;
   try {
     prov = body.providerId
-      ? await getProviderById(String(body.providerId), user.id)
-      : await getActiveProvider(user.id);
+      ? await getProviderById(String(body.providerId), user.id, true)
+      : await getActiveProvider(user.id, true);
+    if (!prov) prov = await getActiveProvider(user.id, true);
   } catch {
     return NextResponse.json({ error: "Database error while loading provider config. Please retry." }, { status: 503 });
   }
@@ -57,17 +58,29 @@ export async function POST(req: Request) {
     ...(isStreaming ? { stream_options: { include_usage: true } } : {}),
   };
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(prov.baseUrl.replace(/\/$/, "") + "/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(prov.apiKey ? { Authorization: `Bearer ${prov.apiKey}` } : {}) },
-      body: JSON.stringify(payload),
-      signal: req.signal,
-    });
-  } catch (e) {
-    if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
-    return NextResponse.json({ error: `Could not reach provider: ${(e as Error).message}` }, { status: 502 });
+  let upstream!: Response;
+  const maxRetries = 3;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      upstream = await fetch(prov.baseUrl.replace(/\/$/, "") + "/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(prov.apiKey ? { Authorization: `Bearer ${prov.apiKey}` } : {}) },
+        body: JSON.stringify(payload),
+        signal: req.signal,
+      });
+      // If 503 (high demand), 429 (rate limit), or 502/504, retry after backoff
+      if ([503, 429, 502, 504].includes(upstream.status) && attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, (attempt + 1) * 800));
+        continue;
+      }
+      break;
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return new Response(null, { status: 499 });
+      if (attempt === maxRetries - 1) {
+        return NextResponse.json({ error: `Could not reach provider: ${(e as Error).message}` }, { status: 502 });
+      }
+      await new Promise((r) => setTimeout(r, (attempt + 1) * 800));
+    }
   }
   if (!upstream.ok || !upstream.body) {
     const t = await upstream.text().catch(() => "");

@@ -11,9 +11,11 @@ export async function GET(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  // Students see/use only their OWN keys; admins also see the shared/global providers.
+  const includeGlobal = user.role === "admin";
   let allProviders: Awaited<ReturnType<typeof getEnabledProviders>>;
   try {
-    allProviders = await getEnabledProviders(user.id);
+    allProviders = await getEnabledProviders(user.id, includeGlobal);
   } catch {
     return NextResponse.json({ providers: [], models: [], provider: null, default: "" });
   }
@@ -26,8 +28,8 @@ export async function GET(req: Request) {
 
   // Resolve the target provider via getProviderById (checks the user's own keys AND global);
   // fall back to the first available one if the requested id is stale.
-  let p = requestedId ? await getProviderById(requestedId, user.id) : null;
-  if (!p) p = await getProviderById(allProviders[0].id, user.id);
+  let p = requestedId ? await getProviderById(requestedId, user.id, includeGlobal) : null;
+  if (!p) p = await getProviderById(allProviders[0].id, user.id, includeGlobal);
   if (!p) return NextResponse.json({ providers: allProviders, models: [], provider: null, default: "" });
 
   let models: string[];
