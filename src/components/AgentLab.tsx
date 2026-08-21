@@ -8,8 +8,10 @@ import {
 } from "@/lib/agentTools";
 import { parseRecords, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
-import NatAgentPanel from "./NatAgentPanel";
+import AgentOrchestrationPanel from "./AgentOrchestrationPanel";
 import AgentOutput from "@/components/AgentOutput";
+import ConfidenceGauge from "./ConfidenceGauge";
+import { computeConfidenceScore, synthesizeComparison, type ConfidenceMetrics, type ComparisonResult } from "@/lib/agentEval";
 import { toast } from "@/lib/toast";
 
 type AgentType = "react" | "workflow";
@@ -1221,7 +1223,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     }, 400);
   };
   const [agentType, setAgentType] = useState<AgentType>("react");
-  const [runtime, setRuntime] = useState<"browser" | "nat">("browser");
+  const [runtime, setRuntime] = useState<"browser" | "orchestration">("browser");
   const [buildMode, setBuildMode] = useState<"visual" | "manual" | "prompt">("visual");
 
   // providers / models
@@ -1353,8 +1355,23 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [addOpen, setAddOpen] = useState(false);
   const [nodeStatus, setNodeStatus] = useState<Record<string, string>>({});
   const [fullscreen, setFullscreen] = useState(false);
-  const [connectFrom, setConnectFrom] = useState<{ id: string; kind: "tool" | "agent" } | null>(null);
+  const [connectFrom, setConnectFrom] = useState<{ id: string; kind: "tool" | "agent" | "tool-out" | "tool-in" } | null>(null);
   const [connectXY, setConnectXY] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [toolLinks, setToolLinks] = useState<{ from: string; to: string }[]>([]);
+  const [confidence, setConfidence] = useState<ConfidenceMetrics | null>(null);
+
+  // A/B Comparison state
+  const [isCompareMode, setIsCompareMode] = useState(false);
+  const [compareProviderId, setCompareProviderId] = useState("");
+  const [compareModel, setCompareModel] = useState("");
+  const [compareModelList, setCompareModelList] = useState<string[]>([]);
+  const [compareRunning, setCompareRunning] = useState(false);
+  const [compareTrace, setCompareTrace] = useState<TraceItem[]>([]);
+  const [compareFinalOut, setCompareFinalOut] = useState("");
+  const [compareMetrics, setCompareMetrics] = useState<{ calls: number; tools: number; ms: number; tokens: number } | null>(null);
+  const [compareConfidence, setCompareConfidence] = useState<ConfidenceMetrics | null>(null);
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResult | null>(null);
+
   const [saved, setSaved] = useState(false);
   const [savedProjectId, setSavedProjectId] = useState("");
   const [publishing, setPublishing] = useState(false);
@@ -1386,7 +1403,15 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     fetch("/api/models").then((r) => r.json()).then((j) => {
       setProvKnown(true);
       setProviders(j.providers || []);
-      if (j.providers?.length) { setProviderId(j.providerId || j.providers[0].id); setModelList(j.models || []); setModel(j.default || (j.models && j.models[0]) || ""); }
+      if (j.providers?.length) {
+        setProviderId(j.providerId || j.providers[0].id);
+        setModelList(j.models || []);
+        setModel(j.default || (j.models && j.models[0]) || "");
+        // Set defaults for comparison
+        setCompareProviderId(j.providerId || j.providers[0].id);
+        setCompareModelList(j.models || []);
+        setCompareModel(j.models && j.models.length > 1 ? j.models[1] : (j.default || ""));
+      }
     }).catch(() => setProvKnown(true));
   }, []);
   useEffect(() => {
@@ -1416,7 +1441,22 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       if (e.key !== "Delete" && e.key !== "Backspace") return;
       const el = document.activeElement as HTMLElement | null;
       if (el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName)) return;
-      if (aSel.startsWith("tool:")) { e.preventDefault(); const id = aSel.slice(5); setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; }); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); setASel("agent"); }
+      if (aSel.startsWith("pipe:")) {
+        e.preventDefault();
+        const parts = aSel.replace("pipe:", "").split("->");
+        if (parts.length === 2) {
+          setToolLinks((prev) => prev.filter((l) => !(l.from === parts[0] && l.to === parts[1])));
+          setASel("agent");
+          toast("Removed tool link", "info");
+        }
+      } else if (aSel.startsWith("tool:")) {
+        e.preventDefault();
+        const id = aSel.slice(5);
+        setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; });
+        setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; });
+        setToolLinks((prev) => prev.filter((l) => l.from !== id && l.to !== id));
+        setASel("agent");
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1424,14 +1464,21 @@ Explore any connected node on the Concept Network Tree above for detailed visual
 
   const hasProvider = providers.length > 0;
   const toolList = availableTools.filter((t) => enabledTools.has(t.id));
-  const togglePlaced = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); if (n.has(id)) { n.delete(id); setEnabledTools((e) => { const m = new Set(e); m.delete(id); return m; }); } else { n.add(id); setEnabledTools((e) => new Set(e).add(id)); } return n; }); };
+  const togglePlaced = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); if (n.has(id)) { n.delete(id); setEnabledTools((e) => { const m = new Set(e); m.delete(id); return m; }); setToolLinks((tl) => tl.filter((l) => l.from !== id && l.to !== id)); } else { n.add(id); setEnabledTools((e) => new Set(e).add(id)); } return n; }); };
   const connectTool = (id: string) => { setNodePos({}); setPlacedTools((s) => new Set(s).add(id)); setEnabledTools((s) => new Set(s).add(id)); };
-  const disconnectTool = (id: string) => { setNodePos({}); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
-  const removeToolNode = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; }); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); };
+  const disconnectTool = (id: string) => { setNodePos({}); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); setToolLinks((tl) => tl.filter((l) => l.from !== id && l.to !== id)); };
+  const removeToolNode = (id: string) => { setNodePos({}); setPlacedTools((s) => { const n = new Set(s); n.delete(id); return n; }); setEnabledTools((s) => { const n = new Set(s); n.delete(id); return n; }); setToolLinks((tl) => tl.filter((l) => l.from !== id && l.to !== id)); };
   const toggleManual = (id: string) => (enabledTools.has(id) ? disconnectTool(id) : connectTool(id));
   function loadModels(pid: string) {
     setProviderId(pid);
     fetch(`/api/models?providerId=${pid}`).then((r) => r.json()).then((j) => { setModelList(j.models || []); setModel(j.default || (j.models && j.models[0]) || ""); }).catch(() => {});
+  }
+  function loadCompareModels(pid: string) {
+    setCompareProviderId(pid);
+    fetch(`/api/models?providerId=${pid}`).then((r) => r.json()).then((j) => {
+      setCompareModelList(j.models || []);
+      setCompareModel((j.models && j.models[0]) || j.default || "");
+    }).catch(() => {});
   }
   const providerLabel = providers.find((p) => p.id === providerId)?.label || providers.find((p) => p.id === providerId)?.provider || "provider";
 
@@ -1554,13 +1601,13 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const subNodes = ["model", ...placedOrder.map((tid) => "tool:" + tid)];
 
   const getDefaultPos = (id: string): { x: number; y: number } => {
-    const W = Math.max(540, canvasW);
-    const topY = 65;
+    const W = Math.max(680, canvasW);
+    const topY = 56;
     const agentW = 190;
     const agentX = Math.round((W - agentW) / 2);
 
     if (id === "trigger") {
-      const margin = Math.max(20, Math.round(W * 0.04));
+      const margin = Math.max(28, Math.round(W * 0.04));
       return { x: margin, y: topY };
     }
     if (id === "agent") {
@@ -1568,35 +1615,38 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     }
     if (id === "output") {
       const outputW = 135;
-      const margin = Math.max(20, Math.round(W * 0.04));
+      const margin = Math.max(28, Math.round(W * 0.04));
       return { x: Math.round(W - outputW - margin), y: topY };
     }
 
-    // Sub-nodes: Model and tools arranged symmetrically and evenly below Agent
+    // Sub-nodes: Model and tools arranged symmetrically and evenly below Agent with generous spacing
     const idx = subNodes.indexOf(id);
-    if (idx === -1) return { x: 20, y: 225 };
+    if (idx === -1) return { x: 28, y: 240 };
     const total = subNodes.length;
-    const nodeW = 150;
+    const nodeW = 142;
+    const subY = 240;
 
     if (total <= 4) {
       // Clean single-row layout with generous, proportional gaps
-      const idealGap = total === 1 ? 0 : total === 2 ? 48 : total === 3 ? 32 : 24;
-      const maxPossibleGap = total > 1 ? Math.floor((W - 40 - total * nodeW) / (total - 1)) : 0;
-      const gap = Math.max(16, Math.min(idealGap, maxPossibleGap));
+      const idealGap = total === 1 ? 0 : total === 2 ? 64 : total === 3 ? 52 : 40;
+      const maxPossibleGap = total > 1 ? Math.floor((W - 60 - total * nodeW) / (total - 1)) : 0;
+      const gap = Math.max(36, Math.min(idealGap, maxPossibleGap));
       const totalW = total * nodeW + (total - 1) * gap;
-      const startX = Math.max(16, Math.round((W - totalW) / 2));
-      return { x: Math.round(startX + idx * (nodeW + gap)), y: 225 };
+      const startX = Math.max(24, Math.round((W - totalW) / 2));
+      return { x: Math.round(startX + idx * (nodeW + gap)), y: subY };
     }
 
-    // Wrap into 2 balanced rows if 5+ tools are added
+    // Wrap into 2 balanced rows if 5+ tools are added with comfortable vertical and horizontal breathing room
     const itemsPerRow = Math.ceil(total / 2);
     const row = Math.floor(idx / itemsPerRow);
     const col = idx % itemsPerRow;
     const countInRow = Math.min(itemsPerRow, total - row * itemsPerRow);
-    const gap = Math.max(16, Math.min(28, Math.floor((W - 40 - countInRow * nodeW) / Math.max(1, countInRow - 1))));
+    const idealGap = 38;
+    const maxPossibleGap = Math.floor((W - 60 - countInRow * nodeW) / Math.max(1, countInRow - 1));
+    const gap = Math.max(30, Math.min(idealGap, maxPossibleGap));
     const rowW = countInRow * nodeW + (countInRow - 1) * gap;
-    const startX = Math.max(16, Math.round((W - rowW) / 2));
-    return { x: Math.round(startX + col * (nodeW + gap)), y: 215 + row * 70 };
+    const startX = Math.max(24, Math.round((W - rowW) / 2));
+    return { x: Math.round(startX + col * (nodeW + gap)), y: subY + row * 76 };
   };
 
   const getPos = (id: string) => nodePos[id] || getDefaultPos(id);
@@ -1611,10 +1661,10 @@ Explore any connected node on the Concept Network Tree above for detailed visual
 
   const agentNode = nodes.find((n) => n.id === "agent")!;
 
-  function portPos(n: ANode, which: "in" | "out" | "top" | string | number): [number, number] {
+  function portPos(n: ANode, which: "in" | "out" | "top" | "in-tool" | "out-tool" | string | number): [number, number] {
     const p = getPos(n.id);
-    if (which === "in") return [p.x, p.y + n.h / 2];
-    if (which === "out") return [p.x + n.w, p.y + n.h / 2];
+    if (which === "in" || which === "in-tool") return [p.x, p.y + n.h / 2];
+    if (which === "out" || which === "out-tool") return [p.x + n.w, p.y + n.h / 2];
     if (which === "top") return [p.x + n.w / 2, p.y];
     const idx = typeof which === "number" ? which : subNodes.indexOf(String(which));
     const total = Math.max(1, subNodes.length);
@@ -1624,10 +1674,11 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   }
 
   const wires = [
-    { from: "trigger", to: "agent", kind: "main" },
-    { from: "agent", to: "output", kind: "main" },
-    { from: "model", to: "agent", kind: "sub" },
-    ...[...enabledTools].filter((tid) => placedTools.has(tid)).map((tid) => ({ from: "tool:" + tid, to: "agent", kind: "sub" })),
+    { id: "main:trigger-agent", from: "trigger", to: "agent", kind: "main" },
+    { id: "main:agent-output", from: "agent", to: "output", kind: "main" },
+    { id: "sub:model-agent", from: "model", to: "agent", kind: "sub" },
+    ...[...enabledTools].filter((tid) => placedTools.has(tid)).map((tid) => ({ id: "tool-agent:" + tid, from: "tool:" + tid, to: "agent", kind: "sub" })),
+    ...toolLinks.map((tl) => ({ id: `pipe:${tl.from}->${tl.to}`, from: "tool:" + tl.from, to: "tool:" + tl.to, kind: "tool-pipe" })),
   ];
 
   function wirePath(w: { from: string; to: string; kind: string }): string {
@@ -1637,6 +1688,12 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       const [x1, y1] = portPos(a, "out");
       const [x2, y2] = portPos(b, "in");
       const dx = Math.max(40, (x2 - x1) / 2);
+      return `M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+    }
+    if (w.kind === "tool-pipe") {
+      const [x1, y1] = portPos(a, "out-tool");
+      const [x2, y2] = portPos(b, "in-tool");
+      const dx = Math.max(35, Math.abs(x2 - x1) / 2);
       return `M${x1} ${y1} C${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
     }
     const [sx, sy] = portPos(a, "top");
@@ -1653,7 +1710,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   }
 
   // Drag a port to another node to wire it up (n8n-style start→end connection).
-  function portDown(e: React.PointerEvent, id: string, kind: "tool" | "agent") {
+  function portDown(e: React.PointerEvent, id: string, kind: "tool" | "agent" | "tool-out" | "tool-in") {
     e.stopPropagation(); e.preventDefault();
     const canvas = canvasRef.current; if (!canvas) return;
     const rel = (cx: number, cy: number) => { const r = canvas.getBoundingClientRect(); return { x: cx - r.left + canvas.scrollLeft, y: cy - r.top + canvas.scrollTop }; };
@@ -1664,8 +1721,29 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       const pt = rel(ev.clientX, ev.clientY);
       const hit = nodes.find((n) => { const p = getPos(n.id); return pt.x >= p.x && pt.x <= p.x + n.w && pt.y >= p.y && pt.y <= p.y + n.h; });
       if (hit) {
-        if (kind === "tool" && hit.id === "agent") connectTool(id.replace("tool:", ""));
-        else if (kind === "agent" && hit.type === "tool") connectTool(hit.toolId!);
+        if (kind === "tool" && hit.id === "agent") {
+          connectTool(id.replace("tool:", ""));
+        } else if (kind === "agent" && hit.type === "tool") {
+          connectTool(hit.toolId!);
+        } else if ((kind === "tool-out" || kind === "tool") && hit.type === "tool" && hit.id !== id) {
+          const fromTid = id.replace("tool:", "");
+          const toTid = hit.toolId!;
+          setToolLinks((prev) => {
+            if (prev.some((l) => l.from === fromTid && l.to === toTid)) return prev;
+            return [...prev, { from: fromTid, to: toTid }];
+          });
+          setEnabledTools((prev) => new Set([...prev, fromTid, toTid]));
+          toast(`🔗 Chained ${TOOL_META[fromTid]?.label || fromTid} ➔ ${TOOL_META[toTid]?.label || toTid}`, "success");
+        } else if (kind === "tool-in" && hit.type === "tool" && hit.id !== id) {
+          const toTid = id.replace("tool:", "");
+          const fromTid = hit.toolId!;
+          setToolLinks((prev) => {
+            if (prev.some((l) => l.from === fromTid && l.to === toTid)) return prev;
+            return [...prev, { from: fromTid, to: toTid }];
+          });
+          setEnabledTools((prev) => new Set([...prev, fromTid, toTid]));
+          toast(`🔗 Chained ${TOOL_META[fromTid]?.label || fromTid} ➔ ${TOOL_META[toTid]?.label || toTid}`, "success");
+        }
       }
       setConnectFrom(null);
     };
@@ -1675,8 +1753,21 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   function tempWirePath(): string {
     if (!connectFrom) return "";
     let src: [number, number];
-    if (connectFrom.kind === "agent") src = portPos(agentNode, 0);
-    else { const tn = nodes.find((n) => n.id === connectFrom.id); if (!tn) return ""; src = portPos(tn, "top"); }
+    if (connectFrom.kind === "agent") {
+      src = portPos(agentNode, 0);
+    } else if (connectFrom.kind === "tool-out") {
+      const tn = nodes.find((n) => n.id === connectFrom.id);
+      if (!tn) return "";
+      src = portPos(tn, "out-tool");
+    } else if (connectFrom.kind === "tool-in") {
+      const tn = nodes.find((n) => n.id === connectFrom.id);
+      if (!tn) return "";
+      src = portPos(tn, "in-tool");
+    } else {
+      const tn = nodes.find((n) => n.id === connectFrom.id);
+      if (!tn) return "";
+      src = portPos(tn, "top");
+    }
     return `M${src[0]} ${src[1]} C${src[0]} ${src[1] + 40}, ${connectXY.x} ${connectXY.y - 40}, ${connectXY.x} ${connectXY.y}`;
   }
 
@@ -1688,32 +1779,99 @@ Explore any connected node on the Concept Network Tree above for detailed visual
           const toSt = nodeStatus[w.to] || "";
           const isRunning = fromSt === "running" || toSt === "running";
           const isDone = (fromSt === "done" || fromSt === "running") && (toSt === "done" || toSt === "running");
-          const sel = w.kind === "sub" && aSel === w.from;
-          const wireClass = `${w.kind === "sub" ? "sub" : ""} ${isRunning ? "active-running" : isDone ? "active-done" : ""} ${sel ? "selw" : ""}`;
-          return <path key={i} className={wireClass} d={wirePath(w)} />;
+          const sel = (w.kind === "sub" && aSel === w.from) || (w.kind === "tool-pipe" && aSel === w.id);
+          const wireClass = `${w.kind === "sub" ? "sub" : w.kind === "tool-pipe" ? "tool-pipe" : ""} ${isRunning ? "active-running" : isDone ? "active-done" : ""} ${sel ? "selw" : ""}`;
+          return <path key={w.id || i} className={wireClass} d={wirePath(w)} />;
         })}
-        {wires.filter((w) => w.kind === "sub").map((w, i) => <path key={"hit" + i} className="wire-hit" d={wirePath(w)} onClick={(e) => { e.stopPropagation(); setASel(w.from); }} />)}
+        {wires.filter((w) => w.kind === "sub" || w.kind === "tool-pipe").map((w, i) => (
+          <path
+            key={"hit" + (w.id || i)}
+            className="wire-hit"
+            d={wirePath(w)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setASel(w.kind === "tool-pipe" ? w.id : w.from);
+            }}
+          />
+        ))}
         {connectFrom && <path className="sub selw" d={tempWirePath()} />}
       </svg>
-      {nodes.map((n) => { const pos = getPos(n.id); const st = nodeStatus[n.id] || ""; const unwired = n.type === "tool" && !enabledTools.has(n.toolId!); return (
-        <div key={n.id} className={`anode type-${n.type} ${aSel === n.id ? "sel" : ""} ${st} ${unwired ? "unwired" : ""}`} style={{ left: pos.x, top: pos.y, width: n.w }} onPointerDown={(e) => onNodeDown(e, n.id)}>
-          <div className="ah"><span className="aic">{n.icon}</span><div><div className="atitle">{n.title}</div><div className="asub">{unwired ? "drag ↑ to connect" : n.sub}</div></div><span className="abadge" /></div>
-          {n.type === "tool" && <span className="aport ap-top" title="drag to the Agent to connect" onPointerDown={(e) => portDown(e, n.id, "tool")} />}
-          {n.type === "agent" && subNodes.map((subId, idx) => {
-            const px = (n.w * (idx + 1)) / (subNodes.length + 1);
-            return (
+      {nodes.map((n) => {
+        const pos = getPos(n.id);
+        const st = nodeStatus[n.id] || "";
+        const unwired = n.type === "tool" && !enabledTools.has(n.toolId!);
+        return (
+          <div
+            key={n.id}
+            className={`anode type-${n.type} ${aSel === n.id ? "sel" : ""} ${st} ${unwired ? "unwired" : ""}`}
+            style={{ left: pos.x, top: pos.y, width: n.w }}
+            onPointerDown={(e) => onNodeDown(e, n.id)}
+          >
+            <div className="ah">
+              <span className="aic">{n.icon}</span>
+              <div>
+                <div className="atitle">{n.title}</div>
+                <div className="asub">{unwired ? "drag ↑ to connect" : n.sub}</div>
+              </div>
+              <span className="abadge" />
+            </div>
+
+            {/* Top port: connects to central agent */}
+            {n.type === "tool" && (
               <span
-                key={subId}
-                className="aport ap-agent-bottom"
-                style={{ left: px, bottom: -5 }}
-                title="drag to a tool to connect"
-                onPointerDown={(e) => portDown(e, "agent", "agent")}
+                className="aport ap-top"
+                title="Connect to Agent (drag up)"
+                onPointerDown={(e) => portDown(e, n.id, "tool")}
               />
-            );
-          })}
-          {n.type === "tool" && <button className="anode-x" title="Remove node" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); removeToolNode(n.toolId!); if (aSel === n.id) setASel("agent"); }}>×</button>}
-        </div>
-      ); })}
+            )}
+
+            {/* Left & Right ports: tool-to-tool orchestration chaining */}
+            {n.type === "tool" && (
+              <>
+                <span
+                  className="aport ap-in-tool"
+                  title="Chain Input: drag from another tool here"
+                  onPointerDown={(e) => portDown(e, n.id, "tool-in")}
+                />
+                <span
+                  className="aport ap-out-tool"
+                  title="Chain Output: drag to another tool to pipe"
+                  onPointerDown={(e) => portDown(e, n.id, "tool-out")}
+                />
+              </>
+            )}
+
+            {n.type === "agent" &&
+              subNodes.map((subId, idx) => {
+                const px = (n.w * (idx + 1)) / (subNodes.length + 1);
+                return (
+                  <span
+                    key={subId}
+                    className="aport ap-agent-bottom"
+                    style={{ left: px, bottom: -5 }}
+                    title="drag to a tool to connect"
+                    onPointerDown={(e) => portDown(e, "agent", "agent")}
+                  />
+                );
+              })}
+
+            {n.type === "tool" && (
+              <button
+                className="anode-x"
+                title="Remove node"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeToolNode(n.toolId!);
+                  if (aSel === n.id) setASel("agent");
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 
@@ -1741,7 +1899,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
 
   // ── RUN ──
   async function runReact() {
-    setRunning(true); setTrace([]); setFinalOut(""); setMsg(""); setMetrics(null); setPendingApproval(null);
+    setRunning(true); setTrace([]); setFinalOut(""); setConfidence(null); setMsg(""); setMetrics(null); setPendingApproval(null);
     setNodeStatus({ trigger: "done", model: "done", agent: "running" });
     const ctx: ToolCtx = {
       requestApproval: (q) => new Promise<string>((resolve) => setPendingApproval({ q, resolve })),
@@ -1757,12 +1915,21 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       ctx.dbCustomSchema = dbCustomSchema.trim();
     }
     const tools: AgentTool[] = toolList;
-    const messages: { role: string; content: string }[] = [{ role: "system", content: reactSystemPrompt(tools, goal, { a2ui }) }, { role: "user", content: task }];
-    const push = (t: TraceItem) => setTrace((tr) => [...tr, t]);
+    const messages: { role: string; content: string }[] = [
+      { role: "system", content: reactSystemPrompt(tools, goal, { a2ui, chainedTools: toolLinks }) },
+      { role: "user", content: task }
+    ];
+    const traceItems: TraceItem[] = [];
+    const push = (t: TraceItem) => {
+      traceItems.push(t);
+      setTrace([...traceItems]);
+    };
     const est = (s: string) => Math.round(s.length / 4);
     let calls = 0, toolsUsed = 0, tokens = 0; const t0 = performance.now();
     const toolCounts: Record<string, number> = {};
     let iterations = 0, outcome = "max_iters", errorMsg = "";
+    let producedAnswer = "";
+
     try {
       for (let iter = 0; iter < maxIters; iter++) {
         iterations = iter + 1;
@@ -1772,27 +1939,191 @@ Explore any connected node on the Concept Network Tree above for detailed visual
         const resp = await chatOnce(messages, temperature, Math.min(maxTokens, 500), providerId, model);
         tokens += est(resp);
         const p = parseReAct(resp);
-        setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" }; return c; });
-        if (p.final || (!p.action && !p.final)) { const ans = formatFinalAnswer(p.final || resp); setFinalOut(ans); push({ kind: "final", text: ans, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); outcome = "success"; break; }
+        traceItems[traceItems.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" };
+        setTrace([...traceItems]);
+
+        if (p.final || (!p.action && !p.final)) {
+          const ans = formatFinalAnswer(p.final || resp);
+          producedAnswer = ans;
+          setFinalOut(ans);
+          push({ kind: "final", text: ans, state: "done" });
+          setNodeStatus((s) => ({ ...s, agent: "done", output: "done" }));
+          outcome = "success";
+          break;
+        }
         const tool = tools.find((t) => t.name.toLowerCase() === (p.action || "").toLowerCase());
         push({ kind: "action", text: p.input || "", tool: p.action, state: "active" });
         if (tool) { toolsUsed++; toolCounts[tool.name] = (toolCounts[tool.name] || 0) + 1; setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "running" })); }
         const obs = tool ? await tool.run(p.input || "", ctx) : `Unknown tool "${p.action}". Available: ${tools.map((t) => t.name).join(", ")}.`;
         if (tool) setNodeStatus((s) => ({ ...s, ["tool:" + tool.id]: "done" }));
-        setTrace((tr) => { const c = [...tr]; c[c.length - 1] = { ...c[c.length - 1], state: "done" }; return c; });
+        traceItems[traceItems.length - 1] = { ...traceItems[traceItems.length - 1], state: "done" };
+        setTrace([...traceItems]);
         push({ kind: "observation", text: obs, state: "done" });
         messages.push({ role: "assistant", content: resp }); messages.push({ role: "user", content: `Observation: ${obs}` });
-        if (iter === maxIters - 1) { push({ kind: "error", text: `Reached the ${maxIters}-step limit without a final answer.`, state: "done" }); setNodeStatus((s) => ({ ...s, agent: "done", output: "done" })); }
+        if (iter === maxIters - 1) {
+          push({ kind: "error", text: `Reached the ${maxIters}-step limit without a final answer.`, state: "done" });
+          setNodeStatus((s) => ({ ...s, agent: "done", output: "done" }));
+        }
       }
-    } catch (e) { outcome = "error"; errorMsg = (e as Error).message; push({ kind: "error", text: (e as Error).message, state: "done" }); }
+    } catch (e) {
+      outcome = "error";
+      errorMsg = (e as Error).message;
+      push({ kind: "error", text: (e as Error).message, state: "done" });
+    }
     const ms = Math.round(performance.now() - t0);
     setMetrics({ calls, tools: toolsUsed, ms, tokens });
+
+    // Compute grounded confidence score percentage
+    const conf = computeConfidenceScore({
+      finalAnswer: producedAnswer,
+      trace: traceItems,
+      iterations,
+      maxIters,
+      outcome,
+      task,
+    });
+    setConfidence(conf);
+
     logAgentRun({
       agentName: name, agentType: "react", runtime: "browser", provider: providerLabel, model,
       iterations, toolCalls: Object.entries(toolCounts).map(([tool, count]) => ({ tool, count })),
       toolCallCount: toolsUsed, totalTokens: tokens, latencyMs: ms, outcome, errorMsg,
     });
     setPendingApproval(null); setRunning(false);
+  }
+
+  // ── DUAL AGENT COMPARISON RUNNER ──
+  async function runCompareBoth() {
+    if (!task.trim()) return;
+    setRunning(true);
+    setCompareRunning(true);
+    setTrace([]);
+    setCompareTrace([]);
+    setFinalOut("");
+    setCompareFinalOut("");
+    setConfidence(null);
+    setCompareConfidence(null);
+    setComparisonResult(null);
+    setMsg("");
+
+    const ctx: ToolCtx = {
+      selectedRagId: selectedRagId || undefined,
+      a2ui,
+    };
+    if (enabledTools.has("knowledge")) {
+      const kb = buildKnowledge(knowledgeText);
+      if (kb) { ctx.knowledgeIndex = kb.index as RagIndex; ctx.knowledgeChunks = kb.chunks; }
+    }
+    if ((enabledTools.has("db_query") || enabledTools.has("db_schema")) && dbDataText.trim()) {
+      ctx.dbTable = parseRecords(dbDataText);
+      ctx.dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "orders";
+    }
+
+    const tools: AgentTool[] = toolList;
+    const est = (s: string) => Math.round(s.length / 4);
+
+    // Runner helper for one variant
+    async function executeVariant(
+      targetProviderId: string,
+      targetModel: string,
+      onPush: (t: TraceItem) => void,
+      onTraceUpdate: (idx: number, t: TraceItem) => void,
+      isPrimary: boolean
+    ): Promise<{ answer: string; traceItems: TraceItem[]; metrics: { calls: number; tools: number; ms: number; tokens: number }; confidence: ConfidenceMetrics }> {
+      const msgs = [
+        { role: "system", content: reactSystemPrompt(tools, goal, { a2ui, chainedTools: toolLinks }) },
+        { role: "user", content: task }
+      ];
+      const traceArr: TraceItem[] = [];
+      const addTrace = (t: TraceItem) => { traceArr.push(t); onPush(t); };
+      let calls = 0, toolsUsed = 0, tokens = 0; const t0 = performance.now();
+      let iterations = 0, outcome = "max_iters";
+      let ans = "";
+
+      try {
+        for (let iter = 0; iter < Math.min(maxIters, 6); iter++) {
+          iterations = iter + 1;
+          addTrace({ kind: "thought", text: "thinking…", state: "active" });
+          tokens += msgs.reduce((a, m) => a + est(m.content), 0); calls++;
+          const resp = await chatOnce(msgs, temperature, Math.min(maxTokens, 450), targetProviderId || providerId, targetModel || model);
+          tokens += est(resp);
+          const p = parseReAct(resp);
+          traceArr[traceArr.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" };
+          onTraceUpdate(traceArr.length - 1, traceArr[traceArr.length - 1]);
+
+          if (p.final || (!p.action && !p.final)) {
+            ans = formatFinalAnswer(p.final || resp);
+            addTrace({ kind: "final", text: ans, state: "done" });
+            outcome = "success";
+            break;
+          }
+          const tool = tools.find((t) => t.name.toLowerCase() === (p.action || "").toLowerCase());
+          addTrace({ kind: "action", text: p.input || "", tool: p.action, state: "active" });
+          if (tool) toolsUsed++;
+          const obs = tool ? await tool.run(p.input || "", ctx) : `Unknown tool "${p.action}".`;
+          traceArr[traceArr.length - 1] = { ...traceArr[traceArr.length - 1], state: "done" };
+          onTraceUpdate(traceArr.length - 1, traceArr[traceArr.length - 1]);
+          addTrace({ kind: "observation", text: obs, state: "done" });
+          msgs.push({ role: "assistant", content: resp }); msgs.push({ role: "user", content: `Observation: ${obs}` });
+          if (iter === maxIters - 1) {
+            addTrace({ kind: "error", text: "Reached iteration limit.", state: "done" });
+          }
+        }
+      } catch (e) {
+        outcome = "error";
+        addTrace({ kind: "error", text: (e as Error).message, state: "done" });
+      }
+
+      const ms = Math.round(performance.now() - t0);
+      const metricsObj = { calls, tools: toolsUsed, ms, tokens };
+      const conf = computeConfidenceScore({ finalAnswer: ans, trace: traceArr, iterations, maxIters, outcome, task });
+      return { answer: ans, traceItems: traceArr, metrics: metricsObj, confidence: conf };
+    }
+
+    try {
+      // Execute Variant A
+      const resA = await executeVariant(
+        providerId,
+        model,
+        (t) => setTrace((prev) => [...prev, t]),
+        (idx, t) => setTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
+        true
+      );
+      setFinalOut(resA.answer);
+      setMetrics(resA.metrics);
+      setConfidence(resA.confidence);
+
+      // Execute Variant B
+      const targetBModel = compareModel || model;
+      const targetBProv = compareProviderId || providerId;
+      const resB = await executeVariant(
+        targetBProv,
+        targetBModel,
+        (t) => setCompareTrace((prev) => [...prev, t]),
+        (idx, t) => setCompareTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
+        false
+      );
+      setCompareFinalOut(resB.answer);
+      setCompareMetrics(resB.metrics);
+      setCompareConfidence(resB.confidence);
+
+      // Synthesize comparison verdict
+      const comparison = synthesizeComparison({
+        task,
+        answerA: resA.answer,
+        scoreA: resA.confidence,
+        modelA: model || providerLabel,
+        answerB: resB.answer,
+        scoreB: resB.confidence,
+        modelB: targetBModel || "Model B",
+      });
+      setComparisonResult(comparison);
+    } catch (e) {
+      setMsg("Comparison error: " + (e as Error).message);
+    } finally {
+      setRunning(false);
+      setCompareRunning(false);
+    }
   }
   // Fire-and-forget: persist a run summary for the agent analytics dashboard.
   function logAgentRun(payload: Record<string, unknown>) {
@@ -2107,13 +2438,26 @@ if __name__ == "__main__":
 
   return (
     <>
-      <div className="lab-head">
-        <div><div className="eyebrow">Lab 03 · orchestration</div><h2 className="page-h">Agent Lab</h2><p className="page-sub" style={{ margin: 0 }}>Pick an agent type, wire it up on a node canvas (or by form / from a prompt), then run it and watch every step.</p></div>
-        <div className="acts" style={{ position: "relative" }}>
-          <div className="seg" style={{ width: 210, marginRight: 6 }}>
-            <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>In-browser</button>
-            <button className={runtime === "nat" ? "on" : ""} onClick={() => setRuntime("nat")}>NVIDIA NAT</button>
-          </div>
+      <div className="lab-head" style={{ marginBottom: 14 }}>
+        <div>
+          <div className="eyebrow">Lab 03 · orchestration</div>
+          <h2 className="page-h">Agent Lab</h2>
+          <p className="page-sub" style={{ margin: 0 }}>Pick an agent type, wire it up on a node canvas (or by form / from a prompt), then run it and watch every step.</p>
+        </div>
+      </div>
+
+      {/* Top Toolbar: Mode Switcher on Left & Action Buttons on Far Right */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12, position: "relative" }}>
+        <div className="seg" style={{ width: 250, margin: 0 }}>
+          <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>
+            In-browser
+          </button>
+          <button className={runtime === "orchestration" ? "on" : ""} onClick={() => setRuntime("orchestration")}>
+            Orchestration
+          </button>
+        </div>
+
+        <div className="acts" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative", marginLeft: "auto" }}>
           {runtime === "browser" && <>
             <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
             <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
@@ -2123,12 +2467,24 @@ if __name__ == "__main__":
               ? <><Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f" }}>● Published</Link><button className="btn ghost sm" onClick={unpublishAgent} disabled={publishing} title="Remove from the Workroom">Unpublish</button></>
               : <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>}
           </>}
-          {loadOpen && <div className="addmenu2" style={{ top: 38 }}><div className="hd">Saved agents</div>{savedAgents.length ? savedAgents.map((a) => <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>{a.name}{a.published ? " ●" : ""}</div>) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}</div>}
+          {loadOpen && (
+            <div className="addmenu2" style={{ top: 38, right: 0 }}>
+              <div className="hd">Saved agents</div>
+              {savedAgents.length ? savedAgents.map((a) => (
+                <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>
+                  {a.name}{a.published ? " ●" : ""}
+                </div>
+              )) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}
+            </div>
+          )}
         </div>
       </div>
-      {runtime === "nat" ? <NatAgentPanel /> : <>
+      {runtime === "orchestration" ? (
+        <AgentOrchestrationPanel />
+      ) : (
+        <>
       {provKnown && !hasProvider && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin) before you can run an agent.</div>}
-      <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>To attach <b>MCP servers</b> or <b>knowledge bases</b> to an agent, switch to the <b>NVIDIA NAT</b> runtime above — the in-browser runtime uses built-in tools only.</span></div>
+      <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>Connect <b>MCP servers</b>, <b>knowledge bases</b>, or chain multi-agent workflows under the <b>Orchestration</b> studio tab above.</span></div>
       {msg && <div className="err">{msg}</div>}
       <input ref={fileRef} type="file" accept=".txt,.md,.csv,.pdf,.docx,.doc,.xlsx,.xls" onChange={onKnowledgeFile} style={{ display: "none" }} />
 
@@ -2230,7 +2586,40 @@ if __name__ == "__main__":
             <div className="card">
               <div className="card-h"><span className="t">Configure</span><span className="mono r">{selNode?.title || "—"}</span></div>
               <div className="card-b" style={{ maxHeight: CANVAS_H, overflow: "auto" }}>
-                {!selNode && <div className="note">Click a node to configure it.</div>}
+                {aSel.startsWith("pipe:") && (() => {
+                  const parts = aSel.replace("pipe:", "").split("->");
+                  const fromMeta = TOOL_META[parts[0]] || dynamicMcpMeta[parts[0]] || { icon: "🔧", label: parts[0] };
+                  const toMeta = TOOL_META[parts[1]] || dynamicMcpMeta[parts[1]] || { icon: "🔧", label: parts[1] };
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <div className="teach-note" style={{ background: "rgba(2,132,199,0.08)", borderColor: "rgba(2,132,199,0.3)" }}>
+                        <span className="ic">🔗</span>
+                        <span><b>Tool Pipeline Chained</b><br />Output from <b>{fromMeta.label}</b> feeds into <b>{toMeta.label}</b>.</span>
+                      </div>
+                      <div className="insp-field">
+                        <div className="k">Pipeline Connection</div>
+                        <div className="row" style={{ gap: 8, alignItems: "center", fontSize: 12, marginTop: 4 }}>
+                          <span className="c">{fromMeta.icon} {fromMeta.label}</span>
+                          <span style={{ color: "#38bdf8", fontWeight: 700 }}>➔</span>
+                          <span className="c">{toMeta.icon} {toMeta.label}</span>
+                        </div>
+                      </div>
+                      <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                        <button
+                          className="btn ghost sm"
+                          onClick={() => {
+                            setToolLinks((prev) => prev.filter((l) => !(l.from === parts[0] && l.to === parts[1])));
+                            setASel("agent");
+                            toast("Tool link removed", "info");
+                          }}
+                        >
+                          Disconnect Pipeline
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {!selNode && !aSel.startsWith("pipe:") && <div className="note">Click a node or wire to configure it.</div>}
                 {selNode?.type === "trigger" && <div className="note">This is where the user&apos;s task enters the agent. You&apos;ll type the actual task on the Run step.</div>}
                 {selNode?.type === "output" && <>
                   <div className="note" style={{ marginBottom: 12 }}>The agent&apos;s Final Answer is returned here after the reasoning loop finishes.</div>
@@ -2643,46 +3032,317 @@ if __name__ == "__main__":
       {/* STEP 3 — RUN */}
       {step === "run" && (<>
         {agentType === "react" && (<>
+          {/* Mode Switch Bar */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div className="seg" style={{ margin: 0, minWidth: 260 }}>
+              <button className={!isCompareMode ? "on" : ""} onClick={() => setIsCompareMode(false)}>
+                ⚡ Single Agent Run
+              </button>
+              <button className={isCompareMode ? "on" : ""} onClick={() => setIsCompareMode(true)}>
+                ⚖️ Compare (A/B)
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted)" }}>
+              {toolLinks.length > 0 && (
+                <span className="badge" style={{ background: "rgba(2,132,199,0.12)", color: "#38bdf8", border: "1px solid rgba(2,132,199,0.3)" }}>
+                  🔗 {toolLinks.length} Tool Chain{toolLinks.length > 1 ? "s" : ""} active
+                </span>
+              )}
+              <span>Model: <b style={{ color: "var(--text)" }}>{model || providerLabel}</b></span>
+            </div>
+          </div>
+
           <div className="card" style={{ marginBottom: 16 }}>
-            <div className="card-h"><span className="t">Execution flow</span><span className="mono r">{running ? "running…" : finalOut ? "finished ✓" : "idle"}</span></div>
+            <div className="card-h">
+              <span className="t">Execution flow</span>
+              <span className="mono r">
+                {running || compareRunning ? "running…" : finalOut || compareFinalOut ? "finished ✓" : "idle"}
+              </span>
+            </div>
             <div className="card-b" style={{ padding: 0 }}>{flowCanvas()}</div>
           </div>
+
           {pendingApproval && (
             <div className="approval">
               <div className="ap-q"><span className="ap-ic">🙋</span><div><div className="ap-title">Human approval needed</div><div className="ap-text">{pendingApproval.q}</div></div></div>
               <div className="row" style={{ gap: 8 }}><button className="btn" onClick={() => { pendingApproval.resolve("User APPROVED."); setPendingApproval(null); }}>✓ Approve</button><button className="btn ghost" onClick={() => { pendingApproval.resolve("User DENIED the action."); setPendingApproval(null); }}>✗ Deny</button></div>
             </div>
           )}
-          {metrics && !running && <div className="ag-metrics"><span className="m"><b>{metrics.calls}</b> LLM calls</span><span className="m"><b>{metrics.tools}</b> tool calls</span><span className="m"><b>{(metrics.ms / 1000).toFixed(1)}s</b> latency</span><span className="m"><b>~{metrics.tokens >= 1000 ? (metrics.tokens / 1000).toFixed(1) + "k" : metrics.tokens}</b> tokens</span></div>}
-          <div className="split col-2" style={{ alignItems: "stretch" }}>
-            <div className="card"><div className="card-h"><span className="t">Task</span></div>
-              <div className="card-b">
-                <label className="fld">What should {name} do?</label><textarea rows={3} value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (!running && hasProvider && task.trim()) runReact(); } }} placeholder="Type your prompt and press Enter to run…" />
-                <div className="row" style={{ marginTop: 12 }}><button className="btn" onClick={runReact} disabled={running || !hasProvider}>{running ? <><span className="busy-dot" />Running…</> : "▶ Run agent"}</button><span className="note">{toolList.length} tools · {model || providerLabel} · max {maxIters} steps</span></div>
+
+          {/* SINGLE AGENT RUN MODE */}
+          {!isCompareMode && (
+            <>
+              {metrics && !running && (
+                <div className="ag-metrics">
+                  <span className="m"><b>{metrics.calls}</b> LLM calls</span>
+                  <span className="m"><b>{metrics.tools}</b> tool calls</span>
+                  <span className="m"><b>{(metrics.ms / 1000).toFixed(1)}s</b> latency</span>
+                  <span className="m"><b>~{metrics.tokens >= 1000 ? (metrics.tokens / 1000).toFixed(1) + "k" : metrics.tokens}</b> tokens</span>
+                </div>
+              )}
+              <div className="split col-2" style={{ alignItems: "stretch" }}>
+                <div className="card">
+                  <div className="card-h"><span className="t">Task Prompt</span></div>
+                  <div className="card-b">
+                    <label className="fld">What should {name} do?</label>
+                    <textarea
+                      rows={3}
+                      value={task}
+                      onChange={(e) => setTask(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          if (!running && hasProvider && task.trim()) runReact();
+                        }
+                      }}
+                      placeholder="Type your prompt and press Enter to run…"
+                    />
+                    <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
+                      <button className="btn" onClick={runReact} disabled={running || !hasProvider || !task.trim()}>
+                        {running ? <><span className="busy-dot" />Running agent…</> : "▶ Run agent"}
+                      </button>
+                      <span className="note">{toolList.length} tools · {model || providerLabel} · max {maxIters} steps</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-h">
+                    <span className="t">Reasoning trace</span>
+                    <span className="mono r">{trace.length} steps</span>
+                  </div>
+                  <div className="card-b" ref={scrollRef} style={{ maxHeight: 460, overflow: "auto" }}>
+                    {trace.length === 0 && <div className="note">Run the agent to watch the Thought → Action → Observation loop.</div>}
+                    {trace.map((t, i) => (
+                      <div key={i} className={`ag-step ${t.kind} ${t.state}`}>
+                        <div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div>
+                        <div className="ag-t">
+                          {t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</>
+                            : t.kind === "observation" ? <div style={{ maxHeight: 260, overflow: "auto" }}><AgentOutput text={t.text} /></div>
+                            : t.kind === "final" ? (
+                              <div className="note" style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                                {t.text.split("\n").filter((l) => l.trim())[0]?.slice(0, 140) || "Done."}
+                                {t.text.length > 140 ? " …" : ""}
+                                <span style={{ color: "var(--accent)" }}> — full answer in the Final answer card below ↓</span>
+                              </div>
+                            )
+                            : <AgentOutput text={t.text} />}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="card"><div className="card-h"><span className="t">Reasoning trace</span><span className="mono r">{trace.length} steps</span></div>
-              <div className="card-b" ref={scrollRef} style={{ maxHeight: 460, overflow: "auto" }}>
-                {trace.length === 0 && <div className="note">Run the agent to watch the Thought → Action → Observation loop.</div>}
-                {trace.map((t, i) => (<div key={i} className={`ag-step ${t.kind} ${t.state}`}><div className="ag-k">{t.kind === "action" ? `action · ${t.tool}` : t.kind === "final" ? "final answer" : t.kind}</div><div className="ag-t">
-                  {t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</>
-                    : t.kind === "observation" ? <div style={{ maxHeight: 260, overflow: "auto" }}><AgentOutput text={t.text} /></div>
-                    : t.kind === "final" ? <div className="note" style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{t.text.split("\n").filter((l) => l.trim())[0]?.slice(0, 140) || "Done."}{t.text.length > 140 ? " …" : ""}<span style={{ color: "var(--accent)" }}> — full answer in the Final answer panel →</span></div>
-                    : <AgentOutput text={t.text} />}
-                </div></div>))}
+
+              {/* Final Answer Card & Confidence Score Percentage Circle */}
+              {finalOut && (
+                <div className="card" style={{ marginTop: 16, borderColor: "color-mix(in srgb, var(--good) 35%, var(--border))" }}>
+                  <div className="card-h" style={{ background: "color-mix(in srgb, var(--good) 8%, transparent)", borderBottom: "1px solid var(--border)" }}>
+                    <span className="t" style={{ color: "var(--good)", display: "flex", alignItems: "center", gap: 8 }}>
+                      ✅ Final answer
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      {confidence && <ConfidenceGauge metrics={confidence} size={38} compact={true} />}
+                      <span className="note">{model || providerLabel}</span>
+                    </div>
+                  </div>
+                  <div className="card-b" style={{ position: "relative", maxHeight: 520, overflow: "auto" }}>
+                    <CopyBtn text={formatFinalAnswer(finalOut)} />
+                    <div style={{ paddingRight: 40 }}><AgentOutput text={finalOut} /></div>
+
+                    {/* Circular Confidence Score Meter with Detailed Grounding Breakdown */}
+                    {confidence && (
+                      <div style={{ marginTop: 16 }}>
+                        <ConfidenceGauge metrics={confidence} size={92} showBreakdown={true} />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* DUAL AGENT COMPARISON MODE */}
+          {isCompareMode && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Comparison Parameters Bar */}
+              <div className="card" style={{ padding: 14 }}>
+                <div className="split col-2" style={{ gap: 16, alignItems: "center" }}>
+                  {/* Variant A Selector */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "var(--accent-strong)" }}>
+                      <span>🔵 Variant A (Primary Agent)</span>
+                    </div>
+                    <div className="row" style={{ gap: 8 }}>
+                      <select value={providerId} onChange={(e) => loadModels(e.target.value)} style={{ flex: 1 }}>
+                        {providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}
+                      </select>
+                      <select value={model} onChange={(e) => setModel(e.target.value)} style={{ flex: 1.2 }}>
+                        {modelList.map((m) => <option key={m}>{m}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Variant B Selector */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#38bdf8" }}>
+                      <span>🔷 Variant B (Compare Variant)</span>
+                    </div>
+                    <div className="row" style={{ gap: 8 }}>
+                      <select value={compareProviderId} onChange={(e) => loadCompareModels(e.target.value)} style={{ flex: 1 }}>
+                        {providers.map((p) => <option key={p.id} value={p.id}>{p.label || p.provider}</option>)}
+                      </select>
+                      <select value={compareModel} onChange={(e) => setCompareModel(e.target.value)} style={{ flex: 1.2 }}>
+                        {compareModelList.map((m) => <option key={m}>{m}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 14 }}>
+                  <label className="fld">Task Prompt to Compare Both Agents</label>
+                  <div className="row" style={{ gap: 10, marginTop: 4 }}>
+                    <input
+                      type="text"
+                      value={task}
+                      onChange={(e) => setTask(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          if (!running && !compareRunning && hasProvider && task.trim()) runCompareBoth();
+                        }
+                      }}
+                      placeholder="e.g. Compare revenue of 2023 vs 2024 and calculate growth rate"
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="btn"
+                      onClick={runCompareBoth}
+                      disabled={running || compareRunning || !hasProvider || !task.trim()}
+                      style={{ minWidth: 190 }}
+                    >
+                      {running || compareRunning ? (
+                        <><span className="busy-dot" />Running Comparison…</>
+                      ) : (
+                        "▶ Run Both & Compare"
+                      )}
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-          {finalOut && (
-            <div className="card" style={{ marginTop: 16, borderColor: "color-mix(in srgb, var(--good) 35%, var(--border))" }}>
-              <div className="card-h" style={{ background: "color-mix(in srgb, var(--good) 8%, transparent)", borderBottom: "1px solid var(--border)" }}>
-                <span className="t" style={{ color: "var(--good)" }}>✅ Final answer</span>
-                <span className="r"><span className="note">{model || providerLabel}</span></span>
-              </div>
-              <div className="card-b" style={{ position: "relative", maxHeight: 520, overflow: "auto" }}>
-                <CopyBtn text={formatFinalAnswer(finalOut)} />
-                <div style={{ paddingRight: 40 }}><AgentOutput text={finalOut} /></div>
-              </div>
+
+              {/* Side-by-Side Dual Agent Output Columns */}
+              {(finalOut || compareFinalOut || running || compareRunning) && (
+                <div className="split col-2" style={{ alignItems: "stretch", gap: 16 }}>
+                  {/* Variant A Column */}
+                  <div className="card" style={{ display: "flex", flexDirection: "column" }}>
+                    <div className="card-h" style={{ borderBottom: "1px solid var(--border)", background: "rgba(56,189,248,0.06)" }}>
+                      <span className="t" style={{ color: "var(--accent-strong)" }}>🔵 Variant A: {model || providerLabel}</span>
+                      {metrics && (
+                        <span className="mono r" style={{ fontSize: 11 }}>
+                          {(metrics.ms / 1000).toFixed(1)}s · {metrics.calls} calls
+                        </span>
+                      )}
+                    </div>
+                    <div className="card-b" style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                      {running && !finalOut && (
+                        <div style={{ padding: 20, textAlign: "center", color: "var(--muted)" }}>
+                          <span className="busy-dot" /> Reasoning and executing tools…
+                        </div>
+                      )}
+                      {finalOut && (
+                        <div style={{ position: "relative", flex: 1, maxHeight: 400, overflow: "auto" }}>
+                          <CopyBtn text={formatFinalAnswer(finalOut)} />
+                          <div style={{ paddingRight: 36 }}><AgentOutput text={finalOut} /></div>
+                        </div>
+                      )}
+                      {confidence && <ConfidenceGauge metrics={confidence} size={80} showBreakdown={true} />}
+                    </div>
+                  </div>
+
+                  {/* Variant B Column */}
+                  <div className="card" style={{ display: "flex", flexDirection: "column" }}>
+                    <div className="card-h" style={{ borderBottom: "1px solid var(--border)", background: "rgba(2,132,199,0.08)" }}>
+                      <span className="t" style={{ color: "#38bdf8" }}>🔷 Variant B: {compareModel || "Model B"}</span>
+                      {compareMetrics && (
+                        <span className="mono r" style={{ fontSize: 11 }}>
+                          {(compareMetrics.ms / 1000).toFixed(1)}s · {compareMetrics.calls} calls
+                        </span>
+                      )}
+                    </div>
+                    <div className="card-b" style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+                      {compareRunning && !compareFinalOut && (
+                        <div style={{ padding: 20, textAlign: "center", color: "var(--muted)" }}>
+                          <span className="busy-dot" /> Reasoning and executing tools…
+                        </div>
+                      )}
+                      {compareFinalOut && (
+                        <div style={{ position: "relative", flex: 1, maxHeight: 400, overflow: "auto" }}>
+                          <CopyBtn text={formatFinalAnswer(compareFinalOut)} />
+                          <div style={{ paddingRight: 36 }}><AgentOutput text={compareFinalOut} /></div>
+                        </div>
+                      )}
+                      {compareConfidence && <ConfidenceGauge metrics={compareConfidence} size={80} showBreakdown={true} />}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Automated Comparison & Synthesis Verdict */}
+              {comparisonResult && (
+                <div
+                  className="card"
+                  style={{
+                    border: "1.5px solid rgba(2,132,199,0.35)",
+                    background: "linear-gradient(180deg, rgba(2,132,199,0.05) 0%, rgba(0,0,0,0.1) 100%)",
+                    borderRadius: 14,
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                  }}
+                >
+                  <div className="card-h" style={{ borderBottom: "1px solid rgba(2,132,199,0.2)" }}>
+                    <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
+                      ✨ <b>AI Comparison &amp; Synthesis</b>
+                    </span>
+                    <span
+                      className="badge"
+                      style={{
+                        background: comparisonResult.winner === "A" ? "var(--good-weak)" : "rgba(2,132,199,0.2)",
+                        color: comparisonResult.winner === "A" ? "var(--good)" : "#38bdf8",
+                        fontWeight: 700,
+                      }}
+                    >
+                      🏆 Recommended: Variant {comparisonResult.winner}
+                    </span>
+                  </div>
+                  <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5 }}>
+                      <b>Verdict:</b> {comparisonResult.winnerReason}
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--muted)" }}>
+                        Key Comparative Differences:
+                      </span>
+                      <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: 4 }}>
+                        {comparisonResult.keyDifferences.map((diff, i) => (
+                          <li key={i}>{diff}</li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div style={{ marginTop: 4, padding: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent-strong)" }}>
+                          🌟 Synthesized Best Answer:
+                        </span>
+                        <CopyBtn text={formatFinalAnswer(comparisonResult.synthesizedAnswer)} />
+                      </div>
+                      <div style={{ fontSize: 12.5, lineHeight: 1.55 }}>
+                        <AgentOutput text={comparisonResult.synthesizedAnswer} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </>)}
@@ -3454,7 +4114,8 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
           </div>
         )}
       </>)}
-      </>}
+        </>
+      )}
 
       <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
         <div className="modal"><div className="mh"><b>Agent code · {curType.label}</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadCode}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="note" style={{ marginBottom: 10 }}>Where to use it: run this Python (<code>pip install openai</code>, set <code>OPENAI_BASE_URL</code> &amp; <code>OPENAI_API_KEY</code>) · or <b>💾 Save</b> to My Projects · or <b>⬇ Export JSON</b> to load the config into your own app.</div><div className="code">{buildCode()}</div></div></div>
