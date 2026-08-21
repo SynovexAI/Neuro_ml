@@ -1161,12 +1161,14 @@ const BP_EXAMPLES: [string, string][] = [["king", "queen"], ["paris", "france"],
 const BP_STEPS = ["Forward Pass", "Calculate Loss", "Backpropagate", "Update Weights", "Next Epoch"];
 function BackpropModule() {
   const dim = 8;
+  const [inputWord, setInputWord] = useState("king");
+  const [targetWord, setTargetWord] = useState("queen");
   const [pair, setPair] = useState<[string, string]>(["king", "queen"]);
   const [lr, setLr] = useState(0.5);
-  const EPOCHS = 10;
+  const [maxEpochs, setMaxEpochs] = useState(10);
   const target = useMemo(() => embedToken(pair[1], dim), [pair]);
-  const [weight, setWeight] = useState<number[]>(() => embedToken("king", dim));
-  const [prev, setPrev] = useState<number[]>(() => embedToken("king", dim));
+  const [weight, setWeight] = useState<number[]>(() => embedToken(pair[0], dim));
+  const [prev, setPrev] = useState<number[]>(() => embedToken(pair[0], dim));
   const [epoch, setEpoch] = useState(0);
   const [stepIdx, setStepIdx] = useState(0);
   const [losses, setLosses] = useState<number[]>([]);
@@ -1194,17 +1196,25 @@ function BackpropModule() {
   };
   useEffect(() => {
     if (!running) return;
-    if (epoch >= EPOCHS) { setRunning(false); return; }
+    if (epoch >= maxEpochs) { setRunning(false); return; }
     timer.current = setTimeout(() => { setStepIdx((s) => (s + 1) % BP_STEPS.length); stepEpoch(); }, 700);
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [running, epoch, weight]);
+  }, [running, epoch, weight, maxEpochs]);
 
   const l2change = l2(weight.map((x, i) => x - prev[i]));
   // loss chart geometry
   const LW = 320, LH = 150, allL = losses.length ? losses : [loss];
   const maxL = Math.max(...allL, 0.001);
-  const lx = (i: number) => 30 + (i / Math.max(1, EPOCHS - 1)) * (LW - 40);
+  const lx = (i: number) => 30 + (i / Math.max(1, maxEpochs - 1)) * (LW - 40);
   const ly = (v: number) => 10 + (1 - v / maxL) * (LH - 30);
+
+  const startCustomTraining = () => {
+    const inW = inputWord.trim() || "car";
+    const tgW = targetWord.trim() || "vehicle";
+    setInputWord(inW);
+    setTargetWord(tgW);
+    setPair([inW, tgW]);
+  };
 
   return (
     <div>
@@ -1212,17 +1222,58 @@ function BackpropModule() {
         <div><h2 style={{ margin: 0, fontSize: 18 }}>🧠 Backpropagation / Embedding Training Simulator</h2><div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>Watch an embedding for <b style={{ color: BLUE }}>&quot;{pair[0]}&quot;</b> move toward the target <b style={{ color: AMBER }}>&quot;{pair[1]}&quot;</b> via real gradient descent.</div></div>
         <button onClick={() => reset()} style={actBtn}>↻ Reset Lab</button>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "180px minmax(0,1fr) 280px", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "220px minmax(0,1fr) 280px", gap: 16 }}>
         {/* controls */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <Section title="Controls" pad={12}>
-            <button onClick={() => { setStepIdx((s) => (s + 1) % BP_STEPS.length); stepEpoch(); }} disabled={epoch >= EPOCHS} style={{ ...actBtn, width: "100%", marginBottom: 8, opacity: epoch >= EPOCHS ? 0.5 : 1 }}>▶ Step epoch</button>
-            <button onClick={() => setRunning((r) => !r)} disabled={epoch >= EPOCHS} style={{ ...actBtn, width: "100%", marginBottom: 8, background: running ? RED : ACC, color: "#fff", border: "none", opacity: epoch >= EPOCHS ? 0.5 : 1 }}>{running ? "⏸ Pause" : "⚡ Auto train"}</button>
-            <label style={{ ...lbl, marginTop: 6 }}><Info tip={G.learningRate}>Learning rate</Info>: {lr}</label>
-            <input type="range" min={0.1} max={1.5} step={0.1} value={lr} onChange={(e) => setLr(+e.target.value)} style={{ width: "100%" }} />
+          <Section title="Custom training example" pad={10}>
+            <label style={lbl}>Input Word</label>
+            <input
+              type="text"
+              value={inputWord}
+              onChange={(e) => setInputWord(e.target.value)}
+              style={{ ...inp, marginBottom: 8 }}
+              placeholder="e.g. car"
+            />
+            <label style={lbl}>Target Word</label>
+            <input
+              type="text"
+              value={targetWord}
+              onChange={(e) => setTargetWord(e.target.value)}
+              style={{ ...inp, marginBottom: 10 }}
+              placeholder="e.g. vehicle"
+            />
+            <button
+              onClick={startCustomTraining}
+              style={{ ...actBtn, width: "100%", justifyContent: "center", background: ACC, color: "#fff", border: "none" }}
+            >
+              ▶ Start Training
+            </button>
           </Section>
+
           <Section title="Quick examples" pad={10}>
-            {BP_EXAMPLES.map(([a, b]) => <button key={a} onClick={() => setPair([a, b])} style={{ ...actBtn, width: "100%", marginBottom: 6, justifyContent: "flex-start", background: pair[0] === a ? `color-mix(in srgb, ${ACC} 15%, transparent)` : "var(--panel-2)", color: pair[0] === a ? ACC : "var(--text)", border: `1px solid ${pair[0] === a ? ACC : "var(--border)"}` }}>▶ {a} → {b}</button>)}
+            {BP_EXAMPLES.map(([a, b]) => (
+              <button
+                key={a}
+                onClick={() => {
+                  setInputWord(a);
+                  setTargetWord(b);
+                  setPair([a, b]);
+                }}
+                style={{ ...actBtn, width: "100%", marginBottom: 6, justifyContent: "flex-start", background: pair[0] === a && pair[1] === b ? `color-mix(in srgb, ${ACC} 15%, transparent)` : "var(--panel-2)", color: pair[0] === a && pair[1] === b ? ACC : "var(--text)", border: `1px solid ${pair[0] === a && pair[1] === b ? ACC : "var(--border)"}` }}
+              >
+                ▶ {a} → {b}
+              </button>
+            ))}
+          </Section>
+
+          <Section title="Controls" pad={12}>
+            <button onClick={() => { setStepIdx((s) => (s + 1) % BP_STEPS.length); stepEpoch(); }} disabled={epoch >= maxEpochs} style={{ ...actBtn, width: "100%", marginBottom: 8, opacity: epoch >= maxEpochs ? 0.5 : 1 }}>▶ Next Step</button>
+            <button onClick={() => setRunning((r) => !r)} disabled={epoch >= maxEpochs} style={{ ...actBtn, width: "100%", marginBottom: 8, background: running ? RED : ACC, color: "#fff", border: "none", opacity: epoch >= maxEpochs ? 0.5 : 1 }}>{running ? "⏸ Pause" : "⚡ Auto train"}</button>
+            <label style={{ ...lbl, marginTop: 6 }}><Info tip={G.learningRate}>Learning rate</Info>: {lr}</label>
+            <input type="range" min={0.05} max={1.5} step={0.05} value={lr} onChange={(e) => setLr(+e.target.value)} style={{ width: "100%", marginBottom: 10 }} />
+            
+            <label style={lbl}>Number of Epochs: {maxEpochs}</label>
+            <input type="range" min={5} max={30} step={5} value={maxEpochs} onChange={(e) => { const ep = +e.target.value; setMaxEpochs(ep); if (epoch >= ep) setEpoch(ep); }} style={{ width: "100%" }} />
           </Section>
         </div>
         {/* pipeline + step detail */}
@@ -1255,14 +1306,14 @@ function BackpropModule() {
             </div>
           </Section>
           <div style={{ ...panel, padding: 14, fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
-            <b style={{ color: "var(--text)" }}>What&apos;s happening?</b> Backpropagation minimizes the difference between the current embedding and the target. The gradient points in the direction of steepest loss increase, so we step the weights the opposite way — scaled by the learning rate — a little each epoch.
+            <b style={{ color: "var(--text)" }}>What&apos;s happening?</b> Backpropagation minimizes the difference between the current embedding for <b style={{ color: BLUE }}>&quot;{pair[0]}&quot;</b> and the target <b style={{ color: AMBER }}>&quot;{pair[1]}&quot;</b>. The gradient points in the direction of steepest loss increase, so we step the weights the opposite way — scaled by the learning rate — a little each epoch.
           </div>
         </div>
         {/* summary + charts */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <Section title="Training summary" pad={12}>
-            {[["Epoch", `${epoch} / ${EPOCHS}`], ["Loss (MSE)", loss.toFixed(4)], ["Status", running ? "Running" : epoch >= EPOCHS ? "Converged" : "Ready"], ["Best loss", (losses.length ? Math.min(...losses) : loss).toFixed(4)]].map(([k, v]) => (
-              <div key={k as string} className="row" style={{ justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--border)" }}><span style={{ fontSize: 12, color: "var(--muted)" }}>{k}</span><b style={{ fontSize: 12.5, color: k === "Status" ? (running ? AMBER : epoch >= EPOCHS ? GREEN : "var(--text)") : "var(--text)" }}>{v}</b></div>
+            {[["Epoch", `${epoch} / ${maxEpochs}`], ["Loss (MSE)", loss.toFixed(4)], ["Status", running ? "Running" : epoch >= maxEpochs ? "Converged" : "Ready"], ["Best loss", (losses.length ? Math.min(...losses) : loss).toFixed(4)]].map(([k, v]) => (
+              <div key={k as string} className="row" style={{ justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--border)" }}><span style={{ fontSize: 12, color: "var(--muted)" }}>{k}</span><b style={{ fontSize: 12.5, color: k === "Status" ? (running ? AMBER : epoch >= maxEpochs ? GREEN : "var(--text)") : "var(--text)" }}>{v}</b></div>
             ))}
           </Section>
           <Section title="Loss over epochs">
