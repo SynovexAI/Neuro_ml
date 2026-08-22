@@ -13,6 +13,7 @@ import AgentOutput from "@/components/AgentOutput";
 import ConfidenceGauge from "./ConfidenceGauge";
 import { computeConfidenceScore, synthesizeComparison, type ConfidenceMetrics, type ComparisonResult } from "@/lib/agentEval";
 import { toast } from "@/lib/toast";
+import { FolderOpen, Save, Download, Code2, Rocket, Check, Workflow } from "lucide-react";
 
 type AgentType = "react" | "workflow";
 type Step = "type" | "build" | "run" | "learn";
@@ -896,11 +897,30 @@ const TEMPLATES: { id: string; label: string; tag: string; desc: string; type: A
   { id: "api", label: "API agent", tag: "integration", desc: "Calls a public REST API as a tool and reports the result.", type: "react", name: "API agent", goal: "You answer questions by calling public REST APIs with http_request and reading the JSON.", tools: ["http_request", "calculator"], task: "Use http_request on https://api.github.com/repos/vercel/next.js and tell me how many stars the repo has." },
 ];
 
-// ── chat helper (OpenAI-compatible proxy) ──
+// ── chat helper (OpenAI-compatible proxy) with fast timeout guard ──
 async function chatOnce(messages: { role: string; content: string }[], temperature: number, maxTokens: number, providerId?: string, model?: string): Promise<string> {
-  const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messages, temperature, maxTokens, streaming: false, providerId: providerId || undefined, model: model || undefined }) });
-  if (!res.ok) { const j = await res.json().catch(() => ({ error: "request failed" })); throw new Error(j.error || "request failed"); }
-  return (await res.text()).trim();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages, temperature, maxTokens, streaming: false, providerId: providerId || undefined, model: model || undefined }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({ error: "request failed" }));
+      throw new Error(j.error || "request failed");
+    }
+    return (await res.text()).trim();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err?.name === "AbortError") {
+      throw new Error("Model request timed out (20s). The selected provider/model took too long.");
+    }
+    throw err;
+  }
 }
 
 type TraceItem = { kind: "thought" | "action" | "observation" | "final" | "error"; text: string; tool?: string; state: string };
@@ -2041,11 +2061,11 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       let ans = "";
 
       try {
-        for (let iter = 0; iter < Math.min(maxIters, 6); iter++) {
+        for (let iter = 0; iter < Math.min(maxIters, 4); iter++) {
           iterations = iter + 1;
-          addTrace({ kind: "thought", text: "thinking…", state: "active" });
+          addTrace({ kind: "thought", text: "Reasoning and evaluating tools…", state: "active" });
           tokens += msgs.reduce((a, m) => a + est(m.content), 0); calls++;
-          const resp = await chatOnce(msgs, temperature, Math.min(maxTokens, 450), targetProviderId || providerId, targetModel || model);
+          const resp = await chatOnce(msgs, temperature, Math.min(maxTokens, 400), targetProviderId || providerId, targetModel || model);
           tokens += est(resp);
           const p = parseReAct(resp);
           traceArr[traceArr.length - 1] = { kind: "thought", text: p.thought || "(reasoning)", state: "done" };
@@ -2065,8 +2085,11 @@ Explore any connected node on the Concept Network Tree above for detailed visual
           onTraceUpdate(traceArr.length - 1, traceArr[traceArr.length - 1]);
           addTrace({ kind: "observation", text: obs, state: "done" });
           msgs.push({ role: "assistant", content: resp }); msgs.push({ role: "user", content: `Observation: ${obs}` });
-          if (iter === maxIters - 1) {
-            addTrace({ kind: "error", text: "Reached iteration limit.", state: "done" });
+          if (iter === Math.min(maxIters, 4) - 1) {
+            ans = formatFinalAnswer(resp);
+            addTrace({ kind: "final", text: ans || "Completed evaluation.", state: "done" });
+            outcome = "success";
+            break;
           }
         }
       } catch (e) {
@@ -2081,31 +2104,36 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     }
 
     try {
-      // Execute Variant A
-      const resA = await executeVariant(
-        providerId,
-        model,
-        (t) => setTrace((prev) => [...prev, t]),
-        (idx, t) => setTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
-        true
-      );
-      setFinalOut(resA.answer);
-      setMetrics(resA.metrics);
-      setConfidence(resA.confidence);
-
-      // Execute Variant B
       const targetBModel = compareModel || model;
       const targetBProv = compareProviderId || providerId;
-      const resB = await executeVariant(
-        targetBProv,
-        targetBModel,
-        (t) => setCompareTrace((prev) => [...prev, t]),
-        (idx, t) => setCompareTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
-        false
-      );
-      setCompareFinalOut(resB.answer);
-      setCompareMetrics(resB.metrics);
-      setCompareConfidence(resB.confidence);
+
+      // Execute Variant A & Variant B in PARALLEL simultaneously
+      const [resA, resB] = await Promise.all([
+        executeVariant(
+          providerId,
+          model,
+          (t) => setTrace((prev) => [...prev, t]),
+          (idx, t) => setTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
+          true
+        ).then((res) => {
+          setFinalOut(res.answer);
+          setMetrics(res.metrics);
+          setConfidence(res.confidence);
+          return res;
+        }),
+        executeVariant(
+          targetBProv,
+          targetBModel,
+          (t) => setCompareTrace((prev) => [...prev, t]),
+          (idx, t) => setCompareTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
+          false
+        ).then((res) => {
+          setCompareFinalOut(res.answer);
+          setCompareMetrics(res.metrics);
+          setCompareConfidence(res.confidence);
+          return res;
+        }),
+      ]);
 
       // Synthesize comparison verdict
       const comparison = synthesizeComparison({
@@ -2432,9 +2460,115 @@ if __name__ == "__main__":
     fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id, project.published); }).catch(() => {});
   }, []);
 
+  const [pendingOrchestrationNode, setPendingOrchestrationNode] = useState<any>(null);
+
+  // Custom Naming Modals
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [customPublishName, setCustomPublishName] = useState("");
+  const [customPublishDesc, setCustomPublishDesc] = useState("");
+
+  const [showAddToOrchModal, setShowAddToOrchModal] = useState(false);
+  const [orchNodeName, setOrchNodeName] = useState("");
+  const [orchNodeRole, setOrchNodeRole] = useState("");
+
+  function openAddToOrchModal() {
+    setOrchNodeName(name.trim() || (agentType === "react" ? "In-Browser ReAct Agent" : "In-Browser Workflow Agent"));
+    setOrchNodeRole(description.trim() || (agentType === "react" ? "Autonomous Reasoning & ReAct Execution" : "Sequential Workflow Execution"));
+    setShowAddToOrchModal(true);
+  }
+
+  function confirmAddToOrch() {
+    const finalName = orchNodeName.trim() || "Custom Agent Node";
+    const finalRole = orchNodeRole.trim() || "Specialist Agent Execution";
+    const nodePrompt = goal.trim() || (agentType === "react" ? "You are a specialized autonomous reasoning agent. Analyze inputs, select tools, and provide verified answers." : "You are a sequential workflow agent. Follow the defined pipeline steps diligently.");
+
+    const mappedTools = [...enabledTools].map((t) => (t === "rag" ? "knowledge" : t));
+
+    const newNode = {
+      id: `agent_${Date.now()}`,
+      name: finalName,
+      role: finalRole,
+      icon: "bot",
+      nodeType: "custom",
+      model: model || "default",
+      temperature: typeof temperature === "number" ? temperature : 0.3,
+      tools: mappedTools,
+      systemPrompt: nodePrompt,
+      w: 220,
+      h: 68,
+    };
+
+    setShowAddToOrchModal(false);
+    setPendingOrchestrationNode(newNode);
+    setRuntime("orchestration");
+  }
+
+  function openPublishModal() {
+    setCustomPublishName(name.trim() || (agentType === "react" ? "Autonomous Reasoning Agent" : "Workflow Pipeline"));
+    setCustomPublishDesc(description.trim() || (agentType === "react" ? "ReAct agent with dynamic tool execution" : "Sequential workflow pipeline"));
+    setShowPublishModal(true);
+  }
+
+  async function confirmPublish() {
+    setPublishing(true);
+    setShowPublishModal(false);
+    try {
+      const finalName = customPublishName.trim() || name || "My Agent";
+      const finalDesc = customPublishDesc.trim() || description;
+      setName(finalName);
+      setDescription(finalDesc);
+
+      const cfg = {
+        ...agentConfig(),
+        name: finalName,
+        description: finalDesc,
+      };
+
+      if (savedProjectId) {
+        await fetch("/api/projects", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: savedProjectId, name: finalName, config: cfg, published: true }),
+        });
+      } else {
+        const r = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ lab: "agent", name: finalName, config: cfg }),
+        });
+        const j = await r.json().catch(() => null);
+        if (r.ok && j?.id) {
+          setSavedProjectId(j.id);
+          await fetch("/api/projects", {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: j.id, published: true, config: cfg }),
+          });
+        }
+      }
+      setPublished(true);
+      toast(`Published “${finalName}” to the Workroom!`, "success");
+    } catch {
+      toast("Publish failed", "error");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
   const curType = TYPES.find((t) => t.id === agentType)!;
   const stepBtn = (k: Step, n: number, label: string) => (<button className={step === k ? "on" : ""} onClick={() => setStep(k)}><b>{n}</b>{label}</button>);
   const selNode = nodes.find((n) => n.id === aSel);
+
+  const modeSwitcher = (
+    <div className="seg" style={{ width: 250, margin: 0 }}>
+      <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>
+        In-browser
+      </button>
+      <button className={runtime === "orchestration" ? "on" : ""} onClick={() => setRuntime("orchestration")}>
+        Orchestration
+      </button>
+    </div>
+  );
 
   return (
     <>
@@ -2446,43 +2580,101 @@ if __name__ == "__main__":
         </div>
       </div>
 
-      {/* Top Toolbar: Mode Switcher on Left & Action Buttons on Far Right */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 12, position: "relative" }}>
-        <div className="seg" style={{ width: 250, margin: 0 }}>
-          <button className={runtime === "browser" ? "on" : ""} onClick={() => setRuntime("browser")}>
-            In-browser
-          </button>
-          <button className={runtime === "orchestration" ? "on" : ""} onClick={() => setRuntime("orchestration")}>
-            Orchestration
-          </button>
-        </div>
-
-        <div className="acts" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative", marginLeft: "auto" }}>
-          {runtime === "browser" && <>
-            <button className="btn ghost sm" onClick={loadAgents}>📂 Load</button>
-            <button className="btn ghost sm" onClick={saveAgent}>{saved ? "Saved ✓" : "💾 Save"}</button>
-            <button className="btn ghost sm" onClick={exportJson}>⬇ Export JSON</button>
-            <button className="btn ghost sm" onClick={() => setShowCode(true)}>&lt;/&gt; Get code</button>
-            {published
-              ? <><Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f" }}>● Published</Link><button className="btn ghost sm" onClick={unpublishAgent} disabled={publishing} title="Remove from the Workroom">Unpublish</button></>
-              : <button className="btn sm" onClick={publishAgent} disabled={publishing || !hasProvider} title="Make this agent usable in the Workroom">{publishing ? "Publishing…" : "🚀 Publish"}</button>}
-          </>}
-          {loadOpen && (
-            <div className="addmenu2" style={{ top: 38, right: 0 }}>
-              <div className="hd">Saved agents</div>
-              {savedAgents.length ? savedAgents.map((a) => (
-                <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>
-                  {a.name}{a.published ? " ●" : ""}
-                </div>
-              )) : <div className="ai" style={{ color: "var(--faint)" }}>none saved yet</div>}
-            </div>
-          )}
-        </div>
-      </div>
       {runtime === "orchestration" ? (
-        <AgentOrchestrationPanel />
+        <AgentOrchestrationPanel
+          initialNodeToAdd={pendingOrchestrationNode}
+          onNodeAdded={() => setPendingOrchestrationNode(null)}
+          topModeSwitcher={modeSwitcher}
+        />
       ) : (
         <>
+          {/* Top Toolbar: Mode Switcher on Left & Action Buttons on Far Right */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "nowrap", gap: 12, position: "relative", width: "100%" }}>
+            {modeSwitcher}
+
+            <div className="acts" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative", marginLeft: "auto", flexShrink: 0, flexWrap: "nowrap" }}>
+              <button
+                className="btn ghost sm"
+                onClick={openAddToOrchModal}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  color: "#38bdf8",
+                  borderColor: "rgba(56,189,248,0.4)",
+                  background: "rgba(56,189,248,0.08)",
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                }}
+                title="Add this agent into the Multi-Agent Orchestration node catalog"
+              >
+                <Workflow size={13} />
+                <span>Add to Orchestration</span>
+              </button>
+              <button className="btn ghost sm" onClick={loadAgents} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                <FolderOpen size={13} />
+                <span>Load</span>
+              </button>
+              <button className="btn ghost sm" onClick={saveAgent} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                {saved ? <Check size={13} color="#22c55e" /> : <Save size={13} />}
+                <span>{saved ? "Saved ✓" : "Save"}</span>
+              </button>
+              <button className="btn ghost sm" onClick={exportJson} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                <Download size={13} />
+                <span>Export JSON</span>
+              </button>
+              <button className="btn ghost sm" onClick={() => setShowCode(true)} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                <Code2 size={13} />
+                <span>Get code</span>
+              </button>
+              {published ? (
+                <>
+                  <Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f", display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                    ● Published
+                  </Link>
+                  <button className="btn ghost sm" onClick={unpublishAgent} disabled={publishing} title="Remove from the Workroom" style={{ whiteSpace: "nowrap" }}>
+                    Unpublish
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="btn sm"
+                  onClick={openPublishModal}
+                  disabled={publishing || !hasProvider}
+                  title="Make this agent usable in the Workroom"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    background: "#3b82f6",
+                    borderColor: "#2563eb",
+                    color: "#ffffff",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {publishing ? <span className="busy-dot" /> : <Rocket size={13} />}
+                  <span>{publishing ? "Publishing…" : "Publish"}</span>
+                </button>
+              )}
+              {loadOpen && (
+                <div className="addmenu2" style={{ top: 38, right: 0 }}>
+                  <div className="hd">Saved agents</div>
+                  {savedAgents.length ? (
+                    savedAgents.map((a) => (
+                      <div key={a.id} className="ai" onClick={() => applyConfig(a.config, a.id, a.published)}>
+                        {a.name}
+                        {a.published ? " ●" : ""}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="ai" style={{ color: "var(--faint)" }}>
+                      none saved yet
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
       {provKnown && !hasProvider && <div className="warnbar">No provider yet — add your own key under Studio → My API keys (or ask an admin) before you can run an agent.</div>}
       <div className="teach-note" style={{ marginBottom: 12 }}><span className="ic">🔌</span><span>Connect <b>MCP servers</b>, <b>knowledge bases</b>, or chain multi-agent workflows under the <b>Orchestration</b> studio tab above.</span></div>
       {msg && <div className="err">{msg}</div>}
@@ -3302,16 +3494,30 @@ if __name__ == "__main__":
                     <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
                       ✨ <b>AI Comparison &amp; Synthesis</b>
                     </span>
-                    <span
-                      className="badge"
-                      style={{
-                        background: comparisonResult.winner === "A" ? "var(--good-weak)" : "rgba(2,132,199,0.2)",
-                        color: comparisonResult.winner === "A" ? "var(--good)" : "#38bdf8",
-                        fontWeight: 700,
-                      }}
-                    >
-                      🏆 Recommended: Variant {comparisonResult.winner}
-                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <CopyBtn text={[
+                        `AI Comparison & Synthesis`,
+                        `Recommended: Variant ${comparisonResult.winner}`,
+                        ``,
+                        `Verdict: ${comparisonResult.winnerReason}`,
+                        ``,
+                        `Key Comparative Differences:`,
+                        ...comparisonResult.keyDifferences.map((d) => `• ${d}`),
+                        ``,
+                        `Synthesized Best Answer:`,
+                        formatFinalAnswer(comparisonResult.synthesizedAnswer),
+                      ].join("\n")} />
+                      <span
+                        className="badge"
+                        style={{
+                          background: comparisonResult.winner === "A" ? "var(--good-weak)" : "rgba(2,132,199,0.2)",
+                          color: comparisonResult.winner === "A" ? "var(--good)" : "#38bdf8",
+                          fontWeight: 700,
+                        }}
+                      >
+                        🏆 Recommended: Variant {comparisonResult.winner}
+                      </span>
+                    </div>
                   </div>
                   <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                     <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.5 }}>
@@ -4118,7 +4324,124 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
       )}
 
       <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
-        <div className="modal"><div className="mh"><b>Agent code · {curType.label}</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadCode}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="note" style={{ marginBottom: 10 }}>Where to use it: run this Python (<code>pip install openai</code>, set <code>OPENAI_BASE_URL</code> &amp; <code>OPENAI_API_KEY</code>) · or <b>💾 Save</b> to My Projects · or <b>⬇ Export JSON</b> to load the config into your own app.</div><div className="code">{buildCode()}</div></div></div>
+        <div className="modal"><div className="mh"><b>Agent code · {curType.label}</b><div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8 }}><button className="btn ghost sm" onClick={copyCode}>{copied ? "Copied ✓" : "Copy"}</button><button className="btn sm" onClick={downloadCode}>Download</button></div><button className="x" onClick={() => setShowCode(false)}>×</button></div><div className="mb"><div className="note" style={{ marginBottom: 10 }}>Where to use it: run this Python (<code>pip install openai</code>, set <code>OPENAI_BASE_URL</code> &amp; <code>OPENAI_API_KEY</code>) · or <b>Save</b> to My Projects · or <b>Export JSON</b> to load the config into your own app.</div><div className="code">{buildCode()}</div></div></div>
+      </div>
+
+      {/* Publish In-Browser Agent Modal */}
+      <div className={`modal-wrap ${showPublishModal ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowPublishModal(false); }}>
+        <div className="modal" style={{ maxWidth: 500, width: "90%" }}>
+          <div className="mh" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <b>Publish Agent to Workroom</b>
+            <button className="x" onClick={() => setShowPublishModal(false)}>×</button>
+          </div>
+          <div className="mb" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Choose a custom name and description for your agent so it is easily identifiable in the Workroom.
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Agent Name
+              </label>
+              <input
+                type="text"
+                value={customPublishName}
+                onChange={(e) => setCustomPublishName(e.target.value)}
+                placeholder="e.g., Financial Research Specialist"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13 }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Agent Description
+              </label>
+              <textarea
+                rows={3}
+                value={customPublishDesc}
+                onChange={(e) => setCustomPublishDesc(e.target.value)}
+                placeholder="Describe what this agent does and when to call it…"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13, resize: "vertical" }}
+              />
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+              <button className="btn ghost sm" onClick={() => setShowPublishModal(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn sm"
+                onClick={confirmPublish}
+                disabled={publishing || !customPublishName.trim()}
+                style={{ background: "#3b82f6", borderColor: "#2563eb", color: "#ffffff", display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                {publishing ? <span className="busy-dot" /> : <Rocket size={13} />}
+                <span>{publishing ? "Publishing…" : "Confirm & Publish"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Add Agent to Orchestration Modal */}
+      <div className={`modal-wrap ${showAddToOrchModal ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowAddToOrchModal(false); }}>
+        <div className="modal" style={{ maxWidth: 500, width: "90%" }}>
+          <div className="mh" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <b>Add Agent to Orchestration Catalog</b>
+            <button className="x" onClick={() => setShowAddToOrchModal(false)}>×</button>
+          </div>
+          <div className="mb" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Name and configure how this agent will appear in the Multi-Agent Orchestration <b>&ldquo;+ Add Node&rdquo;</b> catalog.
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Agent Node Name
+              </label>
+              <input
+                type="text"
+                value={orchNodeName}
+                onChange={(e) => setOrchNodeName(e.target.value)}
+                placeholder="e.g., Senior Data Analyst"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13 }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Specialist Role / Subtitle
+              </label>
+              <input
+                type="text"
+                value={orchNodeRole}
+                onChange={(e) => setOrchNodeRole(e.target.value)}
+                placeholder="e.g., Performs statistical analysis & CAGR calculations"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13 }}
+              />
+            </div>
+
+            <div style={{ padding: 10, borderRadius: 8, background: "var(--surface)", border: "1px solid var(--border)", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Tools: <b>{[...enabledTools].length} Tools</b></span>
+              <span>Model: <b>{model || "default"}</b></span>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+              <button className="btn ghost sm" onClick={() => setShowAddToOrchModal(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn sm"
+                onClick={confirmAddToOrch}
+                disabled={!orchNodeName.trim()}
+                style={{ background: "#3b82f6", borderColor: "#2563eb", color: "#ffffff", display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                <Workflow size={13} />
+                <span>Add to &ldquo;+ Add Node&rdquo; Catalog →</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </>
   );

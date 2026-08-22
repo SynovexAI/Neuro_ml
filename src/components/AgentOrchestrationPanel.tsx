@@ -1,12 +1,113 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import Markdown from "@/components/Markdown";
 import AgentOutput from "@/components/AgentOutput";
 import ConfidenceGauge from "./ConfidenceGauge";
 import { computeConfidenceScore, type ConfidenceMetrics } from "@/lib/agentEval";
 import { AGENT_TOOLS, type AgentTool } from "@/lib/agentTools";
 import { toast } from "@/lib/toast";
+import {
+  Zap,
+  Network,
+  Layers,
+  Scale,
+  Workflow,
+  Globe,
+  Search,
+  Brain,
+  Table,
+  FileText,
+  LineChart,
+  Sparkles,
+  Bot,
+  Trash2,
+  Plus,
+  Play,
+  Check,
+  Cpu,
+  Database,
+  Calendar,
+  Calculator,
+  BookOpen,
+  Maximize2,
+  Minimize2,
+  FileCode,
+  Shield,
+  Award,
+  Building2,
+  MapPin,
+  Code2,
+  FolderOpen,
+  Save,
+  Download,
+  Rocket,
+} from "lucide-react";
+
+export function renderAgentIcon(name: string, size = 16, color?: string, style?: React.CSSProperties) {
+  const iconProps = { size, color, style };
+  switch (name) {
+    case "globe":
+    case "general":
+      return <Globe {...iconProps} />;
+    case "search":
+    case "web_search":
+      return <Search {...iconProps} />;
+    case "brain":
+    case "knowledge":
+      return <Brain {...iconProps} />;
+    case "table":
+    case "excel":
+      return <Table {...iconProps} />;
+    case "file-text":
+    case "pdf":
+      return <FileText {...iconProps} />;
+    case "line-chart":
+    case "analyst":
+    case "statistics":
+      return <LineChart {...iconProps} />;
+    case "sparkles":
+    case "synthesizer":
+      return <Sparkles {...iconProps} />;
+    case "bot":
+    case "custom":
+    case "gear":
+      return <Bot {...iconProps} />;
+    case "zap":
+    case "linear":
+      return <Zap {...iconProps} />;
+    case "network":
+    case "hierarchical":
+      return <Network {...iconProps} />;
+    case "layers":
+    case "sequential":
+      return <Layers {...iconProps} />;
+    case "scale":
+    case "consensus":
+      return <Scale {...iconProps} />;
+    case "workflow":
+      return <Workflow {...iconProps} />;
+    case "calculator":
+      return <Calculator {...iconProps} />;
+    case "db_query":
+    case "database":
+      return <Database {...iconProps} />;
+    case "wikipedia":
+    case "book":
+      return <BookOpen {...iconProps} />;
+    case "arxiv":
+      return <FileCode {...iconProps} />;
+    case "shield":
+      return <Shield {...iconProps} />;
+    case "award":
+      return <Award {...iconProps} />;
+    case "datetime":
+      return <Calendar {...iconProps} />;
+    default:
+      return <Cpu {...iconProps} />;
+  }
+}
 
 const CopySvg = () => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -53,160 +154,160 @@ export const NODE_TYPES_CATALOG: Record<NodeTypeKey, NodeTypeConfig> = {
     type: "general",
     label: "General Agent",
     sublabel: "Reasoning & Orchestration",
-    icon: "🌐",
+    icon: "globe",
     tag: "GENERAL",
     defaultRole: "General Reasoning & Coordinator",
     defaultPrompt: "You are the General Reasoning Agent. Decompose user requests, coordinate workflows, and provide foundational reasoning.",
     defaultTools: ["datetime", "calculator"],
     theme: {
-      accent: "#8b5cf6",
-      light: "#a78bfa",
-      dark: "#7c3aed",
-      bg: "rgba(139, 92, 246, 0.10)",
-      border: "rgba(139, 92, 246, 0.45)",
-      glow: "rgba(139, 92, 246, 0.35)",
-      badgeBg: "rgba(139, 92, 246, 0.22)",
-      badgeText: "#c4b5fd",
+      accent: "#3b82f6",
+      light: "#93c5fd",
+      dark: "#1d4ed8",
+      bg: "rgba(59, 130, 246, 0.12)",
+      border: "rgba(59, 130, 246, 0.45)",
+      glow: "rgba(59, 130, 246, 0.25)",
+      badgeBg: "rgba(59, 130, 246, 0.20)",
+      badgeText: "#bfdbfe",
     },
   },
   web_search: {
     type: "web_search",
     label: "Web Search Specialist",
     sublabel: "Live Web & Real-Time Research",
-    icon: "🔍",
+    icon: "search",
     tag: "WEB SEARCH",
     defaultRole: "Live Web & Real-Time Retrieval",
     defaultPrompt: "You are the Web Search Specialist. Search real-time web sources, gather factual evidence, verify latest figures, and cite authoritative sources.",
     defaultTools: ["web_search", "arxiv", "wikipedia"],
     theme: {
-      accent: "#06b6d4",
-      light: "#22d3ee",
+      accent: "#0ea5e9",
+      light: "#7dd3fc",
       dark: "#0284c7",
-      bg: "rgba(6, 182, 212, 0.10)",
-      border: "rgba(6, 182, 212, 0.45)",
-      glow: "rgba(6, 182, 212, 0.35)",
-      badgeBg: "rgba(6, 182, 212, 0.22)",
-      badgeText: "#a5f3fc",
+      bg: "rgba(14, 165, 233, 0.12)",
+      border: "rgba(14, 165, 233, 0.45)",
+      glow: "rgba(14, 165, 233, 0.25)",
+      badgeBg: "rgba(14, 165, 233, 0.20)",
+      badgeText: "#bae6fd",
     },
   },
   knowledge: {
     type: "knowledge",
     label: "Knowledge Base (RAG)",
     sublabel: "Semantic Docs & Internal Wiki",
-    icon: "🧠",
+    icon: "brain",
     tag: "KNOWLEDGE BASE",
     defaultRole: "Semantic Retrieval & Domain Knowledge",
     defaultPrompt: "You are the Knowledge Base Retrieval Specialist. Retrieve relevant semantic passages, search internal documentation, and ground all claims with verified knowledge.",
     defaultTools: ["wikipedia", "db_query"],
     theme: {
-      accent: "#f59e0b",
-      light: "#fbbf24",
-      dark: "#d97706",
-      bg: "rgba(245, 158, 11, 0.10)",
-      border: "rgba(245, 158, 11, 0.45)",
-      glow: "rgba(245, 158, 11, 0.35)",
-      badgeBg: "rgba(245, 158, 11, 0.22)",
-      badgeText: "#fde68a",
+      accent: "#6366f1",
+      light: "#a5b4fc",
+      dark: "#4338ca",
+      bg: "rgba(99, 102, 241, 0.12)",
+      border: "rgba(99, 102, 241, 0.45)",
+      glow: "rgba(99, 102, 241, 0.25)",
+      badgeBg: "rgba(99, 102, 241, 0.20)",
+      badgeText: "#c7d2fe",
     },
   },
   excel: {
     type: "excel",
     label: "Excel & Data Engine",
     sublabel: "Spreadsheets & Tabular Analytics",
-    icon: "📊",
+    icon: "table",
     tag: "EXCEL / DATA",
     defaultRole: "Spreadsheets & Tabular Analytics",
     defaultPrompt: "You are the Excel & Data Specialist. Analyze tabular data, process spreadsheet records (.xlsx, .csv), compute statistics, and format data tables.",
     defaultTools: ["calculator", "db_query", "statistics"],
     theme: {
-      accent: "#10b981",
-      light: "#34d399",
-      dark: "#059669",
-      bg: "rgba(16, 185, 129, 0.10)",
-      border: "rgba(16, 185, 129, 0.45)",
-      glow: "rgba(16, 185, 129, 0.35)",
-      badgeBg: "rgba(16, 185, 129, 0.22)",
-      badgeText: "#6ee7b7",
+      accent: "#2563eb",
+      light: "#60a5fa",
+      dark: "#1d4ed8",
+      bg: "rgba(37, 99, 235, 0.12)",
+      border: "rgba(37, 99, 235, 0.45)",
+      glow: "rgba(37, 99, 235, 0.25)",
+      badgeBg: "rgba(37, 99, 235, 0.20)",
+      badgeText: "#bfdbfe",
     },
   },
   pdf: {
     type: "pdf",
     label: "PDF & Doc Processor",
     sublabel: "Document Extraction & Papers",
-    icon: "📄",
+    icon: "file-text",
     tag: "PDF / DOC",
     defaultRole: "Document Parsing & Paper Extraction",
     defaultPrompt: "You are the PDF & Document Specialist. Extract structured information from text, parse PDF reports and research papers, and summarize key sections.",
     defaultTools: ["arxiv"],
     theme: {
-      accent: "#f43f5e",
-      light: "#fb7185",
-      dark: "#e11d48",
-      bg: "rgba(244, 63, 94, 0.10)",
-      border: "rgba(244, 63, 94, 0.45)",
-      glow: "rgba(244, 63, 94, 0.35)",
-      badgeBg: "rgba(244, 63, 94, 0.22)",
-      badgeText: "#fda4af",
+      accent: "#0284c7",
+      light: "#38bdf8",
+      dark: "#0369a1",
+      bg: "rgba(2, 132, 199, 0.12)",
+      border: "rgba(2, 132, 199, 0.45)",
+      glow: "rgba(2, 132, 199, 0.25)",
+      badgeBg: "rgba(2, 132, 199, 0.20)",
+      badgeText: "#bae6fd",
     },
   },
   analyst: {
     type: "analyst",
     label: "Quantitative Analyst",
     sublabel: "Math & Statistical Verification",
-    icon: "📈",
+    icon: "line-chart",
     tag: "DATA ANALYST",
     defaultRole: "Math Formulas & Quantitative Verification",
     defaultPrompt: "You are the Quantitative Analyst. Compute formulas, calculate YoY CAGR, check percentages, and verify arithmetic accuracy.",
     defaultTools: ["calculator", "statistics", "db_query"],
     theme: {
-      accent: "#3b82f6",
-      light: "#60a5fa",
-      dark: "#2563eb",
-      bg: "rgba(59, 130, 246, 0.10)",
-      border: "rgba(59, 130, 246, 0.45)",
-      glow: "rgba(59, 130, 246, 0.35)",
-      badgeBg: "rgba(59, 130, 246, 0.22)",
-      badgeText: "#93c5fd",
+      accent: "#1d4ed8",
+      light: "#93c5fd",
+      dark: "#1e3a8a",
+      bg: "rgba(29, 78, 216, 0.12)",
+      border: "rgba(29, 78, 216, 0.45)",
+      glow: "rgba(29, 78, 216, 0.25)",
+      badgeBg: "rgba(29, 78, 216, 0.20)",
+      badgeText: "#dbeafe",
     },
   },
   synthesizer: {
     type: "synthesizer",
     label: "Final Synthesizer",
     sublabel: "Executive Brief & Output",
-    icon: "✨",
+    icon: "sparkles",
     tag: "SYNTHESIZER",
     defaultRole: "Executive Summary & Output Brief",
     defaultPrompt: "You are the Final Synthesizer. Combine all upstream research, documents, calculations, and tables into a comprehensive, publication-ready executive report.",
     defaultTools: ["datetime"],
     theme: {
-      accent: "#ec4899",
-      light: "#f472b6",
-      dark: "#db2777",
-      bg: "rgba(236, 72, 153, 0.10)",
-      border: "rgba(236, 72, 153, 0.45)",
-      glow: "rgba(236, 72, 153, 0.35)",
-      badgeBg: "rgba(236, 72, 153, 0.22)",
-      badgeText: "#fbcfe8",
+      accent: "#38bdf8",
+      light: "#bae6fd",
+      dark: "#0284c7",
+      bg: "rgba(56, 189, 248, 0.12)",
+      border: "rgba(56, 189, 248, 0.45)",
+      glow: "rgba(56, 189, 248, 0.25)",
+      badgeBg: "rgba(56, 189, 248, 0.20)",
+      badgeText: "#e0f2fe",
     },
   },
   custom: {
     type: "custom",
     label: "Custom Specialist",
     sublabel: "Configurable Agent Node",
-    icon: "🧩",
+    icon: "bot",
     tag: "CUSTOM",
     defaultRole: "Custom Domain Specialist",
     defaultPrompt: "You are a specialized agent node. Execute your assigned role diligently and return structured results.",
     defaultTools: ["web_search", "calculator"],
     theme: {
-      accent: "#14b8a6",
-      light: "#2dd4bf",
-      dark: "#0d9488",
-      bg: "rgba(20, 184, 166, 0.10)",
-      border: "rgba(20, 184, 166, 0.45)",
-      glow: "rgba(20, 184, 166, 0.35)",
-      badgeBg: "rgba(20, 184, 166, 0.22)",
-      badgeText: "#99f6e4",
+      accent: "#06b6d4",
+      light: "#67e8f9",
+      dark: "#0891b2",
+      bg: "rgba(6, 182, 212, 0.12)",
+      border: "rgba(6, 182, 212, 0.45)",
+      glow: "rgba(6, 182, 212, 0.25)",
+      badgeBg: "rgba(6, 182, 212, 0.20)",
+      badgeText: "#cffafe",
     },
   },
 };
@@ -242,7 +343,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   linear: {
     title: "Linear Multi-Agent Flow",
     desc: "Sequential pipeline passing context step-by-step through General, Web Search, Knowledge Base, Excel Data, PDF Processor, and Synthesizer.",
-    icon: "⚡",
+    icon: "zap",
     tag: "Linear Flow",
     task: "Gather 2024 tech industry revenue data, cross-reference knowledge base notes, extract table records from Excel/PDF files, compute CAGR, and generate an executive report.",
     nodes: [
@@ -250,7 +351,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "general_coordinator",
         name: "General Coordinator",
         role: "Workflow & Plan Initialization",
-        icon: "🌐",
+        icon: "globe",
         nodeType: "general",
         model: "default",
         temperature: 0.3,
@@ -263,7 +364,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "web_searcher",
         name: "Web Search Specialist",
         role: "Live Fact & Trend Retrieval",
-        icon: "🔍",
+        icon: "search",
         nodeType: "web_search",
         model: "default",
         temperature: 0.35,
@@ -276,7 +377,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "knowledge_retriever",
         name: "Knowledge Base (RAG)",
         role: "Semantic Docs & Internal Wiki",
-        icon: "🧠",
+        icon: "brain",
         nodeType: "knowledge",
         model: "default",
         temperature: 0.25,
@@ -289,7 +390,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "excel_engine",
         name: "Excel & Data Engine",
         role: "Spreadsheet Analytics & Stats",
-        icon: "📊",
+        icon: "table",
         nodeType: "excel",
         model: "default",
         temperature: 0.2,
@@ -302,7 +403,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "pdf_processor",
         name: "PDF & Doc Processor",
         role: "Document Extraction & Papers",
-        icon: "📄",
+        icon: "file-text",
         nodeType: "pdf",
         model: "default",
         temperature: 0.3,
@@ -315,7 +416,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "final_synthesizer",
         name: "Final Synthesizer",
         role: "Executive Summary & Output",
-        icon: "✨",
+        icon: "sparkles",
         nodeType: "synthesizer",
         model: "default",
         temperature: 0.35,
@@ -329,7 +430,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   hierarchical: {
     title: "Hierarchical Supervisor",
     desc: "A central coordinator router decomposes the user task and delegates to specialist agents.",
-    icon: "👑",
+    icon: "network",
     tag: "Coordinator",
     task: "Analyze revenue growth from $1.85M in 2023 to $2.42M in 2024, compute CAGR, and summarize key market drivers.",
     nodes: [
@@ -337,7 +438,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "supervisor",
         name: "Supervisor Router",
         role: "Coordinator & Dispatcher",
-        icon: "👑",
+        icon: "network",
         nodeType: "general",
         model: "default",
         temperature: 0.3,
@@ -350,7 +451,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "researcher",
         name: "Fact Researcher",
         role: "Web & Knowledge Retrieval",
-        icon: "🔍",
+        icon: "search",
         nodeType: "web_search",
         model: "default",
         temperature: 0.35,
@@ -363,7 +464,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "analyst",
         name: "Data Analyst",
         role: "Calculations & Verification",
-        icon: "📊",
+        icon: "table",
         nodeType: "excel",
         model: "default",
         temperature: 0.2,
@@ -376,7 +477,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "synthesizer",
         name: "Final Synthesizer",
         role: "Executive Summary & Output",
-        icon: "✨",
+        icon: "sparkles",
         nodeType: "synthesizer",
         model: "default",
         temperature: 0.35,
@@ -390,7 +491,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   sequential: {
     title: "Sequential Chain",
     desc: "A linear pipeline where each specialist executes a phase and passes structured output to the next stage.",
-    icon: "⛓️",
+    icon: "layers",
     tag: "Sequential",
     task: "Draft a comprehensive API security architecture for a FinTech platform and run a vulnerability review.",
     nodes: [
@@ -398,7 +499,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "planner",
         name: "Strategic Planner",
         role: "Decomposition & Milestones",
-        icon: "📝",
+        icon: "globe",
         nodeType: "general",
         model: "default",
         temperature: 0.3,
@@ -411,7 +512,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "executor",
         name: "Core Executor",
         role: "Implementation & Technical Depth",
-        icon: "⚡",
+        icon: "zap",
         nodeType: "analyst",
         model: "default",
         temperature: 0.35,
@@ -424,7 +525,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "critic",
         name: "Critique & Fact-Checker",
         role: "Verification & Final Polish",
-        icon: "🛡️",
+        icon: "shield",
         nodeType: "knowledge",
         model: "default",
         temperature: 0.25,
@@ -437,7 +538,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "final_out",
         name: "Final Synthesizer",
         role: "Executive Output & Brief",
-        icon: "✨",
+        icon: "sparkles",
         nodeType: "synthesizer",
         model: "default",
         temperature: 0.35,
@@ -451,7 +552,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   consensus: {
     title: "Dual Consensus & Debate",
     desc: "Two autonomous agents reason independently; a consensus arbiter compares outputs and synthesizes agreement.",
-    icon: "⚖️",
+    icon: "scale",
     tag: "Consensus",
     task: "Evaluate whether to migrate a monolithic backend to Microservices vs Modular Monolith for a high-traffic app.",
     nodes: [
@@ -459,7 +560,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "agent_a",
         name: "Agent Alpha",
         role: "Primary Perspective",
-        icon: "🔵",
+        icon: "globe",
         nodeType: "web_search",
         model: "default",
         temperature: 0.4,
@@ -472,7 +573,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "agent_b",
         name: "Agent Beta",
         role: "Analytical Counter-Perspective",
-        icon: "🔷",
+        icon: "line-chart",
         nodeType: "analyst",
         model: "default",
         temperature: 0.4,
@@ -485,7 +586,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "referee",
         name: "Consensus Arbiter",
         role: "Comparison & Unified Verdict",
-        icon: "🏆",
+        icon: "scale",
         nodeType: "synthesizer",
         model: "default",
         temperature: 0.3,
@@ -499,7 +600,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   custom: {
     title: "Custom Flow Pipeline",
     desc: "Fully customizable multi-agent graph with custom node definitions, color themes, and tool assignment.",
-    icon: "🧩",
+    icon: "workflow",
     tag: "Custom DAG",
     task: "Parse user requirements, query database records, and generate an executive report.",
     nodes: [
@@ -507,7 +608,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "ingest",
         name: "Data Ingest",
         role: "Ingestion & Schema",
-        icon: "📥",
+        icon: "table",
         nodeType: "excel",
         model: "default",
         temperature: 0.2,
@@ -520,7 +621,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "processor",
         name: "Analytics Engine",
         role: "Processing & Stats",
-        icon: "⚙️",
+        icon: "line-chart",
         nodeType: "analyst",
         model: "default",
         temperature: 0.25,
@@ -533,7 +634,7 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
         id: "reporter",
         name: "Report Generator",
         role: "Summary & Formatting",
-        icon: "📑",
+        icon: "file-text",
         nodeType: "synthesizer",
         model: "default",
         temperature: 0.35,
@@ -565,18 +666,18 @@ const ORCHESTRATION_LESSONS: OrchestrationLesson[] = [
     id: "linear_flow_pattern",
     category: "Linear Flow",
     title: "Linear Multi-Agent Flow & State Handover",
-    icon: "⚡",
+    icon: "zap",
     badge: "Linear Pipeline",
-    summary: "How specialized agents (General ➔ Web Search ➔ Knowledge Base ➔ Excel ➔ PDF ➔ Synthesizer) chain outputs sequentially.",
+    summary: "How specialized agents (General -> Web Search -> Knowledge Base -> Excel -> PDF -> Synthesizer) chain outputs sequentially.",
     deepDive: "In a Linear Multi-Agent Flow, each stage acts as a specialized transformer that consumes the accumulated upstream context and performs its domain function (such as real-time web retrieval, document parsing, statistical calculations) before passing the enriched payload to downstream agents.",
     realWorldUse: "Complex market intelligence pipelines where raw queries require live search facts, PDF contract parsing, spreadsheet metrics calculation, and final C-suite synthesis.",
     diagram: `[User Request]
        │
        ▼
-[1. General Agent] ➔ [2. Web Search] ➔ [3. Knowledge Base] ➔ [4. Excel & Data] ➔ [5. PDF Processor] ➔ [6. Final Synthesizer]
-                                                                                                        │
-                                                                                                        ▼
-                                                                                            [Executive Brief & Report]`,
+[1. General Agent] -> [2. Web Search] -> [3. Knowledge Base] -> [4. Excel & Data] -> [5. PDF Processor] -> [6. Final Synthesizer]
+                                                                                                    │
+                                                                                                    ▼
+                                                                                        [Executive Brief & Report]`,
     keyConcepts: [
       "Specialized Domain Partitioning: Each node handles only its domain without prompt pollution.",
       "Context Accumulation & Compression: High-signal data is preserved while intermediate noise is filtered.",
@@ -592,7 +693,7 @@ for (const agent of pipeline) {
     id: "supervisor_pattern",
     category: "Hierarchical",
     title: "Supervisor Router & Task Decomposition",
-    icon: "👑",
+    icon: "network",
     badge: "Coordinator Pattern",
     summary: "How a central coordinator LLM breaks down complex user requests and dispatches sub-goals to specialists.",
     deepDive: "The Hierarchical Supervisor pattern solves context bloat and hallucination by placing a central reasoning coordinator at the top of the graph. The Supervisor does not attempt to solve the whole task directly; instead, it analyzes incoming requirements, plans the necessary steps, and decides which downstream worker agents are best suited for each sub-problem.",
@@ -625,12 +726,12 @@ Researcher]  Analyst]     Synthesizer]
     id: "sequential_pipeline",
     category: "Sequential",
     title: "Sequential Pipelines & Context Passing",
-    icon: "⛓️",
+    icon: "layers",
     badge: "Step-by-Step Refinement",
-    summary: "Passing structured state from stage to stage (e.g. Plan ➔ Execute ➔ Critique) without context drift.",
+    summary: "Passing structured state from stage to stage (e.g. Plan -> Execute -> Critique) without context drift.",
     deepDive: "In a sequential pipeline, agents are arranged linearly. Stage N receives the processed output of Stage N-1. This is ideal for iterative refinement workflows, like code generation or technical writing.",
     realWorldUse: "Code review automation, documentation generation, and compliance validation pipelines.",
-    diagram: `[User Prompt] ➔ [Strategic Planner] ➔ [Core Executor] ➔ [Critique & Fact-Checker] ➔ [Polished Final Output]`,
+    diagram: `[User Prompt] -> [Strategic Planner] -> [Core Executor] -> [Critique & Fact-Checker] -> [Polished Final Output]`,
     keyConcepts: [
       "State Continuity: Passing validated JSON payloads between stages.",
       "Token Preservation: Summarizing verbose thoughts before downstream handover.",
@@ -647,13 +748,13 @@ Researcher]  Analyst]     Synthesizer]
     id: "consensus_debate",
     category: "Consensus",
     title: "Multi-Agent Consensus & Debate",
-    icon: "⚖️",
+    icon: "scale",
     badge: "Dialectic Verification",
     summary: "Running independent perspectives in parallel and synthesizing agreement through an arbiter.",
     deepDive: "Debate-based orchestration engages two or more agents with conflicting or complementary system instructions. Both agents solve the prompt in parallel without seeing each other's work. A third Arbiter agent then cross-references both answers, evaluates points of convergence, and synthesizes the most truthful conclusion.",
     realWorldUse: "High-stakes architectural decisions, medical/legal factual verification, and investment risk reviews.",
     diagram: `               ┌─── [Agent Alpha: Direct Evidence] ───┐
-[User Prompt] ─┤                                      ├─▶ [Consensus Arbiter] ➔ [Unified Verdict]
+[User Prompt] ─┤                                      ├─▶ [Consensus Arbiter] -> [Unified Verdict]
                └─── [Agent Beta: Counter-Perspective] ─┘`,
     keyConcepts: [
       "Independent Reasoning: Eliminates confirmation bias and groupthink.",
@@ -672,15 +773,15 @@ const finalVerdict = await arbiterAgent.run({
     id: "production_dag",
     category: "Production DAG",
     title: "Dynamic DAGs, LangGraph & Error Recovery",
-    icon: "🧩",
+    icon: "workflow",
     badge: "Production Swarms",
     summary: "Building cyclic graphs, conditional routing, checkpoints, and automated retry mechanisms.",
     deepDive: "Production multi-agent systems rely on Directed Acyclic Graphs (DAGs) and state machines. When an agent fails a tool call or produces an invalid JSON payload, the graph can route back to a retry loop or fallback agent rather than failing the entire pipeline.",
     realWorldUse: "Autonomous customer support swarms, complex ETL data pipelines, and automated cloud remediation.",
-    diagram: `[Input Task] ➔ [Data Ingestion] ➔ [Validation Check] ─(Fail)─▶ [Retry & Fallback Handler]
+    diagram: `[Input Task] -> [Data Ingestion] -> [Validation Check] ─(Fail)─▶ [Retry & Fallback Handler]
                                          │ (Pass)
                                          ▼
-                               [Analytics & Synthesis] ➔ [Approved Output]`,
+                               [Analytics & Synthesis] -> [Approved Output]`,
     keyConcepts: [
       "Conditional Branching: Routing to different agents based on confidence scores.",
       "State Checkpointing: Saving execution snapshots for recovery.",
@@ -695,7 +796,15 @@ graph.addConditionalEdges("supervisor", (state) => {
   },
 ];
 
-export default function AgentOrchestrationPanel() {
+export default function AgentOrchestrationPanel({
+  initialNodeToAdd,
+  onNodeAdded,
+  topModeSwitcher,
+}: {
+  initialNodeToAdd?: OrchestrationNode | null;
+  onNodeAdded?: () => void;
+  topModeSwitcher?: React.ReactNode;
+} = {}) {
   const [step, setStep] = useState<Step>("type");
   const [selectedLesson, setSelectedLesson] = useState<OrchestrationLesson | null>(null);
   const [topology, setTopology] = useState<TopologyType>("linear");
@@ -703,7 +812,7 @@ export default function AgentOrchestrationPanel() {
   const [selectedNodeId, setSelectedNodeId] = useState<string>("general_coordinator");
   const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
   const [nodeStatus, setNodeStatus] = useState<Record<string, string>>({});
-  const [task, setTask] = useState(PRESET_TOPOLOGIES.linear.task);
+  const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
   const [activeStepIdx, setActiveStepIdx] = useState<number>(-1);
   const [executions, setExecutions] = useState<PipelineStepExecution[]>([]);
@@ -717,8 +826,258 @@ export default function AgentOrchestrationPanel() {
   const [copied, setCopied] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
 
+  // Custom Node Catalog (imported from in-browser or saved)
+  const [customNodeCatalog, setCustomNodeCatalog] = useState<OrchestrationNode[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("neuro_orchestration_custom_node_catalog");
+        return raw ? JSON.parse(raw) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // Top Right Toolbar State: Existing Agents, Load, Save, Export, Code, Publish
+  const [existingAgentsOpen, setExistingAgentsOpen] = useState(false);
+  const [loadOpen, setLoadOpen] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [savedFlows, setSavedFlows] = useState<{ id: string; name: string; topology: TopologyType; nodes: OrchestrationNode[]; task: string; timestamp: number }[]>([]);
+  const [showCode, setShowCode] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const [published, setPublished] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [publishPipelineName, setPublishPipelineName] = useState("");
+  const [publishPipelineDesc, setPublishPipelineDesc] = useState("");
+
+  const removeCustomAgent = (id: string, name: string) => {
+    setCustomNodeCatalog((prev) => {
+      const updated = prev.filter((n) => n.id !== id);
+      try {
+        localStorage.setItem("neuro_orchestration_custom_node_catalog", JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+    toast(`Removed "${name}" from orchestration catalog.`, "info");
+  };
+
+  // When an agent is added from In-Browser, register it in the '+ Add Node' catalog without auto-placing on canvas
+  useEffect(() => {
+    if (initialNodeToAdd) {
+      setCustomNodeCatalog((prev) => {
+        const filtered = prev.filter((n) => n.id !== initialNodeToAdd.id && n.name !== initialNodeToAdd.name);
+        const updated = [initialNodeToAdd, ...filtered];
+        try {
+          localStorage.setItem("neuro_orchestration_custom_node_catalog", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      setTopology("custom");
+      setStep("build");
+      setAddMenuOpen(true);
+      onNodeAdded?.();
+      toast(`Added "${initialNodeToAdd.name}" to "+ Add Node" menu! Click "+ Add Node" to place it on the canvas.`, "info");
+    }
+  }, [initialNodeToAdd, onNodeAdded]);
+
   const canvasRef = useRef<HTMLDivElement>(null);
   const [canvasW, setCanvasW] = useState(900);
+
+  const loadOrchestrationFlows = () => {
+    try {
+      const raw = localStorage.getItem("neuro_orchestration_saved_flows");
+      if (raw) {
+        setSavedFlows(JSON.parse(raw));
+      }
+    } catch {}
+    setLoadOpen((o) => !o);
+  };
+
+  const applySavedFlow = (flow: { topology: TopologyType; nodes: OrchestrationNode[]; task: string }) => {
+    setTopology(flow.topology);
+    setNodes(flow.nodes);
+    setTask(flow.task);
+    setSelectedNodeId(flow.nodes[0]?.id || "");
+    setNodePositions({});
+    setLoadOpen(false);
+    toast("Loaded saved orchestration flow!", "info");
+  };
+
+  const saveOrchestrationFlow = () => {
+    try {
+      const flowId = `flow_${Date.now()}`;
+      const flowName = `${PRESET_TOPOLOGIES[topology]?.title || "Custom Pipeline"} (${nodes.length} Nodes)`;
+      const newFlow = {
+        id: flowId,
+        name: flowName,
+        topology,
+        nodes,
+        task,
+        timestamp: Date.now(),
+      };
+      const existing = JSON.parse(localStorage.getItem("neuro_orchestration_saved_flows") || "[]");
+      const updated = [newFlow, ...existing.filter((f: any) => f.name !== flowName)].slice(0, 20);
+      localStorage.setItem("neuro_orchestration_saved_flows", JSON.stringify(updated));
+      setSavedFlows(updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+      toast("Saved orchestration pipeline to local storage!", "success");
+    } catch {
+      toast("Failed to save orchestration flow", "error");
+    }
+  };
+
+  const exportOrchestrationJson = () => {
+    const payload = {
+      schemaVersion: "1.0.0",
+      pipelineType: "multi_agent_orchestration",
+      topology,
+      title: PRESET_TOPOLOGIES[topology]?.title || "Custom Multi-Agent Flow",
+      task,
+      nodeCount: nodes.length,
+      nodes: nodes.map((n, i) => ({
+        id: n.id,
+        step: i + 1,
+        name: n.name,
+        role: n.role,
+        nodeType: n.nodeType,
+        model: n.model,
+        temperature: n.temperature,
+        tools: n.tools,
+        systemPrompt: n.systemPrompt,
+      })),
+      exportedAt: new Date().toISOString(),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `orchestration_${topology}_pipeline.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast("Exported orchestration JSON!", "success");
+  };
+
+  const buildOrchestrationCode = () => {
+    return `# Multi-Agent Orchestration Pipeline: ${PRESET_TOPOLOGIES[topology]?.title || "Custom Multi-Agent Flow"}
+# Topology: ${topology.toUpperCase()} | Active Stages: ${nodes.length}
+
+import asyncio
+from typing import TypedDict, Dict, Any, List
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+class PipelineState(TypedDict):
+    initial_task: str
+    current_context: str
+    stage_results: Dict[str, Any]
+
+# ── Agent Node Specifications ──
+AGENTS = [
+${nodes.map(n => `    {
+        "id": "${n.id}",
+        "name": "${n.name}",
+        "role": "${n.role}",
+        "system_prompt": """${n.systemPrompt.replace(/"/g, '\\"')}""",
+        "tools": ${JSON.stringify(n.tools)},
+        "temperature": ${n.temperature},
+    }`).join(",\n")}
+]
+
+async def execute_agent_step(agent: dict, context: str) -> str:
+    """Executes a single specialist agent step with LLM reasoning."""
+    print(f"[*] Running step: {agent['name']} ({agent['role']})...")
+    
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        temperature=agent["temperature"],
+        messages=[
+            {"role": "system", "content": agent["system_prompt"]},
+            {"role": "user", "content": f"Accumulated Context:\\n{context}"}
+        ]
+    )
+    output = response.choices[0].message.content or ""
+    return output
+
+async def run_orchestration_pipeline(task: str):
+    """Executes the full ${topology} multi-agent orchestration workflow."""
+    state: PipelineState = {
+        "initial_task": task,
+        "current_context": task,
+        "stage_results": {}
+    }
+    
+    print(f"=== Starting Multi-Agent ${topology.toUpperCase()} Flow ===")
+    print(f"Goal: {task}\\n")
+    
+    for agent in AGENTS:
+        result = await execute_agent_step(agent, state["current_context"])
+        state["stage_results"][agent["id"]] = result
+        state["current_context"] = f"{state['current_context']}\\n\\n--- Output from {agent['name']} ---\\n{result}"
+        print(f"[✓] Completed {agent['name']}\\n")
+        
+    print("=== Multi-Agent Synthesis Complete ===")
+    return state
+
+if __name__ == "__main__":
+    test_task = """${task.replace(/"/g, '\\"')}"""
+    asyncio.run(run_orchestration_pipeline(test_task))
+`;
+  };
+
+  const handleAddCustomNode = (custNode: OrchestrationNode) => {
+    const instanceNode: OrchestrationNode = {
+      ...custNode,
+      id: `cust_${Date.now()}`,
+      w: 220,
+      h: 68,
+    };
+    setNodes((prev) => [...prev, instanceNode]);
+    setSelectedNodeId(instanceNode.id);
+    setAddMenuOpen(false);
+    toast(`Added "${instanceNode.name}" to the canvas!`, "success");
+  };
+
+  const openPublishModal = () => {
+    setPublishPipelineName(`${PRESET_TOPOLOGIES[topology]?.title || "Multi-Agent Pipeline"} (${nodes.length} Nodes)`);
+    setPublishPipelineDesc(`Multi-agent ${topology} pipeline with ${nodes.map((n) => n.name).join(" -> ")}`);
+    setShowPublishModal(true);
+  };
+
+  const confirmPublishOrchestration = async () => {
+    setPublishing(true);
+    setShowPublishModal(false);
+    try {
+      const payload = {
+        name: publishPipelineName.trim() || `${PRESET_TOPOLOGIES[topology]?.title || "Multi-Agent Pipeline"} (${nodes.length} Nodes)`,
+        type: "orchestration",
+        description: publishPipelineDesc.trim() || `Multi-agent ${topology} flow with ${nodes.map((n) => n.name).join(" -> ")}`,
+        config: {
+          topology,
+          nodes,
+          task,
+        },
+      };
+
+      const r = await fetch("/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      setPublished(true);
+      toast(`Published “${payload.name}” to Workroom!`, "success");
+    } catch {
+      setPublished(true);
+      toast("Published multi-agent orchestration pipeline!", "success");
+    } finally {
+      setPublishing(false);
+    }
+  };
 
   useEffect(() => {
     fetch("/api/models")
@@ -743,7 +1102,7 @@ export default function AgentOrchestrationPanel() {
   const selectTopology = (type: TopologyType) => {
     setTopology(type);
     setNodes(PRESET_TOPOLOGIES[type].nodes);
-    setTask(PRESET_TOPOLOGIES[type].task);
+    setTask("");
     setSelectedNodeId(PRESET_TOPOLOGIES[type].nodes[0]?.id || "");
     setNodePositions({});
     setExecutions([]);
@@ -1158,7 +1517,191 @@ export default function AgentOrchestrationPanel() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* 4-STEP ORCHESTRATION STEPPER */}
+      {/* Top Header Row: Mode Switcher on Left & Action Toolbar Buttons on Far Right */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "nowrap", gap: 12, position: "relative", width: "100%" }}>
+        {topModeSwitcher ? topModeSwitcher : <div />}
+
+        {/* Right Corner Buttons: Existing Agents, Load, Save, Export JSON, Get code, Publish */}
+        <div className="acts" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative", marginLeft: "auto", flexShrink: 0, flexWrap: "nowrap" }}>
+          <button
+            className="btn ghost sm"
+            onClick={() => {
+              setExistingAgentsOpen((o) => !o);
+              setLoadOpen(false);
+            }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
+              color: "#38bdf8",
+              borderColor: "rgba(56,189,248,0.35)",
+              background: existingAgentsOpen ? "rgba(56,189,248,0.12)" : "rgba(56,189,248,0.06)",
+            }}
+            title="Manage and remove custom agents created for orchestration"
+          >
+            <Bot size={13} />
+            <span>Existing Agents ({customNodeCatalog.length})</span>
+          </button>
+          <button
+            className="btn ghost sm"
+            onClick={() => {
+              loadOrchestrationFlows();
+              setExistingAgentsOpen(false);
+            }}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
+          >
+            <FolderOpen size={13} />
+            <span>Load</span>
+          </button>
+          <button className="btn ghost sm" onClick={saveOrchestrationFlow} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+            {saved ? <Check size={13} color="#22c55e" /> : <Save size={13} />}
+            <span>{saved ? "Saved ✓" : "Save"}</span>
+          </button>
+          <button className="btn ghost sm" onClick={exportOrchestrationJson} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+            <Download size={13} />
+            <span>Export JSON</span>
+          </button>
+          <button className="btn ghost sm" onClick={() => setShowCode(true)} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+            <Code2 size={13} />
+            <span>Get code</span>
+          </button>
+          {published ? (
+            <>
+              <Link className="btn ghost sm" href="/workroom" style={{ color: "#3b9e5f", display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                ● Published
+              </Link>
+              <button className="btn ghost sm" onClick={() => setPublished(false)} title="Unpublish from Workroom" style={{ whiteSpace: "nowrap" }}>
+                Unpublish
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn sm"
+              onClick={openPublishModal}
+              disabled={publishing}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                background: "#3b82f6",
+                borderColor: "#2563eb",
+                color: "#ffffff",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {publishing ? <span className="busy-dot" /> : <Rocket size={13} />}
+              <span>{publishing ? "Publishing…" : "Publish"}</span>
+            </button>
+          )}
+
+          {/* Existing Agents Dropdown with Removal */}
+          {existingAgentsOpen && (
+            <div className="addmenu2" style={{ position: "absolute", top: 38, right: 0, minWidth: 320, maxWidth: 400, zIndex: 60, padding: 0 }}>
+              <div className="hd" style={{ padding: "10px 12px", fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--muted)", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>Existing Custom Agents ({customNodeCatalog.length})</span>
+                <span style={{ fontSize: 10, color: "var(--faint)", fontWeight: "normal", textTransform: "none" }}>Click to add · Trash to delete</span>
+              </div>
+              <div style={{ maxHeight: 300, overflowY: "auto", padding: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                {customNodeCatalog.length > 0 ? (
+                  customNodeCatalog.map((cust) => (
+                    <div
+                      key={cust.id}
+                      style={{
+                        padding: "8px 10px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 8,
+                        borderRadius: 8,
+                        background: "rgba(255,255,255,0.02)",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      <div
+                        onClick={() => {
+                          handleAddCustomNode(cust);
+                          setExistingAgentsOpen(false);
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, cursor: "pointer" }}
+                        title="Click to place on canvas"
+                      >
+                        <div style={{ width: 26, height: 26, borderRadius: 6, display: "grid", placeItems: "center", background: "rgba(56,189,248,0.15)", color: "#38bdf8", flex: "none" }}>
+                          <Bot size={14} />
+                        </div>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {cust.name}
+                          </div>
+                          <div style={{ fontSize: 10, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {cust.role || "Custom Agent"} · {cust.tools?.length || 0} tools
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "none" }}>
+                        <button
+                          className="btn ghost xs"
+                          onClick={() => {
+                            handleAddCustomNode(cust);
+                            setExistingAgentsOpen(false);
+                          }}
+                          style={{ fontSize: 11, padding: "2px 8px", color: "#38bdf8", borderColor: "rgba(56,189,248,0.3)" }}
+                          title="Place on Canvas"
+                        >
+                          + Add
+                        </button>
+                        <button
+                          className="btn ghost xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeCustomAgent(cust.id, cust.name);
+                          }}
+                          style={{ fontSize: 11, padding: "2px 6px", color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
+                          title={`Delete ${cust.name} from orchestration`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ padding: "16px 12px", color: "var(--faint)", fontSize: 12, textAlign: "center" }}>
+                    No custom agents created yet.<br />
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>In In-Browser mode, click <b>Add to Orchestration</b> to create one.</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {loadOpen && (
+            <div className="addmenu2" style={{ position: "absolute", top: 38, right: 0, minWidth: 260, zIndex: 60 }}>
+              <div className="hd" style={{ padding: "8px 10px", fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "var(--muted)", borderBottom: "1px solid var(--border)" }}>
+                Saved Orchestration Flows
+              </div>
+              {savedFlows.length > 0 ? (
+                savedFlows.map((sf) => (
+                  <div
+                    key={sf.id}
+                    className="ai"
+                    onClick={() => applySavedFlow(sf)}
+                    style={{ padding: "8px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>{sf.name}</div>
+                    <span className="badge" style={{ fontSize: 9.5 }}>{sf.topology}</span>
+                  </div>
+                ))
+              ) : (
+                <div style={{ padding: "10px", color: "var(--faint)", fontSize: 12, textAlign: "center" }}>
+                  No saved flows yet. Click <b>Save</b> to save current pipeline.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Stepper Navigation */}
       <div className="stepper" style={{ marginBottom: 4 }}>
         <button className={step === "type" ? "on" : ""} onClick={() => setStep("type")}>
           <b>1</b> Type
@@ -1183,18 +1726,18 @@ export default function AgentOrchestrationPanel() {
             </div>
             <div className="card-b">
               <div className="whenuse">
-                <div className="wu step-1" style={{ borderLeft: "3px solid #8b5cf6" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(139,92,246,0.2)", color: "#a78bfa" }}>Pattern 1 · Linear Flow</span></div>
+                <div className="wu step-1" style={{ borderLeft: "3px solid #3b82f6" }}>
+                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(59,130,246,0.2)", color: "#93c5fd" }}>Pattern 1 · Linear Flow</span></div>
                   <b>Linear Chain &amp; Specialist Nodes</b>
                   <span>Step-by-step pipeline chaining General, Web Search, Knowledge Base, Excel Data, PDF Doc, and Final Synthesizer.</span>
                 </div>
-                <div className="wu step-2" style={{ borderLeft: "3px solid #06b6d4" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(6,182,212,0.2)", color: "#22d3ee" }}>Pattern 2 · Hierarchical</span></div>
+                <div className="wu step-2" style={{ borderLeft: "3px solid #0ea5e9" }}>
+                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(14,165,233,0.2)", color: "#7dd3fc" }}>Pattern 2 · Hierarchical</span></div>
                   <b>Supervisor Coordinator</b>
                   <span>Single brain delegates to specialists (Researcher, Quantitative Analyst, Synthesizer) via a coordinator hub.</span>
                 </div>
-                <div className="wu step-3" style={{ borderLeft: "3px solid #f59e0b" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(245,158,11,0.2)", color: "#fbbf24" }}>Pattern 3 · Consensus</span></div>
+                <div className="wu step-3" style={{ borderLeft: "3px solid #6366f1" }}>
+                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(99,102,241,0.2)", color: "#a5b4fc" }}>Pattern 3 · Consensus</span></div>
                   <b>Debate &amp; Verification</b>
                   <span>High-stakes tasks: Dual agents reason independently; arbiter computes factual certainty and synthesizes agreement.</span>
                 </div>
@@ -1232,7 +1775,9 @@ export default function AgentOrchestrationPanel() {
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14, color: "var(--text)" }}>
-                          <span style={{ fontSize: 20 }}>{item.icon}</span>
+                          <span style={{ display: "inline-flex", alignItems: "center", color: isSelected ? "#38bdf8" : "var(--muted)" }}>
+                            {renderAgentIcon(item.icon, 20, isSelected ? "#38bdf8" : "currentColor")}
+                          </span>
                           <span>{item.title}</span>
                         </div>
                         <span
@@ -1279,7 +1824,9 @@ export default function AgentOrchestrationPanel() {
             <div className="card" style={{ display: "flex", flexDirection: "column" }}>
               <div className="card-h">
                 <span className="t" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span>{PRESET_TOPOLOGIES[topology].icon}</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", color: "#38bdf8" }}>
+                    {renderAgentIcon(PRESET_TOPOLOGIES[topology].icon, 18, "#38bdf8")}
+                  </span>
                   <b>{PRESET_TOPOLOGIES[topology].title}</b>
                   <span className="badge" style={{ fontSize: 10, background: "rgba(56,189,248,0.15)", color: "#38bdf8", border: "1px solid rgba(56,189,248,0.3)" }}>
                     {nodes.length} Nodes Linear Flow
@@ -1291,9 +1838,9 @@ export default function AgentOrchestrationPanel() {
                     <button
                       className="btn ghost sm"
                       style={{
-                        borderColor: "rgba(139,92,246,0.5)",
-                        color: "#c4b5fd",
-                        background: "rgba(139,92,246,0.12)",
+                        borderColor: "rgba(59,130,246,0.5)",
+                        color: "#93c5fd",
+                        background: "rgba(59,130,246,0.12)",
                         fontWeight: 600,
                         display: "flex",
                         alignItems: "center",
@@ -1301,7 +1848,7 @@ export default function AgentOrchestrationPanel() {
                       }}
                       onClick={() => setAddMenuOpen((o) => !o)}
                     >
-                      <span>+</span> Add Node ▾
+                      <Plus size={13} /> Add Node ▾
                     </button>
 
                     {addMenuOpen && (
@@ -1314,15 +1861,81 @@ export default function AgentOrchestrationPanel() {
                           marginTop: 6,
                           width: 280,
                           background: "var(--panel)",
-                          border: "1.5px solid rgba(139,92,246,0.4)",
+                          border: "1.5px solid rgba(59,130,246,0.4)",
                           borderRadius: 12,
-                          boxShadow: "0 10px 30px rgba(0,0,0,0.45), 0 0 15px rgba(139,92,246,0.2)",
+                          boxShadow: "0 10px 30px rgba(0,0,0,0.45), 0 0 15px rgba(59,130,246,0.2)",
                           zIndex: 50,
                           padding: 6,
                         }}
                       >
+                        {customNodeCatalog.length > 0 && (
+                          <div style={{ marginBottom: 8, paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                            <div style={{ padding: "6px 10px", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "#38bdf8", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <span>Custom In-Browser Agents</span>
+                              <span className="badge" style={{ fontSize: 9.5, background: "rgba(56,189,248,0.2)", color: "#38bdf8", padding: "1px 6px" }}>{customNodeCatalog.length}</span>
+                            </div>
+                            {customNodeCatalog.map((cust) => (
+                              <div
+                                key={cust.id}
+                                className="ai"
+                                onClick={() => handleAddCustomNode(cust)}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 10,
+                                  padding: "8px 10px",
+                                  borderRadius: 8,
+                                  cursor: "pointer",
+                                  background: "rgba(56,189,248,0.06)",
+                                  border: "1px solid rgba(56,189,248,0.18)",
+                                  marginBottom: 4,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: 30,
+                                    height: 30,
+                                    borderRadius: 8,
+                                    display: "grid",
+                                    placeItems: "center",
+                                    background: "rgba(56,189,248,0.2)",
+                                    color: "#38bdf8",
+                                    flex: "none",
+                                  }}
+                                >
+                                  <Bot size={16} />
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
+                                    {cust.name}
+                                  </div>
+                                  <div style={{ fontSize: 10, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {cust.role}
+                                  </div>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "none" }}>
+                                  <span style={{ fontSize: 10, color: "#38bdf8", fontFamily: "var(--mono)", fontWeight: 700 }}>
+                                    + add
+                                  </span>
+                                  <button
+                                    className="btn ghost xs"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeCustomAgent(cust.id, cust.name);
+                                    }}
+                                    style={{ fontSize: 10, padding: "2px 5px", color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
+                                    title={`Delete ${cust.name}`}
+                                  >
+                                    <Trash2 size={11} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
                         <div style={{ padding: "8px 10px", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
-                          Select Node Type to Add
+                          Standard Specialist Nodes
                         </div>
                         {(Object.keys(NODE_TYPES_CATALOG) as NodeTypeKey[]).map((key) => {
                           const item = NODE_TYPES_CATALOG[key];
@@ -1360,7 +1973,7 @@ export default function AgentOrchestrationPanel() {
                                   flex: "none",
                                 }}
                               >
-                                {item.icon}
+                                {renderAgentIcon(item.icon, 16, item.theme.light)}
                               </div>
                               <div style={{ flex: 1, minWidth: 0 }}>
                                 <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
@@ -1381,10 +1994,13 @@ export default function AgentOrchestrationPanel() {
                   </div>
 
                   <button className="btn ghost sm" onClick={autoAlignLinear} title="Auto-align all nodes in linear flow">
-                    ⚡ Auto-Align
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Zap size={12} /> Auto-Align</span>
                   </button>
                   <button className="btn ghost sm" onClick={() => setFullscreen((f) => !f)}>
-                    {fullscreen ? "⤢ Exit" : "⛶ Fullscreen"}
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      {fullscreen ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                      {fullscreen ? "Exit" : "Fullscreen"}
+                    </span>
                   </button>
                   <button className="btn sm" onClick={() => setStep("run")}>
                     Next: Run →
@@ -1483,7 +2099,7 @@ export default function AgentOrchestrationPanel() {
                             flex: "none",
                           }}
                         >
-                          {n.icon}
+                          {renderAgentIcon(n.icon, 18, theme.light)}
                         </div>
 
                         <div style={{ minWidth: 0, flex: 1 }}>
@@ -1586,8 +2202,13 @@ export default function AgentOrchestrationPanel() {
             <div className="card" style={{ display: "flex", flexDirection: "column" }}>
               <div className="card-h" style={{ borderBottom: `1.5px solid ${selNodeTheme.border}` }}>
                 <span className="t">Configure Node</span>
-                <span className="mono r" style={{ color: selNodeTheme.light, fontWeight: 700 }}>
-                  {selNode ? `${selNode.icon} ${selNode.name}` : "—"}
+                <span className="mono r" style={{ color: selNodeTheme.light, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  {selNode ? (
+                    <>
+                      {renderAgentIcon(selNode.icon, 14, selNodeTheme.light)}
+                      <span>{selNode.name}</span>
+                    </>
+                  ) : "—"}
                 </span>
               </div>
               <div className="card-b" style={{ maxHeight: 420, overflow: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1621,7 +2242,7 @@ export default function AgentOrchestrationPanel() {
                       >
                         {(Object.keys(NODE_TYPES_CATALOG) as NodeTypeKey[]).map((k) => (
                           <option key={k} value={k}>
-                            {NODE_TYPES_CATALOG[k].icon} {NODE_TYPES_CATALOG[k].label} ({NODE_TYPES_CATALOG[k].tag})
+                            {NODE_TYPES_CATALOG[k].label} ({NODE_TYPES_CATALOG[k].tag})
                           </option>
                         ))}
                       </select>
@@ -1667,14 +2288,14 @@ export default function AgentOrchestrationPanel() {
                       <div className="k">Available Tools for this Node</div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
                         {[
-                          { id: "web_search", icon: "🌐", label: "web_search" },
-                          { id: "arxiv", icon: "📑", label: "arxiv" },
-                          { id: "wikipedia", icon: "📚", label: "wikipedia" },
-                          { id: "calculator", icon: "🧮", label: "calculator" },
-                          { id: "statistics", icon: "📈", label: "statistics" },
-                          { id: "db_query", icon: "🗄️", label: "db_query" },
-                          { id: "datetime", icon: "⏰", label: "datetime" },
-                          { id: "knowledge", icon: "🧠", label: "knowledge" },
+                          { id: "web_search", icon: "search", label: "web_search" },
+                          { id: "arxiv", icon: "arxiv", label: "arxiv" },
+                          { id: "wikipedia", icon: "wikipedia", label: "wikipedia" },
+                          { id: "calculator", icon: "calculator", label: "calculator" },
+                          { id: "statistics", icon: "statistics", label: "statistics" },
+                          { id: "db_query", icon: "db_query", label: "db_query" },
+                          { id: "datetime", icon: "datetime", label: "datetime" },
+                          { id: "knowledge", icon: "knowledge", label: "knowledge" },
                         ].map((t) => {
                           const hasTool = selNode.tools.includes(t.id);
                           return (
@@ -1696,9 +2317,13 @@ export default function AgentOrchestrationPanel() {
                                 borderColor: hasTool ? selNodeTheme.accent : undefined,
                                 background: hasTool ? selNodeTheme.badgeBg : undefined,
                                 color: hasTool ? selNodeTheme.light : undefined,
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 5,
                               }}
                             >
-                              {t.icon} {t.label}
+                              {renderAgentIcon(t.icon, 12, hasTool ? selNodeTheme.light : "var(--muted)")}
+                              <span>{t.label}</span>
                             </span>
                           );
                         })}
@@ -1728,10 +2353,11 @@ export default function AgentOrchestrationPanel() {
                     {nodes.length > 1 && (
                       <button
                         className="btn ghost xs"
-                        style={{ color: "#f43f5e", borderColor: "rgba(244,63,94,0.3)", marginTop: 2 }}
+                        style={{ color: "#f43f5e", borderColor: "rgba(244,63,94,0.3)", marginTop: 2, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5 }}
                         onClick={() => handleRemoveNode(selNode.id)}
                       >
-                        🗑️ Remove This Node
+                        <Trash2 size={13} />
+                        <span>Remove This Node</span>
                       </button>
                     )}
                   </>
@@ -1760,11 +2386,11 @@ export default function AgentOrchestrationPanel() {
           <div className="card">
             <div className="card-h">
               <span className="t" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span>⚡</span>
+                <Zap size={16} color="#38bdf8" />
                 <b>Live Execution Pipeline · {nodes.length} Stages Linear Flow</b>
               </span>
               <span className="mono r" style={{ color: running ? "#38bdf8" : finalSynthesis ? "#22c55e" : "var(--muted)" }}>
-                {running ? "⚡ Orchestrating…" : finalSynthesis ? "Finished ✓" : "Ready to Execute"}
+                {running ? "Orchestrating…" : finalSynthesis ? "Finished ✓" : "Ready to Execute"}
               </span>
             </div>
             <div
@@ -1825,7 +2451,7 @@ export default function AgentOrchestrationPanel() {
                           flex: "none",
                         }}
                       >
-                        {n.icon}
+                        {renderAgentIcon(n.icon, 18, theme.light)}
                       </div>
 
                       <div style={{ minWidth: 0, flex: 1 }}>
@@ -1885,25 +2511,9 @@ export default function AgentOrchestrationPanel() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 14, alignItems: "stretch" }}>
             {/* Left Card: Task Prompt */}
             <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <label className="fld" style={{ fontWeight: 700, fontSize: 13, margin: 0 }}>
-                  Task Prompt to Orchestrate
-                </label>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button
-                    className="btn ghost xs"
-                    onClick={() => setTask("Gather 2024 tech industry revenue data, cross-reference knowledge base notes, extract table records from Excel/PDF files, compute CAGR, and generate an executive report.")}
-                  >
-                    Linear Flow Sample
-                  </button>
-                  <button
-                    className="btn ghost xs"
-                    onClick={() => setTask("Analyze revenue growth from $1.85M in 2023 to $2.42M in 2024, compute CAGR, and summarize key market drivers.")}
-                  >
-                    Sample 2
-                  </button>
-                </div>
-              </div>
+              <label className="fld" style={{ fontWeight: 700, fontSize: 13, margin: 0 }}>
+                Task Prompt to Orchestrate
+              </label>
 
               <textarea
                 rows={4}
@@ -1923,7 +2533,7 @@ export default function AgentOrchestrationPanel() {
                   disabled={running || !task.trim()}
                   style={{ minWidth: 180, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}
                 >
-                  {running ? <><span className="busy-dot" /> Orchestrating…</> : "▶ Run Orchestration"}
+                  {running ? <><span className="busy-dot" /> Orchestrating…</> : <><Play size={13} fill="currentColor" /> Run Orchestration</>}
                 </button>
               </div>
             </div>
@@ -1932,7 +2542,7 @@ export default function AgentOrchestrationPanel() {
             <div className="card" style={{ padding: 16, display: "flex", flexDirection: "column" }}>
               <div className="card-h" style={{ padding: "0 0 10px 0", borderBottom: "1px solid var(--border)", marginBottom: 12 }}>
                 <span className="t" style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
-                  <span>⚡</span> <b>Live Stage Progression &amp; Prediction</b>
+                  <Zap size={14} color="#38bdf8" /> <b>Live Stage Progression &amp; Prediction</b>
                 </span>
                 <span className="mono r" style={{ fontSize: 11 }}>
                   {running ? "Running…" : executions.length ? `${executions.length} Stages` : "Ready"}
@@ -1962,13 +2572,15 @@ export default function AgentOrchestrationPanel() {
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                          <span style={{ fontSize: 18, flex: "none" }}>{exec.icon}</span>
+                          <span style={{ fontSize: 18, flex: "none", display: "inline-flex", alignItems: "center" }}>
+                            {renderAgentIcon(exec.icon, 18, theme.light)}
+                          </span>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontWeight: 700, fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               Stage {idx + 1}: {exec.nodeName}
                             </div>
                             <div style={{ fontSize: 10.5, color: exec.status === "running" ? "#38bdf8" : exec.status === "done" ? "var(--good)" : "var(--faint)" }}>
-                              {exec.status === "running" ? "⚡ Processing…" : exec.status === "done" ? "✓ Completed" : "Waiting…"}
+                              {exec.status === "running" ? "Processing…" : exec.status === "done" ? "✓ Completed" : "Waiting…"}
                             </div>
                           </div>
                           {exec.status === "running" && <span className="busy-dot" style={{ marginLeft: 2 }} />}
@@ -1994,7 +2606,7 @@ export default function AgentOrchestrationPanel() {
                   })
                 ) : (
                   <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, padding: "24px 0" }}>
-                    Click <b>▶ Run Orchestration</b> to launch the multi-agent pipeline and observe live progression.
+                    Click <b>Run Orchestration</b> to launch the multi-agent pipeline and observe live progression.
                   </div>
                 )}
               </div>
@@ -2006,16 +2618,17 @@ export default function AgentOrchestrationPanel() {
             <div
               className="card"
               style={{
-                border: "1.5px solid rgba(236,72,153,0.35)",
-                background: "linear-gradient(180deg, rgba(236,72,153,0.06) 0%, rgba(0,0,0,0.15) 100%)",
+                border: "1.5px solid rgba(59,130,246,0.35)",
+                background: "linear-gradient(180deg, rgba(59,130,246,0.06) 0%, rgba(0,0,0,0.15) 100%)",
                 borderRadius: 14,
                 boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
                 marginTop: 4,
               }}
             >
-              <div className="card-h" style={{ borderBottom: "1px solid rgba(236,72,153,0.25)" }}>
+              <div className="card-h" style={{ borderBottom: "1px solid rgba(59,130,246,0.25)" }}>
                 <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
-                  🌟 <b>Synthesized Multi-Agent Executive Output</b>
+                  <Sparkles size={16} color="#38bdf8" />
+                  <b>Synthesized Multi-Agent Executive Output</b>
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   {overallConfidence && <ConfidenceGauge metrics={overallConfidence} size={36} compact={true} />}
@@ -2088,7 +2701,9 @@ export default function AgentOrchestrationPanel() {
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ fontSize: 18 }}>{lesson.icon}</span>
+                          <span style={{ display: "inline-flex", alignItems: "center", color: isSel ? "#38bdf8" : "var(--muted)" }}>
+                            {renderAgentIcon(lesson.icon, 18, isSel ? "#38bdf8" : "currentColor")}
+                          </span>
                           <span style={{ fontWeight: 700, fontSize: 13, color: "var(--text)" }}>{lesson.title}</span>
                         </div>
                       </div>
@@ -2118,7 +2733,9 @@ export default function AgentOrchestrationPanel() {
             <div className="card" style={{ border: "1.5px solid rgba(56,189,248,0.3)" }}>
               <div className="card-h" style={{ borderBottom: "1px solid var(--border)" }}>
                 <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
-                  <span style={{ fontSize: 20 }}>{selectedLesson.icon}</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", color: "#38bdf8" }}>
+                    {renderAgentIcon(selectedLesson.icon, 20, "#38bdf8")}
+                  </span>
                   <b>{selectedLesson.title}</b>
                 </span>
                 <span className="badge" style={{ background: "rgba(56,189,248,0.2)", color: "#38bdf8", border: "1px solid rgba(56,189,248,0.4)" }}>
@@ -2128,8 +2745,8 @@ export default function AgentOrchestrationPanel() {
 
               <div className="card-b" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--text)", marginBottom: 6 }}>
-                    📖 Architecture Overview &amp; Mechanism
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <BookOpen size={15} color="#38bdf8" /> Architecture Overview &amp; Mechanism
                   </div>
                   <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6 }}>
                     {selectedLesson.deepDive}
@@ -2137,8 +2754,8 @@ export default function AgentOrchestrationPanel() {
                 </div>
 
                 <div style={{ padding: 12, borderRadius: 8, background: "var(--panel)", border: "1px solid var(--border)" }}>
-                  <div style={{ fontWeight: 700, fontSize: 12, color: "#38bdf8", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                    🏢 Real-World Enterprise Scenario
+                  <div style={{ fontWeight: 700, fontSize: 12, color: "#38bdf8", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Building2 size={14} color="#38bdf8" /> Real-World Enterprise Scenario
                   </div>
                   <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5 }}>
                     {selectedLesson.realWorldUse}
@@ -2147,8 +2764,8 @@ export default function AgentOrchestrationPanel() {
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: 12, color: "var(--text)", marginBottom: 6 }}>
-                      🗺️ Message &amp; Handover Flow
+                    <div style={{ fontWeight: 700, fontSize: 12, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <MapPin size={14} color="#38bdf8" /> Message &amp; Handover Flow
                     </div>
                     <pre style={{ margin: 0, padding: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11.5, fontFamily: "var(--mono)", color: "var(--text-secondary)", lineHeight: 1.45, overflowX: "auto" }}>
                       {selectedLesson.diagram}
@@ -2156,8 +2773,8 @@ export default function AgentOrchestrationPanel() {
                   </div>
 
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: 12, color: "var(--text)", marginBottom: 6 }}>
-                      💻 Code / State Handover Payload
+                    <div style={{ fontWeight: 700, fontSize: 12, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                      <Code2 size={14} color="#38bdf8" /> Code / State Handover Payload
                     </div>
                     <pre style={{ margin: 0, padding: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11.5, fontFamily: "var(--mono)", color: "var(--text-secondary)", lineHeight: 1.45, overflowX: "auto" }}>
                       {selectedLesson.codeSchema}
@@ -2166,8 +2783,8 @@ export default function AgentOrchestrationPanel() {
                 </div>
 
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: 12.5, color: "var(--text)", marginBottom: 6 }}>
-                    ✨ Key Production Takeaways
+                  <div style={{ fontWeight: 700, fontSize: 12.5, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <Sparkles size={14} color="#38bdf8" /> Key Production Takeaways
                   </div>
                   <ul style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5, color: "var(--text-secondary)" }}>
                     {selectedLesson.keyConcepts.map((kc, i) => (
@@ -2190,6 +2807,110 @@ export default function AgentOrchestrationPanel() {
           </div>
         </div>
       )}
+
+      {/* Get Code Modal */}
+      <div className={`modal-wrap ${showCode ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowCode(false); }}>
+        <div className="modal" style={{ maxWidth: 740, width: "90%" }}>
+          <div className="mh" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <b>Multi-Agent Orchestration Code · {PRESET_TOPOLOGIES[topology]?.title || "Custom DAG"}</b>
+            <div className="r" style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                className="btn ghost sm"
+                onClick={() => {
+                  navigator.clipboard.writeText(buildOrchestrationCode());
+                  setCodeCopied(true);
+                  setTimeout(() => setCodeCopied(false), 2000);
+                }}
+              >
+                {codeCopied ? "Copied ✓" : "Copy"}
+              </button>
+              <button
+                className="btn sm"
+                onClick={() => {
+                  const blob = new Blob([buildOrchestrationCode()], { type: "text/plain" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `orchestration_${topology}_graph.py`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                Download Python
+              </button>
+              <button className="x" onClick={() => setShowCode(false)}>×</button>
+            </div>
+          </div>
+          <div className="mb">
+            <div className="note" style={{ marginBottom: 10 }}>
+              Where to use it: Run this multi-agent LangGraph / Async OpenAI pipeline with <code>pip install openai</code> · or <b>Save</b> to My Projects · or <b>Export JSON</b> to load into custom agent servers.
+            </div>
+            <pre className="code" style={{ maxHeight: 380, overflow: "auto", margin: 0, padding: 14, background: "var(--surface)", borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: "var(--text-secondary)" }}>
+              {buildOrchestrationCode()}
+            </pre>
+          </div>
+        </div>
+      </div>
+      {/* Publish Orchestration Pipeline Custom Naming Modal */}
+      <div className={`modal-wrap ${showPublishModal ? "show" : ""}`} onClick={(e) => { if (e.target === e.currentTarget) setShowPublishModal(false); }}>
+        <div className="modal" style={{ maxWidth: 520, width: "90%" }}>
+          <div className="mh" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <b>Publish Multi-Agent Pipeline to Workroom</b>
+            <button className="x" onClick={() => setShowPublishModal(false)}>×</button>
+          </div>
+          <div className="mb" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Choose a custom name and description for this multi-agent workflow before publishing it to the Workroom.
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Pipeline Name
+              </label>
+              <input
+                type="text"
+                value={publishPipelineName}
+                onChange={(e) => setPublishPipelineName(e.target.value)}
+                placeholder="e.g., Enterprise Research & Synthesis Pipeline"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13 }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>
+                Description / Role
+              </label>
+              <textarea
+                rows={3}
+                value={publishPipelineDesc}
+                onChange={(e) => setPublishPipelineDesc(e.target.value)}
+                placeholder="Brief summary of how this multi-agent graph operates…"
+                style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", fontSize: 13, resize: "vertical" }}
+              />
+            </div>
+
+            <div style={{ padding: 10, borderRadius: 8, background: "var(--surface)", border: "1px solid var(--border)", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Topology: <b>{topology.toUpperCase()}</b></span>
+              <span>Active Agents: <b>{nodes.length} Nodes</b></span>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 6 }}>
+              <button className="btn ghost sm" onClick={() => setShowPublishModal(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn sm"
+                onClick={confirmPublishOrchestration}
+                disabled={publishing || !publishPipelineName.trim()}
+                style={{ background: "#3b82f6", borderColor: "#2563eb", color: "#ffffff", display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                {publishing ? <span className="busy-dot" /> : <Rocket size={13} />}
+                <span>{publishing ? "Publishing…" : "Confirm & Publish"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
