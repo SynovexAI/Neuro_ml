@@ -8,15 +8,55 @@ import { useState, type ReactNode } from "react";
 
 function inline(text: string, key: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const re = /(\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|`(.+?)`|\[(.+?)\]\((.+?)\))/g;
+  const re = /(\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|`(.+?)`|\[([^\]]+)\]\s*\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>)"]+))/g;
   let last = 0, m: RegExpExecArray | null, i = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
-    if (m[2] || m[3]) nodes.push(<b key={`${key}-${i}`}>{m[2] || m[3]}</b>);
-    else if (m[4]) nodes.push(<i key={`${key}-${i}`}>{m[4]}</i>);
-    else if (m[5]) nodes.push(<code key={`${key}-${i}`} className="md-code">{m[5]}</code>);
-    else if (m[6]) nodes.push(<a key={`${key}-${i}`} href={m[7]} target="_blank" rel="noreferrer">{m[6]}</a>);
-    last = m.index + m[0].length; i++;
+    if (m[2] || m[3]) {
+      nodes.push(<b key={`${key}-${i}`}>{m[2] || m[3]}</b>);
+    } else if (m[4]) {
+      nodes.push(<i key={`${key}-${i}`}>{m[4]}</i>);
+    } else if (m[5]) {
+      nodes.push(<code key={`${key}-${i}`} className="md-code">{m[5]}</code>);
+    } else if (m[6] && m[7]) {
+      nodes.push(
+        <a
+          key={`${key}-${i}`}
+          href={m[7]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="md-link touch-link"
+          title={`Direct link to ${m[7]}`}
+        >
+          {m[6]}
+          <span className="link-icon" style={{ marginLeft: 3, opacity: 0.75, fontSize: "0.85em" }}>↗</span>
+        </a>
+      );
+    } else if (m[8]) {
+      let url = m[8];
+      let trailing = "";
+      const matchTrail = url.match(/[.,;!]+$/);
+      if (matchTrail) {
+        trailing = matchTrail[0];
+        url = url.slice(0, -trailing.length);
+      }
+      nodes.push(
+        <a
+          key={`${key}-${i}`}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="md-link touch-link"
+          title={`Direct link to ${url}`}
+        >
+          {url}
+          <span className="link-icon" style={{ marginLeft: 3, opacity: 0.75, fontSize: "0.85em" }}>↗</span>
+        </a>
+      );
+      if (trailing) nodes.push(trailing);
+    }
+    last = m.index + m[0].length;
+    i++;
   }
   if (last < text.length) nodes.push(text.slice(last));
   return nodes;
@@ -116,7 +156,9 @@ function MermaidArtifact({ code }: { code: string }) {
 }
 
 export default function Markdown({ text }: { text: string }) {
-  const src = (text || "").replace(/\r\n?/g, "\n");
+  const src = (text || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\[([^\]\n]+)\]\s*\n+\s*\((https?:\/\/[^\s)]+)\)/g, "[$1]($2)");
   const out: ReactNode[] = [];
   const lines = src.split("\n");
   let i = 0, k = 0;

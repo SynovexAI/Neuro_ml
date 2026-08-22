@@ -6,7 +6,7 @@ import {
   AGENT_TOOLS, buildKnowledge, reactSystemPrompt, parseReAct, mcpTool, formatFinalAnswer,
   type AgentTool, type ToolCtx,
 } from "@/lib/agentTools";
-import { parseRecords } from "@/lib/etlUtils";
+import { parseRecords, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
 import NatAgentPanel from "./NatAgentPanel";
 import AgentOutput from "@/components/AgentOutput";
@@ -884,7 +884,6 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   db_schema: { icon: "🗄", label: "DB schema" },
   db_query: { icon: "🐘", label: "DB query" },
   github: { icon: "🐙", label: "GitHub" },
-  mcp: { icon: "🔌", label: "MCP server" },
 };
 
 // One-click starter agents — teach where/why agents are used.
@@ -904,9 +903,7 @@ async function chatOnce(messages: { role: string; content: string }[], temperatu
 
 type TraceItem = { kind: "thought" | "action" | "observation" | "final" | "error"; text: string; tool?: string; state: string };
 type ANode = { id: string; type: "trigger" | "agent" | "output" | "model" | "tool"; toolId?: string; icon: string; title: string; sub: string; w: number; h: number; bottom?: string[] };
-
-const CANVAS_W = 980, CANVAS_H = 400;
-const DEFAULT_POS: Record<string, { x: number; y: number }> = { trigger: { x: 24, y: 130 }, agent: { x: 306, y: 130 }, output: { x: 772, y: 130 } };
+const CANVAS_W = 720, CANVAS_H = 380;
 const CopySvg = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
@@ -1364,10 +1361,11 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [published, setPublished] = useState(false);
   const [savedAgents, setSavedAgents] = useState<{ id: string; name: string; config: Record<string, unknown>; published?: boolean }[]>([]);
   const [loadOpen, setLoadOpen] = useState(false);
+  const [canvasW, setCanvasW] = useState(720);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   // run
-  const [task, setTask] = useState("What is 15% of 240, and how many days until 2026-12-25?");
+  const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [finalOut, setFinalOut] = useState("");
@@ -1391,6 +1389,25 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       if (j.providers?.length) { setProviderId(j.providerId || j.providers[0].id); setModelList(j.models || []); setModel(j.default || (j.models && j.models[0]) || ""); }
     }).catch(() => setProvKnown(true));
   }, []);
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const updateW = () => {
+      if (canvasRef.current) {
+        const w = canvasRef.current.clientWidth;
+        if (w > 100) setCanvasW(w);
+      }
+    };
+    updateW();
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 100) {
+          setCanvasW(Math.round(entry.contentRect.width));
+        }
+      }
+    });
+    ro.observe(canvasRef.current);
+    return () => ro.disconnect();
+  }, [step, buildMode, fullscreen]);
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [trace, wfOutputs]);
   // Delete / Backspace removes the selected tool node (or clicked wire's tool).
   useEffect(() => {
@@ -1536,25 +1553,60 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const placedOrder = [...placedTools];
   const subNodes = ["model", ...placedOrder.map((tid) => "tool:" + tid)];
 
-  const getSubDefaultPos = (subId: string) => {
-    const idx = subNodes.indexOf(subId);
-    if (idx === -1) return { x: 150, y: 300 };
+  const getDefaultPos = (id: string): { x: number; y: number } => {
+    const W = Math.max(540, canvasW);
+    const topY = 65;
+    const agentW = 190;
+    const agentX = Math.round((W - agentW) / 2);
+
+    if (id === "trigger") {
+      const margin = Math.max(20, Math.round(W * 0.04));
+      return { x: margin, y: topY };
+    }
+    if (id === "agent") {
+      return { x: agentX, y: topY };
+    }
+    if (id === "output") {
+      const outputW = 135;
+      const margin = Math.max(20, Math.round(W * 0.04));
+      return { x: Math.round(W - outputW - margin), y: topY };
+    }
+
+    // Sub-nodes: Model and tools arranged symmetrically and evenly below Agent
+    const idx = subNodes.indexOf(id);
+    if (idx === -1) return { x: 20, y: 225 };
     const total = subNodes.length;
-    const nodeW = 160;
-    const gap = 24;
-    const totalW = total * nodeW + (total - 1) * gap;
-    const startX = Math.max(20, 406 - totalW / 2);
-    return { x: Math.round(startX + idx * (nodeW + gap)), y: 300 };
+    const nodeW = 150;
+
+    if (total <= 4) {
+      // Clean single-row layout with generous, proportional gaps
+      const idealGap = total === 1 ? 0 : total === 2 ? 48 : total === 3 ? 32 : 24;
+      const maxPossibleGap = total > 1 ? Math.floor((W - 40 - total * nodeW) / (total - 1)) : 0;
+      const gap = Math.max(16, Math.min(idealGap, maxPossibleGap));
+      const totalW = total * nodeW + (total - 1) * gap;
+      const startX = Math.max(16, Math.round((W - totalW) / 2));
+      return { x: Math.round(startX + idx * (nodeW + gap)), y: 225 };
+    }
+
+    // Wrap into 2 balanced rows if 5+ tools are added
+    const itemsPerRow = Math.ceil(total / 2);
+    const row = Math.floor(idx / itemsPerRow);
+    const col = idx % itemsPerRow;
+    const countInRow = Math.min(itemsPerRow, total - row * itemsPerRow);
+    const gap = Math.max(16, Math.min(28, Math.floor((W - 40 - countInRow * nodeW) / Math.max(1, countInRow - 1))));
+    const rowW = countInRow * nodeW + (countInRow - 1) * gap;
+    const startX = Math.max(16, Math.round((W - rowW) / 2));
+    return { x: Math.round(startX + col * (nodeW + gap)), y: 215 + row * 70 };
   };
 
-  const getPos = (id: string) => nodePos[id] || DEFAULT_POS[id] || getSubDefaultPos(id);
+  const getPos = (id: string) => nodePos[id] || getDefaultPos(id);
 
   const nodes: ANode[] = [
-    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 150, h: 54 },
-    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 200, h: 54 },
-    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 150, h: 54 },
-    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 160, h: 54 },
-    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 160, h: 54 })),
+    { id: "trigger", type: "trigger", icon: "💬", title: "User input", sub: "Trigger", w: 135, h: 52 },
+    { id: "agent", type: "agent", icon: "🤖", title: name || "AI Agent", sub: "ReAct agent", w: 190, h: 52 },
+    { id: "output", type: "output", icon: "✅", title: "Final answer", sub: "Output", w: 135, h: 52 },
+    { id: "model", type: "model", icon: "⚙️", title: (model || providerLabel).slice(0, 18), sub: "Model", w: 150, h: 50 },
+    ...placedOrder.map((tid) => ({ id: "tool:" + tid, type: "tool" as const, toolId: tid, icon: TOOL_META[tid]?.icon ?? "🔧", title: TOOL_META[tid]?.label ?? tid, sub: tid === "knowledge" ? "Knowledge" : "Tool", w: 150, h: 50 })),
   ];
 
   const agentNode = nodes.find((n) => n.id === "agent")!;
@@ -1951,10 +2003,20 @@ if __name__ == "__main__":
   function copyCode() { navigator.clipboard.writeText(buildCode()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); }
   function downloadCode() { const blob = new Blob([buildCode()], { type: "text/x-python" }); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${(name || "agent").replace(/\s+/g, "_").toLowerCase()}.py`; a.click(); URL.revokeObjectURL(a.href); }
   function agentConfig() {
+    let dbTable: Table | null = null;
+    const dbTableName = dbFileName ? dbFileName.split(".")[0].replace(/[^a-zA-Z0-9_]/g, "_") : "students";
+    if (dbDataText.trim()) {
+      try {
+        dbTable = parseRecords(dbDataText);
+      } catch { /* ignore */ }
+    }
     return {
       type: agentType, name, description, systemPrompt: goal, provider: providerId, model, temperature, maxIterations: maxIters,
       tools: [...enabledTools], selectedRagId: enabledTools.has("rag") ? selectedRagId : undefined,
       knowledge: enabledTools.has("knowledge") ? knowledgeText : undefined,
+      dbTable: dbTable || undefined,
+      dbTableName: dbTable ? dbTableName : undefined,
+      dbCustomSchema: dbCustomSchema.trim() || undefined,
       steps: agentType === "workflow" ? steps.map((s) => ({ name: s.name, instruction: s.instruction })) : undefined, task,
     };
   }
@@ -1981,7 +2043,7 @@ if __name__ == "__main__":
     try {
       const id = await persist();
       if (!id) { toast("Publish failed", "error"); return; }
-      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true }) });
+      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true, config: agentConfig() }) });
       if (r.ok) setPublished(true);
       toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
     } catch { toast("Publish failed", "error"); }
@@ -2018,6 +2080,14 @@ if __name__ == "__main__":
     if (cfg.selectedRagId) setSelectedRagId(cfg.selectedRagId);
     if (Array.isArray(cfg.tools)) { const s = new Set<string>(cfg.tools); setEnabledTools(s); setPlacedTools(new Set(s)); }
     if (cfg.knowledge) setKnowledgeText(String(cfg.knowledge));
+    if (cfg.dbTable && Array.isArray(cfg.dbTable.rows)) {
+      const cols: string[] = cfg.dbTable.cols || Object.keys(cfg.dbTable.rows[0] || {});
+      const header = cols.join(",");
+      const body = cfg.dbTable.rows.map((r: any) => cols.map((c: string) => (r[c] == null ? "" : String(r[c]))).join(",")).join("\n");
+      setDbDataText(`${header}\n${body}`);
+      if (cfg.dbTableName) setDbFileName(`${cfg.dbTableName}.csv`);
+    }
+    if (cfg.dbCustomSchema) setDbCustomSchema(String(cfg.dbCustomSchema));
     if (Array.isArray(cfg.steps)) setSteps(cfg.steps.map((s: any, i: number) => ({ id: `s${i + 1}`, name: String(s.name || `Step ${i + 1}`), instruction: String(s.instruction || "") })));
     if (cfg.task) setTask(String(cfg.task));
     setBuildMode(cfg.type === "workflow" ? "manual" : "visual"); setNodePos({}); setNodeStatus({}); setASel("agent"); setLoadOpen(false); setStep("build");
@@ -2598,7 +2668,7 @@ if __name__ == "__main__":
                   {t.kind === "thought" && t.state === "active" ? <><span className="busy-dot" />{t.text}</>
                     : t.kind === "observation" ? <div style={{ maxHeight: 260, overflow: "auto" }}><AgentOutput text={t.text} /></div>
                     : t.kind === "final" ? <div className="note" style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{t.text.split("\n").filter((l) => l.trim())[0]?.slice(0, 140) || "Done."}{t.text.length > 140 ? " …" : ""}<span style={{ color: "var(--accent)" }}> — full answer in the Final answer panel →</span></div>
-                    : t.text}
+                    : <AgentOutput text={t.text} />}
                 </div></div>))}
               </div>
             </div>
@@ -3317,34 +3387,6 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                 </div>
               </div>
             </div>
-
-            {/* 4. Common Mistakes & Production Fixes */}
-            <div className="card" style={{ marginBottom: 20, borderRadius: 16 }}>
-              <div className="card-h">
-                <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15 }}>
-                  <span>⚠️</span> <b>Common Developer Pitfalls & Production Fixes</b>
-                </span>
-              </div>
-              <div className="card-b">
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
-                  {selectedTopic.pitfallsAndMistakes.map((item, idx) => (
-                    <div key={idx} style={{
-                      background: "rgba(239, 68, 68, 0.06)", border: "1px solid rgba(239, 68, 68, 0.25)",
-                      borderRadius: 12, padding: 14
-                    }}>
-                      <div style={{ fontWeight: 700, fontSize: 12.5, color: "#f87171", display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>❌ Mistake:</span> {item.mistake}
-                      </div>
-                      <div style={{ fontWeight: 600, fontSize: 12, color: "#34d399", marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>✅ Production Fix:</span> {item.fix}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-
 
             {/* 6. Code Implementation Sandbox */}
             <div className="card" style={{ marginBottom: 20, borderRadius: 16 }}>

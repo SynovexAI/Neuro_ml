@@ -1228,8 +1228,9 @@ input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
 .md-quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 12px;color:var(--muted);margin:0 0 10px}
 .md-code{background:var(--panel-2);border-radius:4px;padding:1px 5px;font-family:var(--mono);font-size:12px}
 .md-pre{background:var(--panel-2);border-radius:8px;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:12px;line-height:1.5;margin:0}
-.md-table{margin:0 0 10px;font-size:12.5px}
-.md a{color:var(--accent);text-decoration:underline}
+.md a, .touch-link{color:var(--accent);text-decoration:none;font-weight:600;border-bottom:1.5px solid color-mix(in srgb,var(--accent) 45%,transparent);padding:1px 5px;border-radius:5px;background:color-mix(in srgb,var(--accent) 8%,transparent);transition:all .14s ease;display:inline-flex;align-items:center;gap:3px;cursor:pointer;word-break:break-all}
+.md a:hover, .touch-link:hover{background:color-mix(in srgb,var(--accent) 22%,transparent);border-bottom-color:var(--accent);color:var(--accent);transform:translateY(-1px);box-shadow:0 2px 8px color-mix(in srgb,var(--accent) 25%,transparent)}
+.md a:active, .touch-link:active{transform:translateY(1px);background:color-mix(in srgb,var(--accent) 32%,transparent)}
 .md-artifact{border:1px solid var(--border);border-radius:9px;overflow:hidden;margin:0 0 12px}
 .md-artifact-h{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--panel);border-bottom:1px solid var(--border)}
 /* workroom */
@@ -1843,7 +1844,7 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
 .n8n-canvas-bar .n8n-tag{font-family:var(--mono);font-size:9.5px;padding:2px 7px;border-radius:12px;background:var(--accent-weak);color:var(--accent-strong);text-transform:uppercase;letter-spacing:.05em}
 .n8n-canvas-bar .n8n-controls{display:flex;align-items:center;gap:8px}
 
-.acanvas{position:relative;height:440px;background-color:var(--panel);background-image:radial-gradient(circle at 12px 12px,var(--border-strong) 1px,transparent 1.2px);background-size:24px 24px;border-radius:0 0 var(--r) var(--r);overflow:auto;transition:background-color .2s;scrollbar-width:thin;scrollbar-color:var(--border-strong) var(--panel)}
+.acanvas{position:relative;height:380px;background-color:var(--panel);background-image:radial-gradient(circle at 12px 12px,var(--border-strong) 1px,transparent 1.2px);background-size:24px 24px;border-radius:0 0 var(--r) var(--r);overflow:hidden;transition:background-color .2s}
 .acanvas::-webkit-scrollbar{width:7px;height:7px}
 .acanvas::-webkit-scrollbar-track{background:var(--panel)}
 .acanvas::-webkit-scrollbar-corner{background:var(--panel)}

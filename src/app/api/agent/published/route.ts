@@ -45,6 +45,7 @@ export async function GET() {
       tokens: Number(st?.tokens || 0),
       lastUsed: st?.last || null,
       updatedAt: r.updatedAt,
+      createdAt: r.createdAt,
     };
   });
   return NextResponse.json({ agents });

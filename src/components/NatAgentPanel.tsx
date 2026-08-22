@@ -70,7 +70,7 @@ export default function NatAgentPanel() {
   const [kbIds, setKbIds] = useState<Set<string>>(new Set());
   const [temperature, setTemperature] = useState(0.2);
   const [systemPrompt, setSystemPrompt] = useState("You are a helpful agent. Use a tool when a calculation, lookup, or the current date is needed, and answer from the attached knowledge when relevant.");
-  const [task, setTask] = useState("What is 18% of 2450, and what is today's date?");
+  const [task, setTask] = useState("");
 
   const [mode, setMode] = useState<"run" | "chat" | "test">("run");
   const [running, setRunning] = useState(false);

@@ -71,18 +71,22 @@ export async function getActiveProvider(userId?: string, includeGlobal = true): 
   return rows[0] ? shape(rows[0], false) : null;
 }
 
-// Fetch one provider by id (used when the user picks a specific provider in the UI).
+// Fetch one provider by id or provider name (used when the user picks a specific provider in the UI).
 // Checks the user's own providers first (ownership-scoped), then global providers.
 export async function getProviderById(id: string, userId?: string, includeGlobal = true): Promise<ResolvedProvider | null> {
   if (userId) {
     const mine = await myProviderById(userId, id);
     if (mine && mine.enabled) return shape(mine, true);
+    const mineByProv = await db.select().from(userProviders).where(and(eq(userProviders.userId, userId), eq(userProviders.provider, id), eq(userProviders.enabled, true))).limit(1);
+    if (mineByProv[0]) return shape(mineByProv[0], true);
   }
   if (!includeGlobal) return null;
   const rows = await db.select().from(providers).where(eq(providers.id, id)).limit(1);
   const p = rows[0];
-  if (!p || !p.enabled) return null;
-  return shape(p, false);
+  if (p && p.enabled) return shape(p, false);
+  const rowsByProv = await db.select().from(providers).where(and(eq(providers.provider, id), eq(providers.enabled, true))).limit(1);
+  if (rowsByProv[0]) return shape(rowsByProv[0], false);
+  return null;
 }
 
 // All enabled providers for the UI selector (no keys): the user's own first, then global.

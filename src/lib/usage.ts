@@ -6,7 +6,7 @@ import { usage, type User } from "./db/schema";
 import { captureError } from "./monitor";
 
 // Platform default monthly token budget per student (admin-overridable per user).
-export const DEFAULT_MONTHLY_TOKEN_LIMIT = Number(process.env.DEFAULT_MONTHLY_TOKEN_LIMIT || 200_000);
+export const DEFAULT_MONTHLY_TOKEN_LIMIT = Number(process.env.DEFAULT_MONTHLY_TOKEN_LIMIT || 10_000_000);
 
 function monthStartUTC(): Date {
   const n = new Date();
