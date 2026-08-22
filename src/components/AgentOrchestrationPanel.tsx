@@ -2,11 +2,9 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import Markdown from "@/components/Markdown";
 import AgentOutput from "@/components/AgentOutput";
 import ConfidenceGauge from "./ConfidenceGauge";
 import { computeConfidenceScore, type ConfidenceMetrics } from "@/lib/agentEval";
-import { AGENT_TOOLS, type AgentTool } from "@/lib/agentTools";
 import { toast } from "@/lib/toast";
 import {
   Zap,
@@ -23,7 +21,6 @@ import {
   Sparkles,
   Bot,
   Trash2,
-  Plus,
   Play,
   Check,
   Cpu,
@@ -31,8 +28,6 @@ import {
   Calendar,
   Calculator,
   BookOpen,
-  Maximize2,
-  Minimize2,
   FileCode,
   Shield,
   Award,
@@ -814,14 +809,11 @@ export default function AgentOrchestrationPanel({
   const [nodeStatus, setNodeStatus] = useState<Record<string, string>>({});
   const [task, setTask] = useState("");
   const [running, setRunning] = useState(false);
-  const [activeStepIdx, setActiveStepIdx] = useState<number>(-1);
   const [executions, setExecutions] = useState<PipelineStepExecution[]>([]);
   const [finalSynthesis, setFinalSynthesis] = useState("");
   const [overallConfidence, setOverallConfidence] = useState<ConfidenceMetrics | null>(null);
-  const [providers, setProviders] = useState<{ id: string; provider: string; label: string | null }[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
-  const [models, setModels] = useState<string[]>([]);
   const [fullscreen, setFullscreen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -890,7 +882,7 @@ export default function AgentOrchestrationPanel({
       .then((r) => r.json())
       .then((j) => {
         if (Array.isArray(j.servers)) {
-          setConnectedMcpServers(j.servers.filter((s: any) => s.enabled));
+          setConnectedMcpServers(j.servers.filter((s: { enabled?: boolean }) => !!s.enabled));
         }
       })
       .catch(() => {});
@@ -951,7 +943,7 @@ export default function AgentOrchestrationPanel({
         timestamp: Date.now(),
       };
       const existing = JSON.parse(localStorage.getItem("neuro_orchestration_saved_flows") || "[]");
-      const updated = [newFlow, ...existing.filter((f: any) => f.name !== flowName)].slice(0, 20);
+      const updated = [newFlow, ...existing.filter((f: { name?: string }) => f.name !== flowName)].slice(0, 20);
       localStorage.setItem("neuro_orchestration_saved_flows", JSON.stringify(updated));
       setSavedFlows(updated);
       setSaved(true);
@@ -1095,7 +1087,7 @@ if __name__ == "__main__":
         },
       };
 
-      const r = await fetch("/api/agents", {
+      await fetch("/api/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1115,10 +1107,8 @@ if __name__ == "__main__":
     fetch("/api/models")
       .then((r) => r.json())
       .then((j) => {
-        setProviders(j.providers || []);
         if (j.providers?.length) {
           setSelectedProviderId(j.providerId || j.providers[0].id);
-          setModels(j.models || []);
           setSelectedModel(j.default || (j.models && j.models[0]) || "");
         }
       })
@@ -1184,7 +1174,6 @@ if __name__ == "__main__":
     if (total >= 5 && W < total * (nodeW + gapX) + 40) {
       const itemsPerRow = Math.ceil(total / 2);
       const row = Math.floor(idx / itemsPerRow);
-      const col = row === 0 ? (idx % itemsPerRow) : (itemsPerRow - 1 - (idx % itemsPerRow)); // Snake flow or standard
       const rowCount = row === 0 ? itemsPerRow : (total - itemsPerRow);
       const totalRowW = rowCount * nodeW + (rowCount - 1) * gapX;
       const startX = Math.max(24, Math.round((W - totalRowW) / 2));
@@ -1196,12 +1185,6 @@ if __name__ == "__main__":
     const totalW = total * nodeW + (total - 1) * gapX;
     const startX = Math.max(24, Math.round((W - totalW) / 2));
     return { x: Math.round(startX + idx * (nodeW + gapX)), y: 155 };
-  };
-
-  // Reset positions to clean auto-aligned linear layout
-  const autoAlignLinear = () => {
-    setNodePositions({});
-    toast("Workflow nodes auto-aligned in linear flow!", "success");
   };
 
   // Add a new node from catalog
@@ -1326,7 +1309,6 @@ if __name__ == "__main__":
     setExecutions([]);
     setFinalSynthesis("");
     setOverallConfidence(null);
-    setActiveStepIdx(0);
     setNodeStatus({});
 
     const initialExecs: PipelineStepExecution[] = nodes.map((n) => ({
@@ -1347,7 +1329,6 @@ if __name__ == "__main__":
 
     try {
       for (let i = 0; i < nodes.length; i++) {
-        setActiveStepIdx(i);
         const node = nodes[i];
         setNodeStatus((s) => ({ ...s, [node.id]: "running" }));
 
@@ -1441,7 +1422,6 @@ if __name__ == "__main__":
       toast("Orchestration error: " + (e as Error).message, "error");
     } finally {
       setRunning(false);
-      setActiveStepIdx(-1);
     }
   }
 

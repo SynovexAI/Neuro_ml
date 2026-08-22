@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chunkBy, pca2, CHUNK_STRATEGY_LABEL, type ChunkStrategy } from "@/lib/ragUtils";
 import { toast } from "@/lib/toast";
 
@@ -404,8 +404,8 @@ function EmbeddingModule({ onStore }: { onStore: (v: number[], label: string) =>
   const [pooling, setPooling] = useState<Pooling>("max");
   const [activeTok, setActiveTok] = useState(0);
   const dim = DEMO_MODELS.find((m) => m.id === modelId)!.dim;
-  const toks = words(text);
-  const tokVecs = useMemo(() => toks.map((t) => embedToken(t, dim)), [text, dim]);
+  const toks = useMemo(() => words(text), [text]);
+  const tokVecs = useMemo(() => toks.map((t) => embedToken(t, dim)), [toks, dim]);
   const pooled = useMemo(() => poolVecs(tokVecs, pooling, dim), [tokVecs, pooling, dim]);
   const norm = l2(pooled);
   const [detail, setDetail] = useState<{ title: string; node: React.ReactNode } | null>(null);
@@ -621,8 +621,8 @@ function PoolingModule() {
   const [text, setText] = useState("all i need");
   const [pooling, setPooling] = useState<Pooling>("max");
   const dim = 8;
-  const toks = words(text);
-  const tokVecs = useMemo(() => toks.map((t) => embedToken(t, dim)), [text]);
+  const toks = useMemo(() => words(text), [text]);
+  const tokVecs = useMemo(() => toks.map((t) => embedToken(t, dim)), [toks, dim]);
   const results: Record<Pooling, number[]> = {
     mean: poolVecs(tokVecs, "mean", dim), max: poolVecs(tokVecs, "max", dim), cls: poolVecs(tokVecs, "cls", dim),
   };
@@ -829,7 +829,7 @@ function ScatterPlot({ points, links = [], onPick, legend }: { points: SPoint[];
   const x0 = view.cx - half, x1 = view.cx + half, y0 = view.cy - half, y1 = view.cy + half;
   const sx = (x: number) => M + ((x - x0) / (x1 - x0)) * (W - 2 * M);
   const sy = (y: number) => M + (1 - (y - y0) / (y1 - y0)) * (H - 2 * M);
-  const toVb = (e: { clientX: number; clientY: number }): [number, number] => { const r = svgRef.current?.getBoundingClientRect(); if (!r) return [0, 0]; return [((e.clientX - r.left) / r.width) * W, ((e.clientY - r.top) / r.height) * H]; };
+  const toVb = useCallback((e: { clientX: number; clientY: number }): [number, number] => { const r = svgRef.current?.getBoundingClientRect(); if (!r) return [0, 0]; return [((e.clientX - r.left) / r.width) * W, ((e.clientY - r.top) / r.height) * H]; }, [W, H]);
   useEffect(() => {
     const el = svgRef.current; if (!el) return;
     const onWheel = (e: WheelEvent) => {
@@ -841,7 +841,7 @@ function ScatterPlot({ points, links = [], onPick, legend }: { points: SPoint[];
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [view, x0, x1, y0, y1, W, H]);
+  }, [view, x0, x1, y0, y1, W, H, toVb]);
   const onDown = (e: React.PointerEvent) => { const [px, py] = toVb(e); drag.current = { px, py, cx: view.cx, cy: view.cy, moved: false }; movedRef.current = false; setPanning(true); (e.target as Element).setPointerCapture?.(e.pointerId); };
   const onMove = (e: React.PointerEvent) => { if (!drag.current) return; const [px, py] = toVb(e); const dpx = px - drag.current.px, dpy = py - drag.current.py; if (Math.abs(dpx) + Math.abs(dpy) > 2) { drag.current.moved = true; movedRef.current = true; } setView((v) => clampView(drag.current!.cx - (dpx / (W - 2 * M)) * (x1 - x0), drag.current!.cy + (dpy / (H - 2 * M)) * (y1 - y0), v.zoom)); };
   const onUp = () => { drag.current = null; setPanning(false); };
@@ -1510,13 +1510,13 @@ function BackpropModule() {
   const [custom, setCustom] = useState<[string, string]>(["", ""]);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const mseOf = (w: number[], t: number[]) => w.reduce((s, x, i) => s + (x - t[i]) ** 2, 0) / dim;
-  const reset = (p: [string, string] = pair) => {
+  const mseOf = useCallback((w: number[], t: number[]) => w.reduce((s, x, i) => s + (x - t[i]) ** 2, 0) / dim, [dim]);
+  const reset = useCallback((p: [string, string] = pair) => {
     if (timer.current) clearTimeout(timer.current);
     const w = embedToken(p[0], dim);
     setWeight(w); setPrev(w); setEpoch(0); setStepIdx(0); setLosses([mseOf(w, embedToken(p[1], dim))]); setRunning(false);
-  };
-  useEffect(() => reset(pair), [pair]);
+  }, [pair, dim, mseOf]);
+  useEffect(() => reset(pair), [pair, reset]);
 
   const grad = weight.map((x, i) => (2 / dim) * (x - target[i]));
   const loss = mseOf(weight, target);
@@ -1766,7 +1766,7 @@ function EndToEndModule() {
   const dim = 8;
   const [source, setSource] = useState(DEMO_CORPUS.join(" "));
   const [query, setQuery] = useState("What is machine learning?");
-  const [size, setSize] = useState(12);
+  const size = 12;
   const [topK, setTopK] = useState(2);
   const chunks = useMemo(() => chunkBy(source, "sentence", size, 0), [source, size]);
   const chunkVecs = useMemo(() => chunks.map((c) => embedText(c, dim, "mean")), [chunks]);

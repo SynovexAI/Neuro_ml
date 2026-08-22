@@ -8,7 +8,7 @@ import {
 } from "@/lib/agentTools";
 import { parseRecords, type Table } from "@/lib/etlUtils";
 import type { RagIndex } from "@/lib/ragUtils";
-import AgentOrchestrationPanel from "./AgentOrchestrationPanel";
+import AgentOrchestrationPanel, { type OrchestrationNode } from "./AgentOrchestrationPanel";
 import AgentOutput from "@/components/AgentOutput";
 import ConfidenceGauge from "./ConfidenceGauge";
 import { computeConfidenceScore, synthesizeComparison, type ConfidenceMetrics, type ComparisonResult } from "@/lib/agentEval";
@@ -914,9 +914,9 @@ async function chatOnce(messages: { role: string; content: string }[], temperatu
       throw new Error(j.error || "request failed");
     }
     return (await res.text()).trim();
-  } catch (err: any) {
+  } catch (err: unknown) {
     clearTimeout(timeoutId);
-    if (err?.name === "AbortError") {
+    if (err instanceof Error && err.name === "AbortError") {
       throw new Error("Model request timed out (20s). The selected provider/model took too long.");
     }
     throw err;
@@ -1386,7 +1386,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
   const [compareModel, setCompareModel] = useState("");
   const [compareModelList, setCompareModelList] = useState<string[]>([]);
   const [compareRunning, setCompareRunning] = useState(false);
-  const [compareTrace, setCompareTrace] = useState<TraceItem[]>([]);
   const [compareFinalOut, setCompareFinalOut] = useState("");
   const [compareMetrics, setCompareMetrics] = useState<{ calls: number; tools: number; ms: number; tokens: number } | null>(null);
   const [compareConfidence, setCompareConfidence] = useState<ConfidenceMetrics | null>(null);
@@ -2018,7 +2017,6 @@ Explore any connected node on the Concept Network Tree above for detailed visual
     setRunning(true);
     setCompareRunning(true);
     setTrace([]);
-    setCompareTrace([]);
     setFinalOut("");
     setCompareFinalOut("");
     setConfidence(null);
@@ -2047,8 +2045,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
       targetProviderId: string,
       targetModel: string,
       onPush: (t: TraceItem) => void,
-      onTraceUpdate: (idx: number, t: TraceItem) => void,
-      isPrimary: boolean
+      onTraceUpdate: (idx: number, t: TraceItem) => void
     ): Promise<{ answer: string; traceItems: TraceItem[]; metrics: { calls: number; tools: number; ms: number; tokens: number }; confidence: ConfidenceMetrics }> {
       const msgs = [
         { role: "system", content: reactSystemPrompt(tools, goal, { a2ui, chainedTools: toolLinks }) },
@@ -2113,8 +2110,7 @@ Explore any connected node on the Concept Network Tree above for detailed visual
           providerId,
           model,
           (t) => setTrace((prev) => [...prev, t]),
-          (idx, t) => setTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
-          true
+          (idx, t) => setTrace((prev) => { const n = [...prev]; n[idx] = t; return n; })
         ).then((res) => {
           setFinalOut(res.answer);
           setMetrics(res.metrics);
@@ -2124,9 +2120,8 @@ Explore any connected node on the Concept Network Tree above for detailed visual
         executeVariant(
           targetBProv,
           targetBModel,
-          (t) => setCompareTrace((prev) => [...prev, t]),
-          (idx, t) => setCompareTrace((prev) => { const n = [...prev]; n[idx] = t; return n; }),
-          false
+          () => {},
+          () => {}
         ).then((res) => {
           setCompareFinalOut(res.answer);
           setCompareMetrics(res.metrics);
@@ -2397,17 +2392,6 @@ if __name__ == "__main__":
       if (id) { setSaved(true); setTimeout(() => setSaved(false), 1600); } else setMsg("Could not save the agent.");
     } catch (e) { setMsg((e as Error).message); }
   }
-  async function publishAgent() {
-    setPublishing(true); setMsg("");
-    try {
-      const id = await persist();
-      if (!id) { toast("Publish failed", "error"); return; }
-      const r = await fetch("/api/projects", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, published: true, config: agentConfig() }) });
-      if (r.ok) setPublished(true);
-      toast(r.ok ? `Published “${name}” — open it in the Workroom` : "Publish failed", r.ok ? "success" : "error");
-    } catch { toast("Publish failed", "error"); }
-    finally { setPublishing(false); }
-  }
   async function unpublishAgent() {
     if (!savedProjectId) { setPublished(false); return; }
     setPublishing(true);
@@ -2460,7 +2444,7 @@ if __name__ == "__main__":
     fetch(`/api/projects?id=${id}`).then((r) => r.json()).then(({ project }) => { if (project?.config) applyConfig(project.config, project.id || id, project.published); }).catch(() => {});
   }, []);
 
-  const [pendingOrchestrationNode, setPendingOrchestrationNode] = useState<any>(null);
+  const [pendingOrchestrationNode, setPendingOrchestrationNode] = useState<OrchestrationNode | null>(null);
 
   // Custom Naming Modals
   const [showPublishModal, setShowPublishModal] = useState(false);
@@ -2484,7 +2468,7 @@ if __name__ == "__main__":
 
     const mappedTools = [...enabledTools].map((t) => (t === "rag" ? "knowledge" : t));
 
-    const newNode = {
+    const newNode: OrchestrationNode = {
       id: `agent_${Date.now()}`,
       name: finalName,
       role: finalRole,
