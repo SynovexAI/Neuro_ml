@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq, desc } from "drizzle-orm";
+import { and, eq, desc, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { projects } from "@/lib/db/schema";
 import { getSessionUser, uid } from "@/lib/auth";
@@ -54,8 +54,11 @@ export async function PATCH(req: Request) {
 export async function DELETE(req: Request) {
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const id = new URL(req.url).searchParams.get("id");
-  if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
-  await db.delete(projects).where(and(eq(projects.id, id), eq(projects.userId, user.id)));
-  return NextResponse.json({ ok: true });
+  const sp = new URL(req.url).searchParams;
+  const rawId = sp.get("id");
+  const rawIds = sp.get("ids");
+  const ids = rawIds ? rawIds.split(",").map((s) => s.trim()).filter(Boolean) : (rawId ? [rawId] : []);
+  if (!ids.length) return NextResponse.json({ error: "id required" }, { status: 400 });
+  await db.delete(projects).where(and(inArray(projects.id, ids), eq(projects.userId, user.id)));
+  return NextResponse.json({ ok: true, deleted: ids.length });
 }

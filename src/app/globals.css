@@ -1856,6 +1856,10 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
 .acanvas .wires2 path{fill:none;stroke:var(--border-strong);stroke-width:2.2;transition:stroke 0.2s,stroke-width 0.2s}
 .acanvas.n8n-light .wires2 path{stroke:#94a3b8}
 .acanvas .wires2 path.sub{stroke:var(--sky);stroke-dasharray:5 4;opacity:.85}
+.acanvas .wires2 path.tool-pipe{stroke:#0284c7;stroke-width:2.2;stroke-dasharray:6 3;filter:drop-shadow(0 0 4px rgba(2,132,199,0.5));opacity:0.92;transition:stroke 0.2s,stroke-width 0.2s}
+.acanvas .wires2 path.tool-pipe.selw{stroke:#38bdf8;stroke-width:3;stroke-dasharray:none;filter:drop-shadow(0 0 8px rgba(56,189,248,0.85))}
+.acanvas .wires2 path.tool-pipe.active-running{stroke:#38bdf8;stroke-width:3px;stroke-dasharray:6 4;animation:n8nDash 0.4s linear infinite;filter:drop-shadow(0 0 8px rgba(56,189,248,0.95))}
+.acanvas .wires2 path.tool-pipe.active-done{stroke:#10b981;stroke-width:2.5px;filter:drop-shadow(0 0 4px rgba(16,185,129,0.6))}
 .acanvas .wires2 path.active{stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4;opacity:.8}
 .acanvas .wires2 path.active-running{stroke:#38bdf8;stroke-width:3px;stroke-dasharray:6 4;animation:n8nDash 0.4s linear infinite;filter:drop-shadow(0 0 6px rgba(56,189,248,0.85));opacity:1}
 .acanvas .wires2 path.active-done{stroke:#10b981;stroke-width:2.5px;filter:drop-shadow(0 0 4px rgba(16,185,129,0.6));opacity:0.95}
@@ -1897,6 +1901,10 @@ canvas.chart{width:100%;display:block;background:var(--panel);border:1px solid v
 .aport.ap-bottom{bottom:-5px;left:50%;transform:translateX(-50%)}
 .aport.ap-agent-bottom{bottom:-5px;transform:translateX(-50%);border-color:var(--sky)}
 .aport.ap-agent-bottom:hover{transform:translateX(-50%) scale(1.3);box-shadow:0 0 0 4px rgba(56,189,248,0.25)}
+.aport.ap-in-tool{left:-5px;top:50%;transform:translateY(-50%);border-color:#0284c7;background:var(--surface);box-shadow:0 0 4px rgba(2,132,199,0.35)}
+.aport.ap-in-tool:hover{transform:translateY(-50%) scale(1.35);border-color:#38bdf8;box-shadow:0 0 0 4px rgba(56,189,248,0.3)}
+.aport.ap-out-tool{right:-5px;top:50%;transform:translateY(-50%);border-color:#0284c7;background:var(--surface);box-shadow:0 0 4px rgba(2,132,199,0.35)}
+.aport.ap-out-tool:hover{transform:translateY(-50%) scale(1.35);border-color:#38bdf8;box-shadow:0 0 0 4px rgba(56,189,248,0.3)}
 
 .anode.model-card{border-radius:50px;padding:3px 12px 3px 5px;display:flex;align-items:center;gap:8px}
 .anode.model-card .ah{padding:0}
