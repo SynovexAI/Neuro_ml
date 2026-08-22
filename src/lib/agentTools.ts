@@ -404,8 +404,11 @@ export function formatFinalAnswer(text: string): string {
   return clean || text;
 }
 
-export function reactSystemPrompt(tools: AgentTool[], goal: string, opts?: { a2ui?: boolean }): string {
+export function reactSystemPrompt(tools: AgentTool[], goal: string, opts?: { a2ui?: boolean; chainedTools?: { from: string; to: string }[] }): string {
   const list = tools.map((t) => `- ${t.name}: ${t.desc} (example input: ${t.example})`).join("\n");
+  const chainBlock = opts?.chainedTools?.length
+    ? `\n\nTool Orchestration Pipelines:\nThe following tools are chained together: ${opts.chainedTools.map((c) => `${c.from} ➔ ${c.to}`).join(", ")}. When you execute ${opts.chainedTools.map((c) => c.from).join(", ")}, you should feed their outputs and observations directly into the next chained tool.`
+    : "";
   const a2uiBlock = opts?.a2ui ? `
 
 Rich UI (optional): when the Final Answer is clearly structured data (rows of records or a set of metrics), you MAY return it as a single fenced \`\`\`ui block containing a JSON ARRAY of components. Otherwise use plain text. Supported components:
@@ -416,7 +419,7 @@ Rules for the \`\`\`ui block: default rows-of-data to a "table" (NOT a chart). P
   return `You are a ReAct agent that solves tasks by reasoning and using tools.${goal ? `\nYour goal / role: ${goal}` : ""}
 
 Available tools:
-${list || "(no tools — answer directly)"}
+${list || "(no tools — answer directly)"}${chainBlock}
 
 Work step by step. On each turn output EXACTLY one block:
 
