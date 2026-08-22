@@ -882,6 +882,39 @@ export default function AgentOrchestrationPanel({
     }
   }, [initialNodeToAdd, onNodeAdded]);
 
+  // Connected MCP Servers (from Studio -> MCP servers)
+  const [connectedMcpServers, setConnectedMcpServers] = useState<{ id: string; name: string; transport: string; enabled: boolean }[]>([]);
+
+  useEffect(() => {
+    fetch("/api/admin/mcp")
+      .then((r) => r.json())
+      .then((j) => {
+        if (Array.isArray(j.servers)) {
+          setConnectedMcpServers(j.servers.filter((s: any) => s.enabled));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleAddMcpNode = (mcp: { id: string; name: string; transport: string }) => {
+    const mcpNode: OrchestrationNode = {
+      id: `mcp_${mcp.name.toLowerCase().replace(/[^a-z0-9]/g, "_")}_${Date.now()}`,
+      name: `MCP: ${mcp.name}`,
+      role: `${mcp.name} Tool Integration`,
+      icon: "cpu",
+      nodeType: "custom",
+      model: selectedModel || "default",
+      temperature: 0.2,
+      tools: [mcp.name],
+      systemPrompt: `You are an MCP specialist agent connected to the "${mcp.name}" Model Context Protocol server. Use the available ${mcp.name} tools to execute operations, query endpoints, and deliver precise results.`,
+      w: 220,
+      h: 76,
+    };
+    setNodes((prev) => [...prev, mcpNode]);
+    setSelectedNodeId(mcpNode.id);
+    toast(`Added "${mcpNode.name}" with tool: [${mcp.name}]`, "success");
+  };
+
   const canvasRef = useRef<HTMLDivElement>(null);
   const [canvasW, setCanvasW] = useState(900);
 
@@ -1034,12 +1067,11 @@ if __name__ == "__main__":
       ...custNode,
       id: `cust_${Date.now()}`,
       w: 220,
-      h: 68,
+      h: 76,
     };
     setNodes((prev) => [...prev, instanceNode]);
     setSelectedNodeId(instanceNode.id);
-    setAddMenuOpen(false);
-    toast(`Added "${instanceNode.name}" to the canvas!`, "success");
+    toast(`Added "${instanceNode.name}" with tools: [${instanceNode.tools.join(", ") || "none"}]`, "success");
   };
 
   const openPublishModal = () => {
@@ -1187,7 +1219,7 @@ if __name__ == "__main__":
       tools: [...config.defaultTools],
       systemPrompt: config.defaultPrompt,
       w: 220,
-      h: 68,
+      h: 76,
     };
 
     setNodes((prev) => {
@@ -1202,8 +1234,7 @@ if __name__ == "__main__":
 
     setSelectedNodeId(newId);
     setNodePositions({});
-    setAddMenuOpen(false);
-    toast(`Added "${config.label}" node to workflow!`, "success");
+    toast(`Added "${config.label}" with tools: [${newNode.tools.join(", ") || "none"}]`, "success");
   };
 
   // Remove node
@@ -1823,188 +1854,135 @@ if __name__ == "__main__":
             {/* Visual Multi-Agent Node Canvas */}
             <div className="card" style={{ display: "flex", flexDirection: "column" }}>
               <div className="card-h">
-                <span className="t" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ display: "inline-flex", alignItems: "center", color: "#38bdf8" }}>
-                    {renderAgentIcon(PRESET_TOPOLOGIES[topology].icon, 18, "#38bdf8")}
-                  </span>
-                  <b>{PRESET_TOPOLOGIES[topology].title}</b>
-                  <span className="badge" style={{ fontSize: 10, background: "rgba(56,189,248,0.15)", color: "#38bdf8", border: "1px solid rgba(56,189,248,0.3)" }}>
-                    {nodes.length} Nodes Linear Flow
-                  </span>
-                </span>
-                <div className="r" style={{ display: "flex", gap: 8, alignItems: "center", position: "relative" }}>
-                  {/* + ADD NODE BUTTON WITH DROPDOWN */}
-                  <div style={{ position: "relative" }}>
-                    <button
-                      className="btn ghost sm"
-                      style={{
-                        borderColor: "rgba(59,130,246,0.5)",
-                        color: "#93c5fd",
-                        background: "rgba(59,130,246,0.12)",
-                        fontWeight: 600,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 5,
-                      }}
-                      onClick={() => setAddMenuOpen((o) => !o)}
-                    >
-                      <Plus size={13} /> Add Node ▾
-                    </button>
-
-                    {addMenuOpen && (
-                      <div
-                        className="addmenu2"
-                        style={{
-                          position: "absolute",
-                          top: "100%",
-                          right: 0,
-                          marginTop: 6,
-                          width: 280,
-                          background: "var(--panel)",
-                          border: "1.5px solid rgba(59,130,246,0.4)",
-                          borderRadius: 12,
-                          boxShadow: "0 10px 30px rgba(0,0,0,0.45), 0 0 15px rgba(59,130,246,0.2)",
-                          zIndex: 50,
-                          padding: 6,
-                        }}
-                      >
-                        {customNodeCatalog.length > 0 && (
-                          <div style={{ marginBottom: 8, paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
-                            <div style={{ padding: "6px 10px", fontSize: 10.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "#38bdf8", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                              <span>Custom In-Browser Agents</span>
-                              <span className="badge" style={{ fontSize: 9.5, background: "rgba(56,189,248,0.2)", color: "#38bdf8", padding: "1px 6px" }}>{customNodeCatalog.length}</span>
-                            </div>
-                            {customNodeCatalog.map((cust) => (
-                              <div
-                                key={cust.id}
-                                className="ai"
-                                onClick={() => handleAddCustomNode(cust)}
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 10,
-                                  padding: "8px 10px",
-                                  borderRadius: 8,
-                                  cursor: "pointer",
-                                  background: "rgba(56,189,248,0.06)",
-                                  border: "1px solid rgba(56,189,248,0.18)",
-                                  marginBottom: 4,
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    width: 30,
-                                    height: 30,
-                                    borderRadius: 8,
-                                    display: "grid",
-                                    placeItems: "center",
-                                    background: "rgba(56,189,248,0.2)",
-                                    color: "#38bdf8",
-                                    flex: "none",
-                                  }}
-                                >
-                                  <Bot size={16} />
-                                </div>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
-                                    {cust.name}
-                                  </div>
-                                  <div style={{ fontSize: 10, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                    {cust.role}
-                                  </div>
-                                </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "none" }}>
-                                  <span style={{ fontSize: 10, color: "#38bdf8", fontFamily: "var(--mono)", fontWeight: 700 }}>
-                                    + add
-                                  </span>
-                                  <button
-                                    className="btn ghost xs"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      removeCustomAgent(cust.id, cust.name);
-                                    }}
-                                    style={{ fontSize: 10, padding: "2px 5px", color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
-                                    title={`Delete ${cust.name}`}
-                                  >
-                                    <Trash2 size={11} />
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <div style={{ padding: "8px 10px", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", borderBottom: "1px solid var(--border)", marginBottom: 4 }}>
-                          Standard Specialist Nodes
-                        </div>
-                        {(Object.keys(NODE_TYPES_CATALOG) as NodeTypeKey[]).map((key) => {
-                          const item = NODE_TYPES_CATALOG[key];
-                          return (
-                            <div
-                              key={key}
-                              className="ai"
-                              onClick={() => handleAddNode(key)}
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 10,
-                                padding: "8px 10px",
-                                borderRadius: 8,
-                                cursor: "pointer",
-                                transition: "background 0.15s ease",
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.background = item.theme.bg;
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.background = "transparent";
-                              }}
-                            >
-                              <div
-                                style={{
-                                  width: 30,
-                                  height: 30,
-                                  borderRadius: 8,
-                                  display: "grid",
-                                  placeItems: "center",
-                                  fontSize: 16,
-                                  background: item.theme.badgeBg,
-                                  border: `1px solid ${item.theme.border}`,
-                                  flex: "none",
-                                }}
-                              >
-                                {renderAgentIcon(item.icon, 16, item.theme.light)}
-                              </div>
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
-                                  {item.label}
-                                </div>
-                                <div style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {item.sublabel}
-                                </div>
-                              </div>
-                              <span style={{ fontSize: 10, color: item.theme.light, fontFamily: "var(--mono)", fontWeight: 700 }}>
-                                + add
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  <button className="btn ghost sm" onClick={autoAlignLinear} title="Auto-align all nodes in linear flow">
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Zap size={12} /> Auto-Align</span>
-                  </button>
+                <span className="t">Flow</span>
+                <div className="r" style={{ position: "relative", display: "flex", gap: 8, alignItems: "center" }}>
                   <button className="btn ghost sm" onClick={() => setFullscreen((f) => !f)}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                      {fullscreen ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
-                      {fullscreen ? "Exit" : "Fullscreen"}
-                    </span>
+                    {fullscreen ? "⤢ Exit" : "⛶ Fullscreen"}
+                  </button>
+                  <button className="btn ghost sm" onClick={() => setAddMenuOpen((o) => !o)}>
+                    + Add node
                   </button>
                   <button className="btn sm" onClick={() => setStep("run")}>
                     Next: Run →
                   </button>
+
+                  {addMenuOpen && (
+                    <div className="addmenu2" style={{ position: "absolute", top: 38, right: 0, zIndex: 60, minWidth: 240 }}>
+                      <div className="hd">Add a node to the canvas</div>
+
+                      {/* Custom In-Browser Agents */}
+                      {customNodeCatalog.length > 0 && (
+                        <>
+                          <div className="hd" style={{ color: "#38bdf8", paddingTop: 8, paddingBottom: 2 }}>
+                            🤖 Custom In-Browser Agents
+                          </div>
+                          {customNodeCatalog.map((cust) => {
+                            const existingNode = nodes.find((n) => n.name === cust.name);
+                            const alreadyOnCanvas = !!existingNode;
+                            return (
+                              <div
+                                key={cust.id}
+                                className="ai"
+                                onClick={() => {
+                                  if (alreadyOnCanvas && existingNode) {
+                                    handleRemoveNode(existingNode.id);
+                                  } else {
+                                    handleAddCustomNode(cust);
+                                  }
+                                }}
+                                style={{ position: "relative" }}
+                              >
+                                <span>🤖</span>
+                                <span style={{ flex: 1 }}>{cust.name}</span>
+                                <span className={`ai-state ${alreadyOnCanvas ? "on" : ""}`}>
+                                  {alreadyOnCanvas ? "✓ on canvas" : "+ add"}
+                                </span>
+                                <button
+                                  className="btn ghost xs"
+                                  onClick={(e) => { e.stopPropagation(); removeCustomAgent(cust.id, cust.name); }}
+                                  style={{ marginLeft: 4, fontSize: 10, padding: "1px 4px", color: "#ef4444", borderColor: "rgba(239,68,68,0.3)" }}
+                                  title={`Delete ${cust.name}`}
+                                >
+                                  <Trash2 size={10} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
+
+                      {/* Connected MCP Servers */}
+                      {connectedMcpServers.length > 0 && (
+                        <>
+                          <div className="hd" style={{ color: "#c084fc", paddingTop: 8, paddingBottom: 2 }}>
+                            🔌 Connected MCP Servers
+                          </div>
+                          {connectedMcpServers.map((mcp) => {
+                            const existingNode = nodes.find((n) => n.name === `MCP: ${mcp.name}`);
+                            const alreadyOnCanvas = !!existingNode;
+                            return (
+                              <div
+                                key={mcp.id}
+                                className="ai"
+                                onClick={() => {
+                                  if (alreadyOnCanvas && existingNode) {
+                                    handleRemoveNode(existingNode.id);
+                                  } else {
+                                    handleAddMcpNode(mcp);
+                                  }
+                                }}
+                              >
+                                <span>🔌</span>
+                                <span style={{ flex: 1 }}>{mcp.name}</span>
+                                <span className={`ai-state ${alreadyOnCanvas ? "on" : ""}`}>
+                                  {alreadyOnCanvas ? "✓ on canvas" : "+ add"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
+
+                      {/* Standard Specialist Nodes */}
+                      <div className="hd" style={{ paddingTop: customNodeCatalog.length > 0 || connectedMcpServers.length > 0 ? 8 : undefined, paddingBottom: 2 }}>
+                        Specialist Agent Nodes
+                      </div>
+                      {(Object.keys(NODE_TYPES_CATALOG) as NodeTypeKey[]).map((key) => {
+                        const item = NODE_TYPES_CATALOG[key];
+                        const existingNode = nodes.find((n) => n.nodeType === key);
+                        const alreadyOnCanvas = !!existingNode;
+                        const EMOJI: Record<string, string> = {
+                          general: "🌐",
+                          web_search: "🔍",
+                          knowledge: "📚",
+                          excel: "📊",
+                          pdf: "📄",
+                          analyst: "📈",
+                          synthesizer: "✨",
+                          custom: "🤖",
+                        };
+                        return (
+                          <div
+                            key={key}
+                            className="ai"
+                            onClick={() => {
+                              if (alreadyOnCanvas && existingNode) {
+                                handleRemoveNode(existingNode.id);
+                              } else {
+                                handleAddNode(key);
+                              }
+                            }}
+                          >
+                            <span>{EMOJI[key] ?? "🔧"}</span>
+                            {item.label}
+                            <span className={`ai-state ${alreadyOnCanvas ? "on" : ""}`}>
+                              {alreadyOnCanvas ? "✓ on canvas" : "+ add"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2128,27 +2106,31 @@ if __name__ == "__main__":
                             {n.role}
                           </div>
 
-                          {/* Mini tool pills indicator */}
-                          {n.tools.length > 0 && (
-                            <div style={{ display: "flex", gap: 3, marginTop: 4, flexWrap: "nowrap", overflow: "hidden" }}>
-                              {n.tools.slice(0, 3).map((tId) => (
+                          {/* Tool pills indicator on canvas */}
+                          <div style={{ display: "flex", gap: 3, marginTop: 4, flexWrap: "wrap", alignItems: "center" }}>
+                            {n.tools.length > 0 ? (
+                              n.tools.map((tId) => (
                                 <span
                                   key={tId}
                                   style={{
                                     fontSize: 8.5,
                                     fontFamily: "var(--mono)",
-                                    background: "rgba(0,0,0,0.3)",
-                                    color: "var(--faint)",
-                                    padding: "0 4px",
-                                    borderRadius: 3,
+                                    fontWeight: 600,
+                                    background: isSel ? "rgba(56,189,248,0.2)" : "rgba(0,0,0,0.4)",
+                                    border: `1px solid ${isSel ? "rgba(56,189,248,0.45)" : "rgba(255,255,255,0.12)"}`,
+                                    color: isSel ? "#38bdf8" : theme.light,
+                                    padding: "1px 5px",
+                                    borderRadius: 3.5,
+                                    whiteSpace: "nowrap",
                                   }}
                                 >
-                                  {tId}
+                                  🛠 {tId}
                                 </span>
-                              ))}
-                              {n.tools.length > 3 && <span style={{ fontSize: 8.5, color: "var(--faint)" }}>+{n.tools.length - 3}</span>}
-                            </div>
-                          )}
+                              ))
+                            ) : (
+                              <span style={{ fontSize: 8.5, color: "var(--faint)", fontFamily: "var(--mono)" }}>no tools</span>
+                            )}
+                          </div>
                         </div>
 
                         <div
@@ -2285,7 +2267,12 @@ if __name__ == "__main__":
                     </div>
 
                     <div className="insp-field">
-                      <div className="k">Available Tools for this Node</div>
+                      <div className="k" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span>Available Tools for this Node</span>
+                        <span className="badge" style={{ fontSize: 9.5, background: "rgba(56,189,248,0.15)", color: "#38bdf8" }}>
+                          {selNode.tools.length} active
+                        </span>
+                      </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
                         {[
                           { id: "web_search", icon: "search", label: "web_search" },
@@ -2296,18 +2283,26 @@ if __name__ == "__main__":
                           { id: "db_query", icon: "db_query", label: "db_query" },
                           { id: "datetime", icon: "datetime", label: "datetime" },
                           { id: "knowledge", icon: "knowledge", label: "knowledge" },
+                          ...connectedMcpServers.map((m) => ({ id: m.name, icon: "cpu", label: `mcp:${m.name}` })),
                         ].map((t) => {
                           const hasTool = selNode.tools.includes(t.id);
                           return (
                             <span
                               key={t.id}
                               onClick={() => {
+                                const nextHasTool = !hasTool;
                                 setNodes((prev) =>
                                   prev.map((n) => {
                                     if (n.id !== selNode.id) return n;
                                     const nextTools = hasTool ? n.tools.filter((x) => x !== t.id) : [...n.tools, t.id];
                                     return { ...n, tools: nextTools };
                                   })
+                                );
+                                toast(
+                                  nextHasTool
+                                    ? `Added tool "${t.label}" to ${selNode.name}`
+                                    : `Removed tool "${t.label}" from ${selNode.name}`,
+                                  "info"
                                 );
                               }}
                               className={`chk ${hasTool ? "on" : ""}`}
