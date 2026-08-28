@@ -1028,7 +1028,7 @@ function renderTutorMessage(text: string) {
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            boxShadow: "0 4px 12px rgba(99,102,241,0.08)"
+            boxShadow: "var(--shadow-sm)"
           }}>
             <div style={{ fontWeight: 800, fontSize: 13, color: "#6366f1", borderBottom: "1px solid rgba(99, 102, 241, 0.25)", paddingBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
               {genAiContent?.split("\n")[0]}
@@ -1047,7 +1047,7 @@ function renderTutorMessage(text: string) {
             display: "flex",
             flexDirection: "column",
             gap: 8,
-            boxShadow: "0 4px 12px rgba(168, 85, 247, 0.08)"
+            boxShadow: "var(--shadow-sm)"
           }}>
             <div style={{ fontWeight: 800, fontSize: 13, color: "#a855f7", borderBottom: "1px solid rgba(168, 85, 247, 0.25)", paddingBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
               {agentContent?.split("\n")[0]}
@@ -3666,13 +3666,11 @@ if __name__ == "__main__":
                               onClick={() => setSelectedTopic(topic)}
                               onMouseEnter={(e) => {
                                 e.currentTarget.style.borderColor = cat.color;
-                                e.currentTarget.style.transform = "translateY(-1px)";
-                                e.currentTarget.style.boxShadow = `0 4px 12px ${cat.color}22`;
+                                e.currentTarget.style.boxShadow = "var(--shadow-sm)";
                               }}
                               onMouseLeave={(e) => {
                                 e.currentTarget.style.borderColor = cat.border;
-                                e.currentTarget.style.transform = "none";
-                                e.currentTarget.style.boxShadow = "none";
+                                    e.currentTarget.style.boxShadow = "none";
                               }}
                             >
                               <div style={{
@@ -3814,16 +3812,16 @@ if __name__ == "__main__":
             {/* Hero Header */}
             <div className="card" style={{
               marginBottom: 20,
-              background: "linear-gradient(135deg, rgba(99,102,241,0.15) 0%, rgba(168,85,247,0.12) 50%, rgba(16,185,129,0.1) 100%)",
-              border: "1px solid rgba(99,102,241,0.35)",
-              boxShadow: "0 12px 36px rgba(99,102,241,0.18)",
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              boxShadow: "var(--shadow-sm)",
               borderRadius: 16,
               padding: 24
             }}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 18 }}>
                 <div style={{
                   fontSize: 40, width: 72, height: 72, borderRadius: 18, display: "grid", placeItems: "center",
-                  background: "var(--surface)", border: "2px solid var(--accent)", boxShadow: "0 8px 24px rgba(99,102,241,0.25)", flexShrink: 0
+                  background: "var(--surface)", border: "1px solid var(--border-strong)", flexShrink: 0
                 }}>
                   {selectedTopic.icon}
                 </div>
@@ -3895,9 +3893,9 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
               return (
                 <div className="card" style={{
                   marginBottom: 20, borderRadius: 16,
-                  background: "linear-gradient(135deg, rgba(99,102,241,0.18), rgba(168,85,247,0.15))",
-                  border: "2px solid var(--accent)",
-                  boxShadow: "0 12px 36px rgba(99,102,241,0.25)"
+                  background: "var(--panel)",
+                  border: "1px solid var(--accent)",
+                  boxShadow: "none"
                 }}>
                   <div className="card-h" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15 }}>
@@ -4010,12 +4008,10 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.borderColor = "var(--border-strong)";
-                            e.currentTarget.style.transform = "translateY(-2px)";
-                            e.currentTarget.style.boxShadow = "var(--shadow-md)";
+                            e.currentTarget.style.boxShadow = "var(--shadow-sm)";
                           }}
                           onMouseLeave={(e) => {
                             e.currentTarget.style.borderColor = "var(--border)";
-                            e.currentTarget.style.transform = "none";
                             e.currentTarget.style.boxShadow = "none";
                           }}
                         >
@@ -4058,7 +4054,7 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                         display: "flex",
                         flexDirection: "column",
                         gap: 10,
-                        boxShadow: "0 4px 14px rgba(99, 102, 241, 0.1)"
+                        boxShadow: "var(--shadow-sm)"
                       }}>
                         <div style={{ fontSize: 14, fontWeight: 800, color: "#6366f1", borderBottom: "1px solid rgba(99, 102, 241, 0.2)", paddingBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
                           <span>🤖</span> Generative AI (Text Generator)
@@ -4080,7 +4076,7 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                         display: "flex",
                         flexDirection: "column",
                         gap: 10,
-                        boxShadow: "0 4px 14px rgba(168, 85, 247, 0.1)"
+                        boxShadow: "var(--shadow-sm)"
                       }}>
                         <div style={{ fontSize: 14, fontWeight: 800, color: "#a855f7", borderBottom: "1px solid rgba(168, 85, 247, 0.2)", paddingBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
                           <span>⚡</span> AI Agent (Autonomous System)
@@ -4146,21 +4142,16 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.borderColor = "var(--accent)";
-                            e.currentTarget.style.transform = "translateY(-2px)";
-                            e.currentTarget.style.boxShadow = "0 8px 24px rgba(99,102,241,0.2)";
+                            e.currentTarget.style.boxShadow = "var(--shadow-sm)";
                           }}
                           onMouseLeave={(e) => {
                             e.currentTarget.style.borderColor = isDecisionNode ? "rgba(168,85,247,0.4)" : "var(--border)";
-                            e.currentTarget.style.transform = "none";
-                            e.currentTarget.style.boxShadow = isDecisionNode ? "0 6px 20px rgba(168,85,247,0.15)" : "0 4px 14px rgba(0,0,0,0.06)";
+                            e.currentTarget.style.boxShadow = "var(--shadow-sm)";
                           }}
                         >
                           <div style={{
                             width: 36, height: 36, borderRadius: 10,
-                            background: isDecisionNode 
-                              ? "linear-gradient(135deg, #a855f7, #6366f1)" 
-                              : "linear-gradient(135deg, var(--accent), #10b981)",
-                            boxShadow: "0 0 14px rgba(99,102,241,0.35)",
+                            background: isDecisionNode ? "#a855f7" : "var(--accent)",
                             color: "#fff", display: "grid", placeItems: "center",
                             fontWeight: 800, fontSize: 14, flexShrink: 0
                           }}>
@@ -4265,9 +4256,9 @@ Pro Tip: ${selectedTopic.proTips[0] || "Always test agent behavior against edge 
             {selectedTopic.suggestedTemplate && (
               <div style={{
                 marginTop: 14,
-                background: "linear-gradient(135deg, rgba(99,102,241,0.18), rgba(16,185,129,0.14))",
-                border: "1.5px solid var(--accent)",
-                boxShadow: "0 8px 24px rgba(99,102,241,0.2)",
+                background: "var(--panel)",
+                border: "1px solid var(--accent)",
+                boxShadow: "none",
                 padding: 20,
                 borderRadius: 16,
                 display: "flex",

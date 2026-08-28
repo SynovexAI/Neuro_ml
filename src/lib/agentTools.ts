@@ -432,16 +432,35 @@ When you have the answer, output ONLY:
 Thought: <brief reasoning>
 Final Answer: <the answer for the user>
 
-Example of a tool call block:
-Thought: I need to query the exa tool to search.
-Action: exa
-Action Input: {"tool":"ask_question","args":{"question":"what is artificial intelligence"}}
+Example of a tool call block (using ${tools[0]?.name || "a tool"} from YOUR list above):
+Thought: I need ${tools[0]?.name || "a tool"} for this.
+Action: ${tools[0]?.name || "tool_name"}
+Action Input: ${tools[0]?.example?.split("\n")[0] || "the input"}
+You may ONLY use tool names from the Available tools list above. Never invent a tool name.
 
 Rules: PREFER TOOLS over doing the work yourself. If a tool can compute, look up, or fetch something — arithmetic, dates, web pages, the knowledge base — you MUST call that tool instead of answering from memory (you are unreliable at mental math and date arithmetic). Handle one thing per step. Only give the Final Answer once the tools have given you everything you need. After each Observation, continue the loop. Never write "Observation:" yourself — the system provides it. Keep each Thought to one sentence.${a2uiBlock}`;
 }
 
+
+/**
+ * Remove ReAct control lines from text that is about to be shown as an answer.
+ * When a model replies with prose instead of the protocol we fall back to using
+ * its raw text, and that raw text often still carries "Action: datetime" /
+ * "Thought: ..." lines, which then surface in the Final Answer card.
+ */
+export function stripReActScaffolding(text: string): string {
+  return (text || "")
+    .split(/\r?\n/)
+    .filter((ln) => !/^\s*(Thought|Action|Action Input|Observation)\s*:/i.test(ln))
+    .join("\n")
+    .replace(/^\s*-{3,}\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export interface ReActParse { thought?: string; action?: string; input?: string; final?: string; }
-export function parseReAct(text: string): ReActParse {
+export function parseReAct(text: string, knownTools?: string[]): ReActParse {
+  const isReal = (a: string | undefined) => !!a && (!knownTools || knownTools.includes(a));
   const cleanText = text.trim();
   if (cleanText.startsWith("{") && cleanText.endsWith("}")) {
     try {
@@ -490,9 +509,11 @@ export function parseReAct(text: string): ReActParse {
   }
   input = input.replace(/^```[a-z]*\n?/i, "").replace(/\n?```$/i, "").trim();
 
-  if (action) {
+  // "Action: I will search for X" used to parse as a tool named "I", burning a
+  // step and showing a phantom tool call. Only accept names the caller knows.
+  if (action && isReal(action)) {
     return { thought, action, input };
   }
 
-  return { thought, final: formatFinalAnswer(text) };
+  return { thought, final: formatFinalAnswer(stripReActScaffolding(text) || text) };
 }

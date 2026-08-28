@@ -100,6 +100,41 @@ export function buildIndex(chunks: string[]): RagIndex {
   return { docs, df, N, avgdl, vectors };
 }
 
+// BM25 with its two tuning knobs exposed:
+//   k1 — term-frequency saturation. Low k1 means "mentioned once is nearly as
+//        good as mentioned ten times"; high k1 keeps rewarding repetition.
+//   b  — length normalisation. b=0 ignores document length entirely, b=1 fully
+//        penalises long documents for having more chances to match.
+export function bm25ScoresTuned(idx: RagIndex, query: string, k1 = 1.5, b = 0.75): number[] {
+  const q = tokenize(query);
+  const { docs, df, N, avgdl } = idx;
+  return docs.map((d) => {
+    const tf: Record<string, number> = {};
+    d.forEach((t) => { tf[t] = (tf[t] || 0) + 1; });
+    let s = 0;
+    q.forEach((t) => {
+      if (!tf[t]) return;
+      const idf = Math.log(1 + (N - (df[t] || 0) + 0.5) / ((df[t] || 0) + 0.5));
+      s += idf * (tf[t] * (k1 + 1)) / (tf[t] + k1 * (1 - b + b * d.length / avgdl));
+    });
+    return s;
+  });
+}
+
+/** Per-term breakdown of one document's BM25 score — what the UI shows. */
+export function bm25Explain(idx: RagIndex, query: string, doc: number, k1 = 1.5, b = 0.75) {
+  const d = idx.docs[doc] || [];
+  const tf: Record<string, number> = {};
+  d.forEach((t) => { tf[t] = (tf[t] || 0) + 1; });
+  const terms = [...new Set(tokenize(query))].map((t) => {
+    const n = tf[t] || 0;
+    const idf = Math.log(1 + (idx.N - (idx.df[t] || 0) + 0.5) / ((idx.df[t] || 0) + 0.5));
+    const denom = n + k1 * (1 - b + b * d.length / idx.avgdl);
+    return { term: t, tf: n, df: idx.df[t] || 0, idf, contribution: n ? idf * (n * (k1 + 1)) / denom : 0 };
+  });
+  return { terms, dl: d.length, avgdl: idx.avgdl, total: terms.reduce((a, t) => a + t.contribution, 0) };
+}
+
 export function bm25Scores(idx: RagIndex, query: string): number[] {
   const q = tokenize(query);
   const { docs, df, N, avgdl } = idx;
@@ -180,6 +215,59 @@ export function retrieve(idx: RagIndex, query: string, strategy: Strategy, k: nu
     .map((s, i) => ({ i, score: s }))
     .sort((a, b) => b.score - a.score)
     .slice(0, k);
+}
+
+// ── Reciprocal Rank Fusion ───────────────────────────────────────────────────
+// The standard way to merge ranked lists from retrievers whose scores are not
+// comparable (BM25 is unbounded, cosine is [-1,1]). RRF ignores scores entirely
+// and sums 1/(k + rank), so it needs no normalisation and no tuned alpha.
+// k dampens the influence of the very top ranks; 60 is the value from the
+// original Cormack et al. paper and the de-facto default.
+export type RankedList = { i: number; score: number }[];
+export function rrfFuse(lists: RankedList[], k = 60, topK = 10): { i: number; score: number; ranks: (number | null)[] }[] {
+  const contrib = new Map<number, { score: number; ranks: (number | null)[] }>();
+  const seen = new Set<number>();
+  lists.forEach((l) => l.forEach((r) => seen.add(r.i)));
+  seen.forEach((i) => contrib.set(i, { score: 0, ranks: lists.map(() => null) }));
+  lists.forEach((list, li) => {
+    list.forEach((r, rank) => {
+      const c = contrib.get(r.i)!;
+      c.score += 1 / (k + rank + 1); // rank is 0-based, the formula is 1-based
+      c.ranks[li] = rank + 1;
+    });
+  });
+  return [...contrib.entries()]
+    .map(([i, c]) => ({ i, score: c.score, ranks: c.ranks }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+// Fusion mode for hybrid retrieval: a tuned score blend, or rank-based RRF.
+export type Fusion = "alpha" | "rrf";
+
+// Hybrid retrieval with a selectable fusion strategy. Returns the two source
+// rankings alongside the fused one so a UI can show how the merge happened.
+export function hybridRetrieve(
+  idx: RagIndex, query: string, k: number,
+  opts: { fusion?: Fusion; alpha?: number; metric?: Metric; rrfK?: number; denseVecs?: number[][]; qVec?: number[] } = {},
+): { fused: { i: number; score: number; ranks?: (number | null)[] }[]; sparse: RankedList; dense: RankedList; fusion: Fusion } {
+  const { fusion = "rrf", alpha = 0.5, metric = "cosine", rrfK = 60, denseVecs, qVec } = opts;
+  const useDense = !!(denseVecs && qVec);
+  const wide = Math.max(k, 10);
+
+  const bmRaw = bm25Scores(idx, query);
+  const sparse: RankedList = bmRaw.map((s, i) => ({ i, score: s })).sort((a, b) => b.score - a.score).filter((r) => r.score > 0).slice(0, wide);
+
+  const dRaw = useDense
+    ? denseVecs!.map((v) => simDense(qVec!, v, metric))
+    : idx.vectors.map((v) => simSparse(queryVector(idx, query), v, metric));
+  const dense: RankedList = dRaw.map((s, i) => ({ i, score: s })).sort((a, b) => b.score - a.score).filter((r) => r.score > 0).slice(0, wide);
+
+  if (fusion === "rrf") return { fused: rrfFuse([sparse, dense], rrfK, k), sparse, dense, fusion };
+
+  const bm = norm(bmRaw); const vec = norm(dRaw);
+  const fused = bm.map((s, i) => ({ i, score: (1 - alpha) * s + alpha * vec[i] })).sort((a, b) => b.score - a.score).slice(0, k);
+  return { fused, sparse, dense, fusion };
 }
 
 // ── dense (neural) embeddings support ──

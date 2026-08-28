@@ -96,3 +96,147 @@ export function layoutGraph(g: KnowledgeGraph, w: number, h: number): Record<str
   }
   return pos;
 }
+
+/**
+ * Readable layout for an entity graph.
+ *
+ * A knowledge graph built from prose is not one connected blob — it is a
+ * handful of real clusters plus a long tail of isolated pairs. Running one
+ * global force simulation over that mix fails badly: repulsion from the
+ * disconnected majority overwhelms the attraction inside the clusters, every
+ * node drifts outward until it hits the frame, and the result is nodes sliding
+ * along the walls into a rectangle outline.
+ *
+ * So: split into connected components, run Fruchterman-Reingold inside each
+ * one, then shelf-pack the components by size. Each cluster gets space
+ * proportional to sqrt(its node count), which is what makes the structure
+ * legible instead of a ring of collisions.
+ *
+ * Deterministic — seeded from a hash of the node id, so the same graph always
+ * lays out identically.
+ */
+function hash01(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) / 4294967295;
+}
+
+/** Connected components over the undirected edge set. */
+export function graphComponents(g: KnowledgeGraph): string[][] {
+  const adj = new Map<string, string[]>();
+  g.nodes.forEach((n) => adj.set(n.id, []));
+  g.edges.forEach((e) => {
+    if (adj.has(e.s) && adj.has(e.o)) { adj.get(e.s)!.push(e.o); adj.get(e.o)!.push(e.s); }
+  });
+  const seen = new Set<string>(), out: string[][] = [];
+  for (const n of g.nodes) {
+    if (seen.has(n.id)) continue;
+    const comp: string[] = [], stack = [n.id];
+    seen.add(n.id);
+    while (stack.length) {
+      const cur = stack.pop()!;
+      comp.push(cur);
+      for (const nb of adj.get(cur) || []) if (!seen.has(nb)) { seen.add(nb); stack.push(nb); }
+    }
+    out.push(comp);
+  }
+  return out.sort((a, b) => b.length - a.length);
+}
+
+/** Fruchterman-Reingold inside one component, in local [0,1] space. */
+function layoutComponent(ids: string[], edges: KgEdge[], iterations: number): Record<string, { x: number; y: number }> {
+  const n = ids.length;
+  const pos: Record<string, { x: number; y: number }> = {};
+  if (n === 1) { pos[ids[0]] = { x: 0.5, y: 0.5 }; return pos; }
+  ids.forEach((id, i) => {
+    const a = (i / n) * 2 * Math.PI;
+    pos[id] = { x: 0.5 + Math.cos(a) * 0.34 + (hash01(id) - 0.5) * 0.08, y: 0.5 + Math.sin(a) * 0.34 + (hash01(id + "y") - 0.5) * 0.08 };
+  });
+  const inSet = new Set(ids);
+  const local = edges.filter((e) => inSet.has(e.s) && inSet.has(e.o));
+  const k = Math.sqrt(1 / n);
+  let temp = 0.1;
+  for (let it = 0; it < iterations; it++) {
+    const disp: Record<string, { x: number; y: number }> = {};
+    ids.forEach((id) => { disp[id] = { x: 0, y: 0 }; });
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      const a = pos[ids[i]], b = pos[ids[j]];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      let d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 1e-4) { dx = (hash01(ids[i]) - 0.5) * 1e-3; dy = (hash01(ids[j]) - 0.5) * 1e-3; d = 1e-4; }
+      const rep = (k * k) / d;
+      disp[ids[i]].x += (dx / d) * rep; disp[ids[i]].y += (dy / d) * rep;
+      disp[ids[j]].x -= (dx / d) * rep; disp[ids[j]].y -= (dy / d) * rep;
+    }
+    for (const e of local) {
+      const a = pos[e.s], b = pos[e.o];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1e-4;
+      const att = (d * d) / k;
+      disp[e.s].x -= (dx / d) * att; disp[e.s].y -= (dy / d) * att;
+      disp[e.o].x += (dx / d) * att; disp[e.o].y += (dy / d) * att;
+    }
+    for (const id of ids) {
+      const p = pos[id], dp = disp[id];
+      dp.x += (0.5 - p.x) * 0.02; dp.y += (0.5 - p.y) * 0.02;
+      const dl = Math.sqrt(dp.x * dp.x + dp.y * dp.y) || 1e-9;
+      const stepLen = Math.min(dl, temp);
+      p.x += (dp.x / dl) * stepLen; p.y += (dp.y / dl) * stepLen;
+    }
+    temp = Math.max(0.001, temp * 0.98);
+  }
+  // fit this component into its own unit box
+  const xs = ids.map((id) => pos[id].x), ys = ids.map((id) => pos[id].y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const span = Math.max(x1 - x0, y1 - y0) || 1;   // uniform scale keeps the shape
+  ids.forEach((id) => {
+    const p = pos[id];
+    p.x = 0.5 + (p.x - (x0 + x1) / 2) / span;
+    p.y = 0.5 + (p.y - (y0 + y1) / 2) / span;
+  });
+  return pos;
+}
+
+export function forceLayout(g: KnowledgeGraph, iterations = 300): Record<string, { x: number; y: number }> {
+  const out: Record<string, { x: number; y: number }> = {};
+  if (g.nodes.length === 0) return out;
+  if (g.nodes.length === 1) { out[g.nodes[0].id] = { x: 0.5, y: 0.5 }; return out; }
+
+  const comps = graphComponents(g);
+  // each cluster gets room proportional to sqrt(size); singletons stay compact
+  const boxes = comps.map((c) => ({ ids: c, size: Math.sqrt(c.length) + 0.35 }));
+
+  // shelf-pack into rows, wrapping at roughly the square root of total width
+  const totalW = boxes.reduce((a, b) => a + b.size, 0);
+  const shelfW = Math.max(boxes[0].size, Math.sqrt(totalW * boxes[0].size * 1.6));
+  let cx = 0, cy = 0, rowH = 0;
+  const placed: { ids: string[]; size: number; ox: number; oy: number }[] = [];
+  for (const bx of boxes) {
+    if (cx > 0 && cx + bx.size > shelfW) { cx = 0; cy += rowH; rowH = 0; }
+    placed.push({ ...bx, ox: cx, oy: cy });
+    cx += bx.size; rowH = Math.max(rowH, bx.size);
+  }
+  const packW = Math.max(...placed.map((p) => p.ox + p.size), 1e-6);
+  const packH = cy + rowH || 1e-6;
+  const scale = 1 / Math.max(packW, packH);   // uniform, so clusters keep their shape
+
+  for (const pl of placed) {
+    const local = layoutComponent(pl.ids, g.edges, iterations);
+    for (const id of pl.ids) {
+      const lp = local[id];
+      out[id] = {
+        x: (pl.ox + lp.x * pl.size) * scale,
+        y: (pl.oy + lp.y * pl.size) * scale,
+      };
+    }
+  }
+
+  // centre the whole packing in the frame with a margin
+  const xs = Object.values(out).map((p) => p.x), ys = Object.values(out).map((p) => p.y);
+  const midX = (Math.min(...xs) + Math.max(...xs)) / 2, midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+  for (const id in out) {
+    out[id].x = Math.max(0.02, Math.min(0.98, out[id].x - midX + 0.5));
+    out[id].y = Math.max(0.02, Math.min(0.98, out[id].y - midY + 0.5));
+  }
+  return out;
+}
