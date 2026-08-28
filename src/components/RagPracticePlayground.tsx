@@ -843,7 +843,16 @@ function ScatterPlot({ points, links = [], onPick, legend }: { points: SPoint[];
     return () => el.removeEventListener("wheel", onWheel);
   }, [view, x0, x1, y0, y1, W, H, toVb]);
   const onDown = (e: React.PointerEvent) => { const [px, py] = toVb(e); drag.current = { px, py, cx: view.cx, cy: view.cy, moved: false }; movedRef.current = false; setPanning(true); (e.target as Element).setPointerCapture?.(e.pointerId); };
-  const onMove = (e: React.PointerEvent) => { if (!drag.current) return; const [px, py] = toVb(e); const dpx = px - drag.current.px, dpy = py - drag.current.py; if (Math.abs(dpx) + Math.abs(dpy) > 2) { drag.current.moved = true; movedRef.current = true; } setView((v) => clampView(drag.current!.cx - (dpx / (W - 2 * M)) * (x1 - x0), drag.current!.cy + (dpy / (H - 2 * M)) * (y1 - y0), v.zoom)); };
+  // Read drag.current once, up front: pointerup/pointerleave can null it before
+  // React runs the setView updater, so the updater must not touch the ref.
+  const onMove = (e: React.PointerEvent) => {
+    const d = drag.current; if (!d) return;
+    const [px, py] = toVb(e);
+    const dpx = px - d.px, dpy = py - d.py;
+    if (Math.abs(dpx) + Math.abs(dpy) > 2) { d.moved = true; movedRef.current = true; }
+    const ncx = d.cx - (dpx / (W - 2 * M)) * (x1 - x0), ncy = d.cy + (dpy / (H - 2 * M)) * (y1 - y0);
+    setView((v) => clampView(ncx, ncy, v.zoom));
+  };
   const onUp = () => { drag.current = null; setPanning(false); };
   const pickIf = (i: number) => { if (!movedRef.current) onPick?.(i); };
   const zb = (t: string, fn: () => void, title?: string) => <button title={title} onClick={fn} style={{ width: 24, height: 24, borderRadius: 6, border: "1px solid var(--border)", background: "var(--panel-2)", color: "var(--muted)", cursor: "pointer", fontSize: 13, lineHeight: 1, fontFamily: "inherit" }}>{t}</button>;
@@ -1532,8 +1541,18 @@ function BackpropModule() {
     else if (stepIdx === 4) { setLosses((L) => [...L, loss]); setEpoch((e) => e + 1); setStepIdx(0); }
     else setStepIdx((s) => s + 1);
   };
-  // jump to (and run through) a specific step card
-  const goToStep = (j: number) => { if (j <= stepIdx) advance(); else { let k = stepIdx; const run = () => { if (k <= j) { advance(); k++; setTimeout(run, 60); } }; run(); } };
+  // `advance` closes over this render's stepIdx, so a chain of calls has to go
+  // through a ref — otherwise every call in the chain reads the same stale index,
+  // misses the 3→4 / 4→0 wrap, and walks stepIdx off the end of BP_STEPS.
+  const advanceRef = useRef(advance);
+  useEffect(() => { advanceRef.current = advance; });
+  // jump to (and run through) a specific step card, wrapping around the 5-step cycle
+  const goToStep = (j: number) => {
+    let remaining = (j - stepIdx + BP_STEPS.length) % BP_STEPS.length;
+    if (remaining === 0) return;
+    const run = () => { advanceRef.current(); if (--remaining > 0) timer.current = setTimeout(run, 60); };
+    run();
+  };
   useEffect(() => {
     if (!running) return;
     if (done && stepIdx === 0) { setRunning(false); return; }

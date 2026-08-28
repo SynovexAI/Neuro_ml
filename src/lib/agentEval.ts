@@ -2,10 +2,13 @@
 
 export interface ConfidenceMetrics {
   score: number; // 0 to 100
-  grounding: number; // 0 to 100: how much of the answer is backed by tool observations
-  toolReliability: number; // 0 to 100: tool execution success rate & relevance
-  reasoningConsistency: number; // 0 to 100: thought-action loop convergence quality
-  factualDensity: number; // 0 to 100: concrete facts/numbers vs vague filler
+  // `null` means "not measurable for this run" — e.g. tool reliability when the
+  // agent had no tools. Reporting a default here reads as a measurement and is
+  // how this gauge used to claim 90% tool reliability on runs with zero tools.
+  grounding: number | null; // how much of the answer is backed by tool observations
+  toolReliability: number | null; // tool execution success rate
+  reasoningConsistency: number; // thought-action loop convergence quality
+  factualDensity: number; // concrete facts/numbers vs vague filler
   label: "High Confidence" | "Moderate Confidence" | "Low Confidence" | "Uncertain";
   explanation: string;
 }
@@ -29,14 +32,17 @@ export function computeConfidenceScore(params: {
   maxIters: number;
   outcome?: string;
   task: string;
+  /** For a pipeline composite: how many stages failed, out of how many. */
+  degradedSteps?: number;
+  totalSteps?: number;
 }): ConfidenceMetrics {
   const { finalAnswer, trace, iterations, maxIters, outcome = "success" } = params;
 
   if (!finalAnswer || finalAnswer.trim().length === 0 || outcome === "error") {
     return {
       score: 15,
-      grounding: 10,
-      toolReliability: 10,
+      grounding: null,
+      toolReliability: null,
       reasoningConsistency: 15,
       factualDensity: 20,
       label: "Uncertain",
@@ -54,7 +60,8 @@ export function computeConfidenceScore(params: {
       .filter((w) => w.length > 3 && !COMMON_STOPWORDS.has(w))
   );
 
-  let grounding = 70;
+  // Grounding is only meaningful when there are observations to ground against.
+  let grounding: number | null = null;
   if (observations.length > 0) {
     const finalLower = finalAnswer.toLowerCase();
     let matches = 0;
@@ -68,13 +75,13 @@ export function computeConfidenceScore(params: {
       grounding = 75;
     }
   } else {
-    // Pure reasoning without tools
-    grounding = finalAnswer.length > 100 ? 78 : 65;
+    // Pure reasoning, nothing to check the answer against.
+    grounding = null;
   }
 
   // 2. Tool Reliability: successful executions vs errors
   const actionCount = trace.filter((t) => t.kind === "action").length;
-  let toolReliability = 90;
+  let toolReliability: number | null = null;
   if (actionCount > 0) {
     const errorObs = observations.filter((o) => /error|unknown tool|failed|invalid/i.test(o)).length;
     toolReliability = Math.max(20, Math.round(((actionCount - errorObs) / actionCount) * 100));
@@ -95,29 +102,71 @@ export function computeConfidenceScore(params: {
   const structureBonus = finalAnswer.includes("\n") || finalAnswer.includes("•") || finalAnswer.includes("-") ? 15 : 0;
   const factualDensity = Math.min(98, Math.max(35, Math.round(numbersCount * 6 + structureBonus + Math.min(finalAnswer.length / 25, 45))));
 
-  // Weighted Total
-  const rawScore = Math.round(
-    grounding * 0.35 +
-    toolReliability * 0.25 +
-    reasoningConsistency * 0.25 +
-    factualDensity * 0.15
-  );
+  // Weighted total over the dimensions we could actually measure. Unmeasured
+  // dimensions are dropped and the remaining weights renormalised, so a
+  // tool-less run is scored on what it did rather than padded with defaults.
+  const dims: [number | null, number][] = [
+    [grounding, 0.35],
+    [toolReliability, 0.25],
+    [reasoningConsistency, 0.25],
+    [factualDensity, 0.15],
+  ];
+  const measured = dims.filter((d): d is [number, number] => d[0] !== null);
+  const totalWeight = measured.reduce((a, [, w]) => a + w, 0);
+  const rawScore = Math.round(measured.reduce((a, [v, w]) => a + v * w, 0) / totalWeight);
   const score = Math.max(10, Math.min(99, rawScore));
+  const unmeasured = [
+    grounding === null ? "grounding" : null,
+    toolReliability === null ? "tool reliability" : null,
+  ].filter(Boolean) as string[];
+  const caveat = unmeasured.length
+    ? ` Not measured: ${unmeasured.join(" and ")} — this step ran no tools, so the score reflects reasoning and output structure only.`
+    : "";
+
+  // A run that hit the reasoning limit never produced a final answer. It may still
+  // score well on grounding and density (it did call tools, it did emit text), so
+  // cap it explicitly — otherwise a failed step reports "High Confidence".
+  if (outcome === "max_iters") {
+    return {
+      score: Math.min(score, 40),
+      grounding, toolReliability, reasoningConsistency, factualDensity,
+      label: "Uncertain",
+      explanation: `Did not converge (${iterations}/${maxIters} reasoning steps used) — the agent ran out of steps before producing a final answer, so this output is partial.${caveat}`,
+    };
+  }
 
   let label: ConfidenceMetrics["label"] = "High Confidence";
   let explanation = "Strong factual grounding and clean reasoning progression.";
   if (score >= 82) {
     label = "High Confidence";
-    explanation = `High certainty (${score}%). Output is directly grounded in ${observations.length} tool observation(s) and structured clearly.`;
+    explanation = `High certainty (${score}%). Output is grounded in ${observations.length} tool observation(s) and structured clearly.${caveat}`;
   } else if (score >= 65) {
     label = "Moderate Confidence";
-    explanation = `Moderate certainty (${score}%). Reasoning resolved successfully, though some details rely on internal model priors.`;
+    explanation = `Moderate certainty (${score}%). Reasoning resolved successfully, though some details rely on internal model priors.${caveat}`;
   } else if (score >= 45) {
     label = "Low Confidence";
-    explanation = `Low certainty (${score}%). Required extensive step iterations or had partial tool execution friction.`;
+    explanation = `Low certainty (${score}%). Required extensive step iterations or had partial tool execution friction.${caveat}`;
   } else {
     label = "Uncertain";
-    explanation = `Uncertain (${score}%). The agent approached step limits or faced tool execution issues.`;
+    explanation = `Uncertain (${score}%). The agent approached step limits or faced tool execution issues.${caveat}`;
+  }
+
+  // A pipeline whose stages failed cannot be reported at full confidence just
+  // because its last stage returned text — the last stage was working from
+  // "[UNAVAILABLE]" inputs and may have filled the gap itself.
+  const { degradedSteps = 0, totalSteps = 0 } = params;
+  if (degradedSteps > 0 && totalSteps > 0) {
+    const cap = Math.max(10, Math.round(100 * (1 - degradedSteps / totalSteps)));
+    if (cap < score) {
+      const capped = cap;
+      const cappedLabel: ConfidenceMetrics["label"] =
+        capped >= 82 ? "High Confidence" : capped >= 65 ? "Moderate Confidence" : capped >= 45 ? "Low Confidence" : "Uncertain";
+      return {
+        score: capped, grounding, toolReliability, reasoningConsistency, factualDensity,
+        label: cappedLabel,
+        explanation: `Capped at ${capped}% — ${degradedSteps} of ${totalSteps} stages failed, so downstream agents worked from incomplete input. Treat unsourced claims in the final output as unverified.${caveat}`,
+      };
+    }
   }
 
   return {

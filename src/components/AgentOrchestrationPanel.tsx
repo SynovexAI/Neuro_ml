@@ -5,7 +5,9 @@ import Link from "next/link";
 import AgentOutput from "@/components/AgentOutput";
 import ConfidenceGauge from "./ConfidenceGauge";
 import { computeConfidenceScore, type ConfidenceMetrics } from "@/lib/agentEval";
+import { buildGraph, runAgentStep, parseDelegationPlan, buildPythonExport, type StepTraceItem } from "@/lib/orchestrator";
 import { toast } from "@/lib/toast";
+import { explainProviderError } from "@/lib/providerErrors";
 import {
   Zap,
   Network,
@@ -39,6 +41,7 @@ import {
   Download,
   Rocket,
 } from "lucide-react";
+
 
 export function renderAgentIcon(name: string, size = 16, color?: string, style?: React.CSSProperties) {
   const iconProps = { size, color, style };
@@ -118,7 +121,7 @@ const CheckSvg = () => (
 );
 
 export type Step = "type" | "build" | "run" | "learn";
-export type TopologyType = "linear" | "hierarchical" | "sequential" | "consensus" | "custom";
+export type TopologyType = "linear" | "research" | "hierarchical" | "sequential" | "consensus" | "custom";
 export type NodeTypeKey = "general" | "excel" | "pdf" | "knowledge" | "web_search" | "analyst" | "synthesizer" | "custom";
 
 export interface NodeTheme {
@@ -332,9 +335,86 @@ type PipelineStepExecution = {
   latencyMs: number;
   tokens: number;
   confidence?: ConfidenceMetrics;
+  trace?: StepTraceItem[];
+  toolCalls?: number;
+  toolErrors?: number;
 };
 
 const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; icon: string; tag: string; nodes: OrchestrationNode[]; task: string }> = {
+  research: {
+    title: "Research Agent Pipeline",
+    desc: "Continuous research chain: a planner decomposes the question, a collector scrapes live sources, an organiser structures the findings, a summariser condenses them, and a reporter presents the brief with citations.",
+    icon: "search",
+    tag: "Research Chain",
+    task: "Research the current state of solid-state batteries for electric vehicles: who the leading players are, what energy density they claim, and how close they are to mass production.",
+    nodes: [
+      {
+        id: "research_planner",
+        name: "Research Planner",
+        role: "Question Decomposition & Search Strategy",
+        icon: "brain",
+        nodeType: "general",
+        model: "default",
+        temperature: 0.3,
+        tools: [],
+        systemPrompt: "You are the Research Planner. Break the research question into 3-5 specific, searchable sub-questions. State what evidence would answer each one and in what order to gather it. Do not answer the question yourself - produce the search plan.",
+        w: 220,
+        h: 68,
+      },
+      {
+        id: "source_collector",
+        name: "Source Collector",
+        role: "Live Web & Paper Scraping",
+        icon: "search",
+        nodeType: "web_search",
+        model: "default",
+        temperature: 0.2,
+        tools: ["web_search", "web_fetch", "wikipedia", "arxiv"],
+        systemPrompt: "You are the Source Collector. Work through the plan's sub-questions using your search tools. Use web_search to find sources, web_fetch to read the promising ones in full, and wikipedia/arxiv for background and papers. Report raw findings with the URL or title beside each fact. Do not summarise or editorialise - collect.",
+        w: 220,
+        h: 68,
+      },
+      {
+        id: "organiser",
+        name: "Content Organiser",
+        role: "Deduplicate, Group & Fact-Check",
+        icon: "table",
+        nodeType: "knowledge",
+        model: "default",
+        temperature: 0.25,
+        tools: ["calculator", "statistics"],
+        systemPrompt: "You are the Content Organiser. Take the collected findings and arrange them: group facts by theme, drop duplicates, and put conflicting claims side by side rather than picking one. Compute any comparative figures with your tools. Output a structured outline with a source beside every claim. Flag anything unsupported.",
+        w: 220,
+        h: 68,
+      },
+      {
+        id: "summariser",
+        name: "Summariser",
+        role: "Condense to Key Findings",
+        icon: "file-text",
+        nodeType: "analyst",
+        model: "default",
+        temperature: 0.3,
+        tools: [],
+        systemPrompt: "You are the Summariser. Condense the organised outline into the key findings - what is established, what is contested, and what is still unknown. Keep every claim traceable to its source. Do not introduce facts that are not in the outline.",
+        w: 220,
+        h: 68,
+      },
+      {
+        id: "reporter",
+        name: "Report Writer",
+        role: "Final Brief & Citations",
+        icon: "sparkles",
+        nodeType: "synthesizer",
+        model: "default",
+        temperature: 0.35,
+        tools: [],
+        systemPrompt: "You are the Report Writer. Produce the final research brief in Markdown: a two-sentence answer up front, then Key Findings as bullets, then Open Questions, then a Sources list. Cite inline. If the upstream stages flagged gaps or failures, state them plainly rather than papering over them.",
+        w: 220,
+        h: 68,
+      },
+    ],
+  },
   linear: {
     title: "Linear Multi-Agent Flow",
     desc: "Sequential pipeline passing context step-by-step through General, Web Search, Knowledge Base, Excel Data, PDF Processor, and Synthesizer.",
@@ -642,6 +722,42 @@ const PRESET_TOPOLOGIES: Record<TopologyType, { title: string; desc: string; ico
   },
 };
 
+// Ready-made prompts per topology. The first is the preset's own example; the
+// rest are chosen to force real tool calls (lookup + arithmetic), so a run
+// visibly exercises the tool layer rather than answering from model priors.
+const SAMPLE_TASKS: Record<TopologyType, { label: string; task: string }[]> = {
+  research: [
+    { label: "Default · solid-state batteries", task: PRESET_TOPOLOGIES.research.task },
+    { label: "Research · small modular reactors", task: "Research small modular nuclear reactors: which designs have regulatory approval, what output they deliver in MW, and what the projected cost per MWh is compared with conventional plants." },
+    { label: "Research · RAG vs long context", task: "Research whether retrieval-augmented generation is still worth it now that models have million-token context windows. Find recent benchmarks and papers arguing each side." },
+  ],
+  linear: [
+    { label: "Default · tech revenue report", task: PRESET_TOPOLOGIES.linear.task },
+    { label: "Tools · population gap", task: "Find the current population of Tokyo and of Delhi, compute the percentage difference between them, and state which is larger and by how much." },
+    { label: "Tools · launch-cost maths", task: "Look up the payload capacity of SpaceX Starship and of the Saturn V in tonnes, compute the difference and the ratio, and summarise which lifts more." },
+  ],
+  hierarchical: [
+    { label: "Default · CAGR analysis", task: PRESET_TOPOLOGIES.hierarchical.task },
+    { label: "Tools · EV adoption briefing", task: "Compare electric-vehicle adoption in Norway and India: research the latest share-of-new-sales figures, compute the gap in percentage points, and write a two-paragraph briefing." },
+    { label: "Tools · energy mix compare", task: "Research the share of electricity generated from nuclear power in France and in Germany, compute the difference, and explain what drives it." },
+  ],
+  sequential: [
+    { label: "Default · API security design", task: PRESET_TOPOLOGIES.sequential.task },
+    { label: "Tools · compound interest", task: "Compute the compound interest on 250000 at 7.5% annually over 12 years, then fact-check the arithmetic and restate the final figure." },
+    { label: "Tools · dataset statistics", task: "Given the values 12, 7, 9, 15, 6, 22, 18, compute the mean, median and standard deviation, then critique whether the mean is a fair summary." },
+  ],
+  consensus: [
+    { label: "Default · microservices vs modular", task: PRESET_TOPOLOGIES.consensus.task },
+    { label: "Debate · nuclear vs renewables", task: "Is nuclear power the fastest route to decarbonising a national grid? Reason independently, cite figures, then reconcile into a consensus verdict." },
+    { label: "Debate · rewrite vs refactor", task: "A 9-year-old monolith is slowing delivery. Should the team rewrite from scratch or refactor incrementally? Argue independently, then reach a verdict." },
+  ],
+  custom: [
+    { label: "Default · executive summary", task: PRESET_TOPOLOGIES.custom.task },
+    { label: "Tools · population gap", task: "Find the current population of Tokyo and of Delhi, compute the percentage difference between them, and state which is larger." },
+    { label: "Tools · research digest", task: "Search for recent arXiv papers on retrieval-augmented generation, summarise the three most relevant, and note what they disagree on." },
+  ],
+};
+
 export interface OrchestrationLesson {
   id: string;
   category: "Linear Flow" | "Hierarchical" | "Sequential" | "Consensus" | "Production DAG";
@@ -807,13 +923,21 @@ export default function AgentOrchestrationPanel({
   const [selectedNodeId, setSelectedNodeId] = useState<string>("general_coordinator");
   const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
   const [nodeStatus, setNodeStatus] = useState<Record<string, string>>({});
-  const [task, setTask] = useState("");
+  const [task, setTask] = useState(PRESET_TOPOLOGIES.linear.task);
   const [running, setRunning] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const [runWarnings, setRunWarnings] = useState<string[]>([]);
+  const [degraded, setDegraded] = useState<string[]>([]);
+  const [failReasons, setFailReasons] = useState<string[]>([]);
+  const [openStage, setOpenStage] = useState<string | null>(null);
   const [executions, setExecutions] = useState<PipelineStepExecution[]>([]);
   const [finalSynthesis, setFinalSynthesis] = useState("");
   const [overallConfidence, setOverallConfidence] = useState<ConfidenceMetrics | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [providerList, setProviderList] = useState<{ id: string; provider: string; label: string | null }[]>([]);
+  const [modelList, setModelList] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -986,73 +1110,8 @@ export default function AgentOrchestrationPanel({
     toast("Exported orchestration JSON!", "success");
   };
 
-  const buildOrchestrationCode = () => {
-    return `# Multi-Agent Orchestration Pipeline: ${PRESET_TOPOLOGIES[topology]?.title || "Custom Multi-Agent Flow"}
-# Topology: ${topology.toUpperCase()} | Active Stages: ${nodes.length}
-
-import asyncio
-from typing import TypedDict, Dict, Any, List
-from openai import AsyncOpenAI
-
-client = AsyncOpenAI()
-
-class PipelineState(TypedDict):
-    initial_task: str
-    current_context: str
-    stage_results: Dict[str, Any]
-
-# ── Agent Node Specifications ──
-AGENTS = [
-${nodes.map(n => `    {
-        "id": "${n.id}",
-        "name": "${n.name}",
-        "role": "${n.role}",
-        "system_prompt": """${n.systemPrompt.replace(/"/g, '\\"')}""",
-        "tools": ${JSON.stringify(n.tools)},
-        "temperature": ${n.temperature},
-    }`).join(",\n")}
-]
-
-async def execute_agent_step(agent: dict, context: str) -> str:
-    """Executes a single specialist agent step with LLM reasoning."""
-    print(f"[*] Running step: {agent['name']} ({agent['role']})...")
-    
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        temperature=agent["temperature"],
-        messages=[
-            {"role": "system", "content": agent["system_prompt"]},
-            {"role": "user", "content": f"Accumulated Context:\\n{context}"}
-        ]
-    )
-    output = response.choices[0].message.content or ""
-    return output
-
-async def run_orchestration_pipeline(task: str):
-    """Executes the full ${topology} multi-agent orchestration workflow."""
-    state: PipelineState = {
-        "initial_task": task,
-        "current_context": task,
-        "stage_results": {}
-    }
-    
-    print(f"=== Starting Multi-Agent ${topology.toUpperCase()} Flow ===")
-    print(f"Goal: {task}\\n")
-    
-    for agent in AGENTS:
-        result = await execute_agent_step(agent, state["current_context"])
-        state["stage_results"][agent["id"]] = result
-        state["current_context"] = f"{state['current_context']}\\n\\n--- Output from {agent['name']} ---\\n{result}"
-        print(f"[✓] Completed {agent['name']}\\n")
-        
-    print("=== Multi-Agent Synthesis Complete ===")
-    return state
-
-if __name__ == "__main__":
-    test_task = """${task.replace(/"/g, '\\"')}"""
-    asyncio.run(run_orchestration_pipeline(test_task))
-`;
-  };
+  const buildOrchestrationCode = () =>
+    buildPythonExport(topology, PRESET_TOPOLOGIES[topology]?.title || "Custom Multi-Agent Flow", nodes, task);
 
   const handleAddCustomNode = (custNode: OrchestrationNode) => {
     const instanceNode: OrchestrationNode = {
@@ -1103,17 +1162,25 @@ if __name__ == "__main__":
     }
   };
 
+  // Load the provider list once, then re-resolve the model list whenever the
+  // selected provider changes — each provider exposes a different model set.
   useEffect(() => {
-    fetch("/api/models")
+    let cancelled = false;
+    setModelsLoading(true);
+    const qs = selectedProviderId ? `?providerId=${encodeURIComponent(selectedProviderId)}` : "";
+    fetch(`/api/models${qs}`)
       .then((r) => r.json())
       .then((j) => {
-        if (j.providers?.length) {
-          setSelectedProviderId(j.providerId || j.providers[0].id);
-          setSelectedModel(j.default || (j.models && j.models[0]) || "");
-        }
+        if (cancelled) return;
+        setProviderList(j.providers || []);
+        setModelList(j.models || []);
+        if (!selectedProviderId && j.providers?.length) setSelectedProviderId(j.providerId || j.providers[0].id);
+        setSelectedModel((cur) => (cur && (j.models || []).includes(cur) ? cur : j.default || (j.models || [])[0] || ""));
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => { if (!cancelled) setProviderList([]); })
+      .finally(() => { if (!cancelled) setModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedProviderId]);
 
   useEffect(() => {
     if (canvasRef.current) {
@@ -1124,7 +1191,8 @@ if __name__ == "__main__":
   const selectTopology = (type: TopologyType) => {
     setTopology(type);
     setNodes(PRESET_TOPOLOGIES[type].nodes);
-    setTask("");
+    // each preset ships an example task — use it, so Run isn't dead on arrival
+    setTask(PRESET_TOPOLOGIES[type].task || "");
     setSelectedNodeId(PRESET_TOPOLOGIES[type].nodes[0]?.id || "");
     setNodePositions({});
     setExecutions([]);
@@ -1275,7 +1343,7 @@ if __name__ == "__main__":
   };
 
   // Helper LLM call
-  async function callLLM(msgs: { role: string; content: string }[], maxTok = 600): Promise<string> {
+  async function callLLM(msgs: { role: string; content: string }[], maxTok = 600, modelOverride?: string): Promise<string> {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1285,7 +1353,7 @@ if __name__ == "__main__":
         maxTokens: maxTok,
         streaming: false,
         providerId: selectedProviderId || undefined,
-        model: selectedModel || undefined,
+        model: modelOverride || selectedModel || undefined,
       }),
     });
     if (!res.ok) {
@@ -1303,194 +1371,249 @@ if __name__ == "__main__":
   }
 
   // Execute Orchestration Pipeline
+async function cancelOrchestration() {
+    abortRef.current?.abort();
+  }
+
+  // Execute the pipeline as the graph the canvas draws: each wave runs
+  // concurrently, and every node is fed its real dependencies' outputs rather
+  // than one shared blob of everything that ran before it.
   async function runOrchestration() {
     if (!task.trim()) return;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     setRunning(true);
     setExecutions([]);
     setFinalSynthesis("");
     setOverallConfidence(null);
     setNodeStatus({});
+    setDegraded([]);
+    setFailReasons([]);
 
-    const initialExecs: PipelineStepExecution[] = nodes.map((n) => ({
-      nodeId: n.id,
-      nodeName: n.name,
-      icon: n.icon,
-      nodeType: n.nodeType || "general",
-      status: "pending",
-      input: "",
-      output: "",
-      latencyMs: 0,
-      tokens: 0,
+    const graph = buildGraph(topology, nodes);
+    setRunWarnings(graph.warnings);
+
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const idx = new Map(nodes.map((n, i) => [n.id, i]));
+    const execs: PipelineStepExecution[] = nodes.map((n) => ({
+      nodeId: n.id, nodeName: n.name, icon: n.icon, nodeType: n.nodeType || "general",
+      status: "pending", input: "", output: "", latencyMs: 0, tokens: 0,
     }));
-    setExecutions([...initialExecs]);
+    setExecutions([...execs]);
 
-    const stepOutputs: Record<string, string> = {};
-    let accumulatedContext = "";
+    const outputs: Record<string, string> = {};
+    const failed = new Set<string>();
+    const reasons = new Set<string>();
+    const allTrace: StepTraceItem[] = [];
+    let assignments: Record<string, string> = {};
 
-    try {
-      for (let i = 0; i < nodes.length; i++) {
-        const node = nodes[i];
-        setNodeStatus((s) => ({ ...s, [node.id]: "running" }));
+    const depsOf = (id: string) => graph.edges.filter((e) => e.to === id).map((e) => e.from);
 
-        let stepInput = "";
-        if (topology === "consensus") {
-          if (node.id === "agent_a" || node.id === "agent_b") {
-            stepInput = `Task: ${task}\n\nProvide your independent perspective, findings, and evidence.`;
-          } else if (node.id === "referee" || i === nodes.length - 1) {
-            stepInput = `Task: ${task}\n\nPerspective Alpha:\n${stepOutputs["agent_a"] || ""}\n\nPerspective Beta:\n${stepOutputs["agent_b"] || ""}\n\nSynthesize the consensus verdict, highlight key agreements, and resolve trade-offs.`;
-          }
-        } else if (topology === "hierarchical") {
-          if (i === 0) {
-            stepInput = `User Task: "${task}"\n\nAnalyze this task, determine the sub-objectives, and produce a structured delegation plan for specialist agents.`;
-          } else {
-            stepInput = `User Task: "${task}"\n\nContext gathered so far from upstream specialists:\n${accumulatedContext}\n\nExecute your specialized role (${node.role}) based on the plan above.`;
-          }
-        } else {
-          // Linear Flow & Sequential
-          if (i === 0) {
-            stepInput = `User Task: "${task}"\n\nExecute Stage 1 (${node.name} - ${node.role}). Initialize the pipeline with core requirements, preliminary findings, and baseline structure.`;
-          } else {
-            stepInput = `User Task: "${task}"\n\n--- Context and structured outputs from previous stages ---\n${accumulatedContext}\n\n--- Your Assignment ---\nYou are Stage ${i + 1}: ${node.name} (${node.role}). Process and build upon the context above with your specific tools (${node.tools.join(", ") || "None"}) and role.`;
-          }
+    const buildInput = (nodeId: string): string => {
+      const node = byId.get(nodeId)!;
+      const deps = depsOf(nodeId);
+      const head = `User Task: "${task}"`;
+      const NL = "\n";
+
+      if (deps.length === 0) {
+        if (graph.supervisorId === nodeId) {
+          const roster = nodes
+            .filter((n) => n.id !== nodeId && n.id !== graph.arbiterId)
+            .map((sp) => `- ${sp.name} (${sp.role}); tools: ${sp.tools.join(", ") || "none"}`)
+            .join(NL);
+          return [
+            head, "",
+            "You coordinate these specialists:", roster, "",
+            "Break the task down and assign each specialist ONE concrete sub-task.",
+            "Emit one line per specialist in exactly this form:",
+            "AGENT <specialist name>: <their sub-task>",
+            "Then add a short paragraph of overall strategy.",
+          ].join(NL);
         }
-
-        initialExecs[i] = {
-          ...initialExecs[i],
-          status: "running",
-          input: stepInput,
-        };
-        setExecutions([...initialExecs]);
-
-        const t0 = performance.now();
-        let stepOutput = "";
-
-        const msgs = [
-          {
-            role: "system",
-            content: `${node.systemPrompt}\nSpecialist Role: ${node.role}\nAvailable tools: ${node.tools.join(", ") || "None"}. Format your output cleanly with Markdown headings, bullet points, or tables.`,
-          },
-          { role: "user", content: stepInput },
-        ];
-
-        try {
-          const resp = await callLLM(msgs, 550);
-          stepOutput = resp.trim();
-        } catch (err) {
-          stepOutput = `[Agent encountered an error: ${(err as Error).message}]`;
+        if (graph.arbiterId === nodeId) {
+          return `${head}${NL}${NL}No independent perspectives were produced. Answer directly and state that consensus could not be formed.`;
         }
-
-        const elapsed = Math.round(performance.now() - t0);
-        const estTokens = Math.round((stepInput.length + stepOutput.length) / 4);
-
-        const stepConf = computeConfidenceScore({
-          finalAnswer: stepOutput,
-          trace: [],
-          iterations: 1,
-          maxIters: 3,
-          outcome: stepOutput.startsWith("[Agent encountered an error") ? "error" : "success",
-          task: stepInput,
-        });
-
-        stepOutputs[node.id] = stepOutput;
-        initialExecs[i] = {
-          ...initialExecs[i],
-          status: "done",
-          output: stepOutput,
-          latencyMs: elapsed,
-          tokens: estTokens,
-          confidence: stepConf,
-        };
-        setExecutions([...initialExecs]);
-        setNodeStatus((s) => ({ ...s, [node.id]: "done" }));
-
-        accumulatedContext += `\n\n### Stage ${i + 1}: ${node.name} (${node.role})\n${stepOutput}`;
+        return `${head}${NL}${NL}You are ${node.name} (${node.role}). Begin the pipeline: establish the core requirements and produce your stage output.`;
       }
 
-      const lastOutput = initialExecs[initialExecs.length - 1]?.output || accumulatedContext;
-      setFinalSynthesis(lastOutput);
+      const context = deps
+        .map((d) => {
+          const dn = byId.get(d);
+          return failed.has(d)
+            ? `### ${dn?.name || d}${NL}[UNAVAILABLE - this upstream agent failed. Do not invent its findings; note the gap.]`
+            : `### ${dn?.name || d} (${dn?.role || ""})${NL}${outputs[d] ?? ""}`;
+        })
+        .join(NL + NL);
 
-      const compositeConf = computeConfidenceScore({
-        finalAnswer: lastOutput,
-        trace: [],
+      if (graph.arbiterId === nodeId) {
+        return [
+          head, "", "Independent perspectives to reconcile:", "", context, "",
+          "Compare them directly: state where they agree, where they conflict, and give the consensus verdict.",
+          "Flag any perspective marked UNAVAILABLE rather than filling the gap yourself.",
+        ].join(NL);
+      }
+
+      const assigned = assignments[nodeId];
+      return [
+        head, "", "--- Context from upstream agents ---", context, "",
+        "--- Your assignment ---",
+        `You are ${node.name} (${node.role}).`,
+        ...(assigned ? [`The coordinator assigned you: ${assigned}`] : []),
+        "Build on the context above and produce your stage output.",
+      ].join(NL);
+    };
+
+
+    const runOne = async (nodeId: string) => {
+      const node = byId.get(nodeId)!;
+      const i = idx.get(nodeId)!;
+      setNodeStatus((st) => ({ ...st, [nodeId]: "running" }));
+      const stepInput = buildInput(nodeId);
+      execs[i] = { ...execs[i], status: "running", input: stepInput };
+      setExecutions([...execs]);
+
+      const t0 = performance.now();
+      let res;
+      try {
+        res = await runAgentStep({
+          node: { name: node.name, role: node.role, systemPrompt: node.systemPrompt, tools: node.tools },
+          input: stepInput,
+          // "default" = use the pipeline model; anything else overrides per node
+          callLLM: (msgs, maxTok) => callLLM(msgs, maxTok, node.model && node.model !== "default" ? node.model : undefined),
+          maxTokens: 700,
+          signal: ctrl.signal,
+          onTrace: (item) => {
+            allTrace.push(item);
+            execs[i] = { ...execs[i], trace: [...(execs[i].trace || []), item] };
+            setExecutions([...execs]);
+          },
+        });
+      } catch (err) {
+        if ((err as Error).name === "AbortError") throw err;
+        reasons.add(`Cause: ${explainProviderError((err as Error).message)}`);
+        res = {
+          output: `[${node.name} failed: ${(err as Error).message}]`,
+          trace: [] as StepTraceItem[], status: "error" as const, outcome: "error",
+          iterations: 1, maxIters: 1, toolCalls: 0, toolErrors: 0, unknownTools: [] as string[],
+        };
+      }
+
+      const elapsed = Math.round(performance.now() - t0);
+      if (res.status === "error") failed.add(nodeId);
+      outputs[nodeId] = res.output;
+
+      execs[i] = {
+        ...execs[i],
+        status: res.status,
+        output: res.output,
+        latencyMs: elapsed,
+        tokens: Math.round((stepInput.length + res.output.length) / 4),
+        trace: res.trace,
+        toolCalls: res.toolCalls,
+        toolErrors: res.toolErrors,
+        confidence: computeConfidenceScore({
+          finalAnswer: res.output, trace: res.trace, iterations: res.iterations,
+          maxIters: res.maxIters, outcome: res.outcome, task: stepInput,
+        }),
+      };
+      setExecutions([...execs]);
+      setNodeStatus((st) => ({ ...st, [nodeId]: res.status === "error" ? "error" : "done" }));
+    };
+
+    try {
+      for (const wave of graph.waves) {
+        // every node in a wave is independent by construction — run them together
+        await Promise.all(wave.map((id) => runOne(id)));
+
+        // the supervisor's plan is only useful if it actually routes work
+        if (graph.supervisorId && wave.length === 1 && wave[0] === graph.supervisorId && !failed.has(graph.supervisorId)) {
+          const specialists = nodes.filter((n) => n.id !== graph.supervisorId && n.id !== graph.arbiterId);
+          assignments = parseDelegationPlan(outputs[graph.supervisorId] || "", specialists);
+          const unrouted = specialists.filter((sp) => !assignments[sp.id]);
+          if (unrouted.length) {
+            setRunWarnings((w) => [...new Set([...w, `Supervisor did not assign a sub-task to ${unrouted.map((u) => u.name).join(", ")} — they received the full plan instead.`])]);
+          }
+        }
+      }
+
+      const terminalId = graph.waves.at(-1)?.at(-1);
+      const lastOutput = terminalId ? outputs[terminalId] : "";
+      setFinalSynthesis(lastOutput || "");
+      setDegraded([...failed].map((id) => byId.get(id)?.name || id));
+      setFailReasons([...reasons]);
+
+      setOverallConfidence(computeConfidenceScore({
+        finalAnswer: lastOutput || "",
+        trace: allTrace,
         iterations: nodes.length,
         maxIters: nodes.length + 2,
-        outcome: "success",
+        // only claim success if the node that produced the answer actually succeeded
+        outcome: terminalId && failed.has(terminalId) ? "error" : "success",
         task,
-      });
-      setOverallConfidence(compositeConf);
+        degradedSteps: failed.size,
+        totalSteps: nodes.length,
+      }));
     } catch (e) {
-      toast("Orchestration error: " + (e as Error).message, "error");
+      if ((e as Error).name === "AbortError") toast("Run cancelled", "info");
+      else toast("Orchestration error: " + (e as Error).message, "error");
     } finally {
+      abortRef.current = null;
       setRunning(false);
     }
   }
 
+
   // Render SVG connections between orchestration nodes
+  // Draw the SAME graph the runner executes. Both come from buildGraph(), so the
+  // wires on screen are the dependency edges work actually flows along — these
+  // used to be derived separately, which is how hierarchical could draw a
+  // fan-out while the engine quietly ran a straight line.
   const renderWires = () => {
     const wirePaths: { id: string; d: string; active: boolean; strokeColor: string; gradId?: string }[] = [];
+    const graph = buildGraph(topology, nodes);
+    const indexOf = new Map(nodes.map((n, i) => [n.id, i]));
+    const nodeOf = new Map(nodes.map((n) => [n.id, n]));
 
-    if (topology === "hierarchical") {
-      const supNode = nodes.find((n) => n.id === "supervisor") || nodes[0];
-      const supPos = getNodePos(supNode.id, 0, nodes.length);
-      const subNodes = nodes.filter((n) => n.id !== supNode.id);
+    for (const edge of graph.edges) {
+      const a = nodeOf.get(edge.from), b = nodeOf.get(edge.to);
+      const ai = indexOf.get(edge.from), bi = indexOf.get(edge.to);
+      if (!a || !b || ai === undefined || bi === undefined) continue;
 
-      subNodes.forEach((n, i) => {
-        const subPortX = supPos.x + (supNode.w * (i + 1)) / (subNodes.length + 1);
-        const subPortY = supPos.y + supNode.h;
-        const nPos = getNodePos(n.id, i + 1, nodes.length);
-        const childPortX = nPos.x + n.w / 2;
-        const childPortY = nPos.y;
-        const dy = Math.max(35, Math.abs(childPortY - subPortY) / 2);
-        const d = `M${subPortX} ${subPortY} C${subPortX} ${subPortY + dy}, ${childPortX} ${childPortY - dy}, ${childPortX} ${childPortY}`;
-        const active = nodeStatus[n.id] === "running" || nodeStatus[supNode.id] === "running";
-        const nTheme = NODE_TYPES_CATALOG[n.nodeType || "general"]?.theme;
-        wirePaths.push({ id: `w_sup_${n.id}`, d, active, strokeColor: active ? "#38bdf8" : (nTheme?.accent || "#0284c7") });
-      });
-    } else if (topology === "consensus") {
-      const refNode = nodes.find((n) => n.id === "referee") || nodes[nodes.length - 1];
-      const refPos = getNodePos(refNode.id, nodes.length - 1, nodes.length);
-      const parentNodes = nodes.filter((n) => n.id !== refNode.id);
+      const aPos = getNodePos(a.id, ai, nodes.length);
+      const bPos = getNodePos(b.id, bi, nodes.length);
+      const lower = bPos.y > aPos.y + 40;
+      // a chain that wrapped onto the next row goes DOWN and BACK to the left;
+      // a fan-out/converge goes straight down. They need different routing.
+      const wrapped = lower && bPos.x < aPos.x;
 
-      parentNodes.forEach((n, i) => {
-        const nPos = getNodePos(n.id, i, nodes.length);
-        const pPortX = nPos.x + n.w / 2;
-        const pPortY = nPos.y + n.h;
-        const refPortX = refPos.x + (refNode.w * (i + 1)) / (parentNodes.length + 1);
-        const refPortY = refPos.y;
-        const dy = Math.max(35, Math.abs(refPortY - pPortY) / 2);
-        const d = `M${pPortX} ${pPortY} C${pPortX} ${pPortY + dy}, ${refPortX} ${refPortY - dy}, ${refPortX} ${refPortY}`;
-        const active = nodeStatus[n.id] === "running" || nodeStatus[refNode.id] === "running";
-        const nTheme = NODE_TYPES_CATALOG[n.nodeType || "general"]?.theme;
-        wirePaths.push({ id: `w_con_${n.id}`, d, active, strokeColor: active ? "#38bdf8" : (nTheme?.accent || "#0284c7") });
-      });
-    } else {
-      // LINEAR FLOW & Sequential (Port Right -> Port Left)
-      for (let i = 0; i < nodes.length - 1; i++) {
-        const a = nodes[i], b = nodes[i + 1];
-        const aPos = getNodePos(a.id, i, nodes.length);
-        const bPos = getNodePos(b.id, i + 1, nodes.length);
+      let d: string;
+      if (wrapped) {
+        // exit the right edge, run along a mid-line, re-enter from the left
         const start = [aPos.x + a.w, aPos.y + a.h / 2];
-        const end = [bPos.x, bPos.y + b.h / 2];
-        
-        // If wrapped row (b is below and to the left of a)
-        let d = "";
-        if (bPos.y > aPos.y + 40) {
-          const midY = (start[1] + end[1]) / 2;
-          d = `M${start[0]} ${start[1]} C${start[0] + 60} ${start[1]}, ${start[0] + 60} ${midY}, ${(start[0] + end[0]) / 2} ${midY} C${end[0] - 60} ${midY}, ${end[0] - 60} ${end[1]}, ${end[0]} ${end[1]}`;
-        } else {
-          const dx = Math.max(30, Math.abs(end[0] - start[0]) / 2);
-          d = `M${start[0]} ${start[1]} C${start[0] + dx} ${start[1]}, ${end[0] - dx} ${end[1]}, ${end[0]} ${end[1]}`;
-        }
-        
-        const active = nodeStatus[a.id] === "running" || nodeStatus[b.id] === "running";
-        const bTheme = NODE_TYPES_CATALOG[b.nodeType || "general"]?.theme;
-        wirePaths.push({
-          id: `w_linear_${i}`,
-          d,
-          active,
-          strokeColor: active ? "#38bdf8" : (bTheme?.accent || "#0284c7"),
-        });
+        const finish = [bPos.x, bPos.y + b.h / 2];
+        const midY = (start[1] + finish[1]) / 2;
+        d = `M${start[0]} ${start[1]} C${start[0] + 60} ${start[1]}, ${start[0] + 60} ${midY}, ${(start[0] + finish[0]) / 2} ${midY} C${finish[0] - 60} ${midY}, ${finish[0] - 60} ${finish[1]}, ${finish[0]} ${finish[1]}`;
+      } else if (lower) {
+        // vertical hand-off: leave the bottom edge, enter the top edge
+        const start = [aPos.x + a.w / 2, aPos.y + a.h];
+        const finish = [bPos.x + b.w / 2, bPos.y];
+        const dy = Math.max(35, (finish[1] - start[1]) / 2);
+        d = `M${start[0]} ${start[1]} C${start[0]} ${start[1] + dy}, ${finish[0]} ${finish[1] - dy}, ${finish[0]} ${finish[1]}`;
+      } else {
+        const start = [aPos.x + a.w, aPos.y + a.h / 2];
+        const finish = [bPos.x, bPos.y + b.h / 2];
+        const dx = Math.max(30, Math.abs(finish[0] - start[0]) / 2);
+        d = `M${start[0]} ${start[1]} C${start[0] + dx} ${start[1]}, ${finish[0] - dx} ${finish[1]}, ${finish[0]} ${finish[1]}`;
       }
+
+      const active = nodeStatus[a.id] === "running" || nodeStatus[b.id] === "running";
+      const bTheme = NODE_TYPES_CATALOG[b.nodeType || "general"]?.theme;
+      wirePaths.push({
+        id: `w_${edge.from}_${edge.to}`,
+        d,
+        active,
+        strokeColor: active ? "#38bdf8" : (bTheme?.accent || "#0284c7"),
+      });
     }
 
     return (
@@ -1737,18 +1860,20 @@ if __name__ == "__main__":
             </div>
             <div className="card-b">
               <div className="whenuse">
-                <div className="wu step-1" style={{ borderLeft: "3px solid #3b82f6" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(59,130,246,0.2)", color: "#93c5fd" }}>Pattern 1 · Linear Flow</span></div>
+                {/* One accent per pattern, fed to the top rule + label via --wu-accent.
+                    All other styling comes from .wu so the three read as peers. */}
+                <div className="wu" style={{ "--wu-accent": "var(--accent)" } as React.CSSProperties}>
+                  <div className="wu-head"><span className="wu-step">Pattern 1 · Linear Flow</span></div>
                   <b>Linear Chain &amp; Specialist Nodes</b>
                   <span>Step-by-step pipeline chaining General, Web Search, Knowledge Base, Excel Data, PDF Doc, and Final Synthesizer.</span>
                 </div>
-                <div className="wu step-2" style={{ borderLeft: "3px solid #0ea5e9" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(14,165,233,0.2)", color: "#7dd3fc" }}>Pattern 2 · Hierarchical</span></div>
+                <div className="wu" style={{ "--wu-accent": "var(--sky)" } as React.CSSProperties}>
+                  <div className="wu-head"><span className="wu-step">Pattern 2 · Hierarchical</span></div>
                   <b>Supervisor Coordinator</b>
                   <span>Single brain delegates to specialists (Researcher, Quantitative Analyst, Synthesizer) via a coordinator hub.</span>
                 </div>
-                <div className="wu step-3" style={{ borderLeft: "3px solid #6366f1" }}>
-                  <div className="wu-head"><span className="wu-step" style={{ background: "rgba(99,102,241,0.2)", color: "#a5b4fc" }}>Pattern 3 · Consensus</span></div>
+                <div className="wu" style={{ "--wu-accent": "var(--good)" } as React.CSSProperties}>
+                  <div className="wu-head"><span className="wu-step">Pattern 3 · Consensus</span></div>
                   <b>Debate &amp; Verification</b>
                   <span>High-stakes tasks: Dual agents reason independently; arbiter computes factual certainty and synthesizes agreement.</span>
                 </div>
@@ -1770,6 +1895,8 @@ if __name__ == "__main__":
                       key={key}
                       className={`model-card ${isSelected ? "on" : ""}`}
                       onClick={() => selectTopology(key)}
+                      /* border / radius / selected ring come from .model-card so this
+                         matches every other selectable card in the platform */
                       style={{
                         padding: 16,
                         display: "flex",
@@ -1778,16 +1905,13 @@ if __name__ == "__main__":
                         boxSizing: "border-box",
                         overflow: "hidden",
                         minHeight: 165,
-                        cursor: "pointer",
-                        border: isSelected ? "1.5px solid #38bdf8" : "1px solid var(--border)",
-                        background: isSelected ? "rgba(56,189,248,0.06)" : "var(--panel)",
-                        borderRadius: 12,
+                        background: isSelected ? "var(--accent-weak)" : "var(--panel)",
                       }}
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700, fontSize: 14, color: "var(--text)" }}>
-                          <span style={{ display: "inline-flex", alignItems: "center", color: isSelected ? "#38bdf8" : "var(--muted)" }}>
-                            {renderAgentIcon(item.icon, 20, isSelected ? "#38bdf8" : "currentColor")}
+                          <span style={{ display: "inline-flex", alignItems: "center", color: isSelected ? "var(--accent-strong)" : "var(--muted)" }}>
+                            {renderAgentIcon(item.icon, 20, isSelected ? "var(--accent-strong)" : "currentColor")}
                           </span>
                           <span>{item.title}</span>
                         </div>
@@ -1795,9 +1919,9 @@ if __name__ == "__main__":
                           className="badge"
                           style={{
                             fontSize: 10,
-                            background: isSelected ? "rgba(56,189,248,0.2)" : "var(--panel-2)",
-                            color: isSelected ? "#38bdf8" : "var(--muted)",
-                            border: isSelected ? "1px solid rgba(56,189,248,0.4)" : "1px solid var(--border)",
+                            background: isSelected ? "var(--accent-weak)" : "var(--panel-2)",
+                            color: isSelected ? "var(--accent-strong)" : "var(--muted)",
+                            border: isSelected ? "1px solid var(--accent)" : "1px solid var(--border)",
                             fontWeight: 600,
                             padding: "2px 7px",
                             whiteSpace: "nowrap",
@@ -1809,7 +1933,7 @@ if __name__ == "__main__":
                       <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.45, flex: 1, margin: 0, wordBreak: "break-word" }}>
                         {item.desc}
                       </div>
-                      <div style={{ fontSize: 11, color: isSelected ? "#38bdf8" : "var(--faint)", marginTop: "auto", fontFamily: "var(--mono)", fontWeight: 600 }}>
+                      <div style={{ fontSize: 11, color: isSelected ? "var(--accent-strong)" : "var(--faint)", marginTop: "auto", fontFamily: "var(--mono)", fontWeight: 600 }}>
                         {item.nodes.length} Specialist Agents · {isSelected ? "selected ✓" : "click to select"}
                       </div>
                     </div>
@@ -2234,6 +2358,26 @@ if __name__ == "__main__":
                       />
                     </div>
 
+                    {/* node.model existed in the data model but nothing read or set it —
+                        every node silently ran on the pipeline model. */}
+                    <div className="insp-field">
+                      <div className="k">Model</div>
+                      <select
+                        value={selNode.model && modelList.includes(selNode.model) ? selNode.model : "default"}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setNodes((prev) => prev.map((n) => (n.id === selNode.id ? { ...n, model: v } : n)));
+                        }}
+                        style={{ width: "100%", background: "var(--panel-2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "var(--rs)", padding: "7px 9px", fontSize: 12, fontFamily: "var(--mono)" }}
+                      >
+                        <option value="default">Pipeline default{selectedModel ? ` (${selectedModel})` : ""}</option>
+                        {modelList.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                      <div className="mono" style={{ fontSize: 10, color: "var(--faint)", marginTop: 4 }}>
+                        Override the model for this agent only — e.g. a cheaper model for routing, a stronger one for synthesis.
+                      </div>
+                    </div>
+
                     <div className="insp-field">
                       <div className="k">System Instructions / Prompt</div>
                       <textarea
@@ -2498,18 +2642,96 @@ if __name__ == "__main__":
                 style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontSize: 13, lineHeight: 1.5 }}
               />
 
+              {/* Which LLM the pipeline runs on. Without this the panel silently used
+                  whichever provider happened to be first from /api/models. */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+                <span className="mono" style={{ fontSize: 10.5, color: "var(--faint)", textTransform: "uppercase", letterSpacing: ".08em" }}>Model</span>
+                <select
+                  aria-label="Provider"
+                  value={selectedProviderId}
+                  disabled={running || providerList.length === 0}
+                  onChange={(e) => setSelectedProviderId(e.target.value)}
+                  style={{ background: "var(--panel-2)", color: "var(--text)", border: "1px solid var(--border-strong)", borderRadius: "var(--rs)", padding: "6px 9px", fontSize: 12, fontFamily: "inherit", maxWidth: 200 }}
+                >
+                  {providerList.length === 0 && <option value="">No provider configured</option>}
+                  {providerList.map((pr) => (
+                    <option key={pr.id} value={pr.id}>{pr.label || pr.provider}</option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Model"
+                  value={selectedModel}
+                  disabled={running || modelList.length === 0}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  style={{ background: "var(--panel-2)", color: "var(--text)", border: "1px solid var(--border-strong)", borderRadius: "var(--rs)", padding: "6px 9px", fontSize: 12, fontFamily: "var(--mono)", maxWidth: 240 }}
+                >
+                  {modelList.length === 0 && <option value="">{modelsLoading ? "Loading…" : "No models"}</option>}
+                  {modelList.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+                {providerList.length === 0 && !modelsLoading && (
+                  <Link href="/admin/providers" className="mono" style={{ fontSize: 11, color: "var(--accent-strong)", textDecoration: "underline" }}>
+                    Configure a provider →
+                  </Link>
+                )}
+                {nodes.some((nd) => nd.model && nd.model !== "default") && (
+                  <span className="mono" style={{ fontSize: 10.5, color: "var(--warn)" }}>
+                    {nodes.filter((nd) => nd.model && nd.model !== "default").length} node(s) override this
+                  </span>
+                )}
+              </div>
+
+              {(runWarnings.length > 0 || degraded.length > 0) && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+                  {degraded.length > 0 && (
+                    <div style={{ fontSize: 11.5, color: "var(--crit)", border: "1px solid var(--crit)", background: "rgba(239,68,68,0.08)", borderRadius: "var(--rs)", padding: "7px 10px" }}>
+                      <b>Degraded run</b> — {degraded.join(", ")} failed. Downstream agents were told the input was unavailable.
+                      {failReasons.map((r) => (
+                        <div key={r} style={{ marginTop: 5, fontWeight: 600 }}>{r}</div>
+                      ))}
+                    </div>
+                  )}
+                  {runWarnings.map((w) => (
+                    <div key={w} style={{ fontSize: 11.5, color: "var(--warn)", border: "1px solid var(--warn)", background: "rgba(245,158,11,0.08)", borderRadius: "var(--rs)", padding: "7px 10px" }}>
+                      {w}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "auto", paddingTop: 4 }}>
                 <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
                   {nodes.length} Specialist Agents Active
                 </span>
-                <button
-                  className="btn"
-                  onClick={runOrchestration}
-                  disabled={running || !task.trim()}
-                  style={{ minWidth: 180, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}
-                >
-                  {running ? <><span className="busy-dot" /> Orchestrating…</> : <><Play size={13} fill="currentColor" /> Run Orchestration</>}
-                </button>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <select
+                    aria-label="Load a test question"
+                    value=""
+                    disabled={running}
+                    onChange={(e) => { if (e.target.value) setTask(e.target.value); }}
+                    style={{
+                      background: "var(--panel-2)", color: "var(--text)", border: "1px solid var(--border-strong)",
+                      borderRadius: "var(--rs)", padding: "8px 10px", fontSize: 12, fontFamily: "inherit",
+                      maxWidth: 210, cursor: running ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    <option value="">Load a test question…</option>
+                    {(SAMPLE_TASKS[topology] || []).map((s2) => (
+                      <option key={s2.label} value={s2.task} title={s2.task}>{s2.label}</option>
+                    ))}
+                  </select>
+                  {running && (
+                    <button className="btn ghost" onClick={cancelOrchestration} style={{ minWidth: 90 }}>
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    className="btn"
+                    onClick={runOrchestration}
+                    disabled={running || !task.trim()}
+                    style={{ minWidth: 180, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+                  >
+                    {running ? <><span className="busy-dot" /> Orchestrating…</> : <><Play size={13} fill="currentColor" /> Run Orchestration</>}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2528,22 +2750,34 @@ if __name__ == "__main__":
                 {executions.length > 0 ? (
                   executions.map((exec, idx) => {
                     const theme = NODE_TYPES_CATALOG[exec.nodeType || "general"]?.theme || NODE_TYPES_CATALOG.general.theme;
+                    const isOpen = openStage === exec.nodeId;
+                    const hasDetail = !!(exec.output || exec.input);
                     return (
                       <div
                         key={exec.nodeId}
                         style={{
-                          padding: "9px 12px",
                           borderRadius: 9,
                           border: exec.status === "running"
                             ? "1.5px solid #38bdf8"
+                            : exec.status === "error"
+                            ? "1px solid var(--crit)"
                             : exec.status === "done"
                             ? `1px solid ${theme.border}`
                             : "1px dashed var(--border)",
                           background: exec.status === "running" ? "rgba(56,189,248,0.08)" : theme.bg,
+                          overflow: "hidden",
+                        }}
+                      >
+                      <div
+                        onClick={() => hasDetail && setOpenStage(isOpen ? null : exec.nodeId)}
+                        title={hasDetail ? "Show this agent's input and output" : undefined}
+                        style={{
+                          padding: "9px 12px",
                           display: "flex",
                           justifyContent: "space-between",
                           alignItems: "center",
                           gap: 10,
+                          cursor: hasDetail ? "pointer" : "default",
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -2554,9 +2788,40 @@ if __name__ == "__main__":
                             <div style={{ fontWeight: 700, fontSize: 12.5, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                               Stage {idx + 1}: {exec.nodeName}
                             </div>
-                            <div style={{ fontSize: 10.5, color: exec.status === "running" ? "#38bdf8" : exec.status === "done" ? "var(--good)" : "var(--faint)" }}>
-                              {exec.status === "running" ? "Processing…" : exec.status === "done" ? "✓ Completed" : "Waiting…"}
+                            <div style={{ fontSize: 10.5, color: exec.status === "running" ? "#38bdf8" : exec.status === "done" ? "var(--good)" : exec.status === "error" ? "var(--crit)" : "var(--faint)" }}>
+                              {exec.status === "running" ? "Processing…" : exec.status === "done" ? "✓ Completed" : exec.status === "error" ? "✕ Failed" : "Waiting…"}
                             </div>
+                            {/* What this agent actually did — one chip per real tool call. */}
+                            {!!exec.trace?.some((t) => t.kind === "action") && (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4 }}>
+                                {exec.trace!.filter((t) => t.kind === "action").map((t, ti) => {
+                                  const obs = exec.trace!.filter((o) => o.kind === "observation")[ti];
+                                  const failed = /^error/i.test((obs?.text || "").trim());
+                                  return (
+                                    <span
+                                      key={ti}
+                                      title={`input: ${t.text || "(none)"}
+
+observation: ${(obs?.text || "(pending)").slice(0, 400)}`}
+                                      className="mono"
+                                      style={{
+                                        fontSize: 9.5, padding: "1px 6px", borderRadius: 999,
+                                        border: `1px solid ${failed ? "var(--crit)" : "var(--border-strong)"}`,
+                                        color: failed ? "var(--crit)" : "var(--muted)",
+                                        background: "var(--panel-2)", cursor: "help",
+                                      }}
+                                    >
+                                      {failed ? "✕" : "✓"} {t.tool}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            {exec.status === "done" && exec.toolCalls === 0 && (
+                              <div className="mono" style={{ fontSize: 9.5, color: "var(--faint)", marginTop: 3 }}>
+                                no tool calls
+                              </div>
+                            )}
                           </div>
                           {exec.status === "running" && <span className="busy-dot" style={{ marginLeft: 2 }} />}
                         </div>
@@ -2575,7 +2840,49 @@ if __name__ == "__main__":
                               </span>
                             </div>
                           )}
+                          {hasDetail && (
+                            <span style={{ fontSize: 11, color: "var(--faint)", flex: "none", width: 12, textAlign: "center" }}>
+                              {isOpen ? "▾" : "▸"}
+                            </span>
+                          )}
                         </div>
+                      </div>
+
+                      {isOpen && (
+                        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 10, background: "var(--surface)" }}>
+                          <div>
+                            <div className="mono" style={{ fontSize: 9.5, color: "var(--faint)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                              What this agent was asked
+                            </div>
+                            <pre style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: "var(--muted)", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 150, overflow: "auto", fontFamily: "var(--mono)" }}>
+                              {exec.input || "—"}
+                            </pre>
+                          </div>
+                          {!!exec.trace?.length && (
+                            <div>
+                              <div className="mono" style={{ fontSize: 9.5, color: "var(--faint)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                                Reasoning &amp; tool calls
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 220, overflow: "auto" }}>
+                                {exec.trace!.map((t, ti) => (
+                                  <div key={ti} style={{ fontSize: 10.5, lineHeight: 1.5, fontFamily: "var(--mono)", color: t.kind === "error" ? "var(--crit)" : t.kind === "observation" ? "var(--good)" : "var(--muted)" }}>
+                                    <b style={{ color: "var(--faint)" }}>{t.kind}{t.tool ? ` · ${t.tool}` : ""}:</b>{" "}
+                                    {(t.text || "").slice(0, 600)}{(t.text || "").length > 600 ? "…" : ""}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          <div>
+                            <div className="mono" style={{ fontSize: 9.5, color: "var(--faint)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}>
+                              What this agent produced
+                            </div>
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", background: "var(--panel-2)", maxHeight: 300, overflow: "auto" }}>
+                              <AgentOutput text={exec.output || "—"} />
+                            </div>
+                          </div>
+                        </div>
+                      )}
                       </div>
                     );
                   })
@@ -2603,7 +2910,11 @@ if __name__ == "__main__":
               <div className="card-h" style={{ borderBottom: "1px solid rgba(59,130,246,0.25)" }}>
                 <span className="t" style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)" }}>
                   <Sparkles size={16} color="#38bdf8" />
-                  <b>Synthesized Multi-Agent Executive Output</b>
+                  <b>Final Answer</b>
+                  <span className="mono" style={{ fontSize: 10.5, color: "var(--faint)", fontWeight: 400 }}>
+                    from {executions[executions.length - 1]?.nodeName || "the last agent"}
+                    {degraded.length > 0 ? ` · ${degraded.length} upstream stage(s) failed` : ""}
+                  </span>
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   {overallConfidence && <ConfidenceGauge metrics={overallConfidence} size={36} compact={true} />}

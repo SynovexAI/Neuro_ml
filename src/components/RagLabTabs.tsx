@@ -4,21 +4,24 @@ import { useState } from "react";
 import RagLab from "@/components/RagLab";
 import RagFlowLab from "@/components/RagFlowLab";
 import RagPracticePlayground from "@/components/RagPracticePlayground";
+import RagArchitecturesLab from "@/components/RagArchitecturesLab";
 
 // Wraps the RAG lab with a Steps | Canvas | Practice toggle — the classic guided
 // stepper stays; Canvas is the node-pipeline edition on the same real engine;
 // Practice is a teaching workbench that lets students poke each pipeline step
-// (chunk → embed → pool → index → retrieve → train) on their own text.
+// (chunk → embed → pool → index → retrieve → train) on their own text;
+// Architectures runs the five mainstream RAG designs side by side on one corpus.
 export default function RagLabTabs() {
-  const [tab, setTab] = useState<"steps" | "canvas" | "practice">("steps");
+  const [tab, setTab] = useState<"steps" | "canvas" | "practice" | "arch">("steps");
   return (
     <>
-      <div className="seg" style={{ maxWidth: 360, marginBottom: 14 }}>
+      <div className="seg" style={{ maxWidth: 520, marginBottom: 14 }}>
         <button className={tab === "steps" ? "on" : ""} onClick={() => setTab("steps")}>Steps</button>
         <button className={tab === "canvas" ? "on" : ""} onClick={() => setTab("canvas")}>Canvas</button>
         <button className={tab === "practice" ? "on" : ""} onClick={() => setTab("practice")}>Practice</button>
+        <button className={tab === "arch" ? "on" : ""} onClick={() => setTab("arch")}>Architectures</button>
       </div>
-      {tab === "steps" ? <RagLab /> : tab === "canvas" ? <RagFlowLab /> : <RagPracticePlayground />}
+      {tab === "steps" ? <RagLab /> : tab === "canvas" ? <RagFlowLab /> : tab === "practice" ? <RagPracticePlayground /> : <RagArchitecturesLab />}
     </>
   );
 }

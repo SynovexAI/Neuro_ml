@@ -221,7 +221,8 @@ function Inner() {
     if (!wf || !Array.isArray(wf.nodes)) { setSavedMsg("Nothing to load"); return; }
     setNodes(wf.nodes.map((n) => ({ id: n.id, type: "flow", position: n.position || { x: 30, y: 100 }, data: n.data })));
     setEdges((wf.edges || []).map((e) => ({ id: e.id || `e-${e.source}-${e.target}`, source: e.source, target: e.target, animated: true, style: { stroke: "#5b7cff", strokeWidth: 2 }, markerEnd: { type: MarkerType.ArrowClosed, color: "#5b7cff" } })));
-    if (wf.step != null) setStep(wf.step); setSelId(null); setMessages([]); setDenseVecs(null);
+    // wf.step comes from a stored project config — clamp so a stale value can't index past STEPS
+    if (wf.step != null) setStep(Math.max(0, Math.min(STEPS.length - 1, wf.step))); setSelId(null); setMessages([]); setDenseVecs(null);
   }
   async function loadProjects() { try { const j = await fetch("/api/projects?lab=rag").then((r) => r.json()); setProjects(((j.projects || []) as { id: string; name: string }[]).map((p) => ({ id: p.id, name: p.name }))); } catch { /* ignore */ } }
   async function loadProject(id: string) { if (!id) return; try { const j = await fetch(`/api/projects?id=${id}`).then((r) => r.json()); applyWorkflow(j.project?.config as SavedWF); setCurrentId(id); setSavedMsg("Loaded ✓"); setTimeout(() => setSavedMsg(""), 2000); } catch { setSavedMsg("Load failed"); } }

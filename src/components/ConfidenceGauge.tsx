@@ -191,8 +191,12 @@ export default function ConfidenceGauge({
   );
 }
 
-function MetricBar({ label, value, hint }: { label: string; value: number; hint: string }) {
-  const color = value >= 75 ? "var(--good, #10b981)" : value >= 50 ? "#f59e0b" : "#f43f5e";
+// `value: null` = the run gave us nothing to measure this on. Rendered as an
+// explicit "n/a" rather than a 0% bar (which reads as a bad score) or a filled
+// bar (which reads as a real measurement).
+function MetricBar({ label, value, hint }: { label: string; value: number | null; hint: string }) {
+  const measured = value !== null;
+  const color = !measured ? "var(--faint)" : value >= 75 ? "var(--good, #10b981)" : value >= 50 ? "#f59e0b" : "#f43f5e";
 
   return (
     <div
@@ -208,20 +212,20 @@ function MetricBar({ label, value, hint }: { label: string; value: number; hint:
     >
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
         <span style={{ color: "var(--muted)", fontWeight: 500 }}>{label}</span>
-        <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color }}>{value}%</span>
+        <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color }} title={measured ? undefined : "Not measurable for this run"}>{measured ? `${value}%` : "n/a"}</span>
       </div>
       <div style={{ height: 4, width: "100%", background: "rgba(255, 255, 255, 0.08)", borderRadius: 2, overflow: "hidden" }}>
         <div
           style={{
             height: "100%",
-            width: `${value}%`,
-            background: color,
+            width: measured ? `${value}%` : "100%",
+            background: measured ? color : "repeating-linear-gradient(90deg, var(--border-strong) 0 4px, transparent 4px 8px)",
             borderRadius: 2,
             transition: "width 0.6s ease",
           }}
         />
       </div>
-      <span style={{ fontSize: 9, color: "var(--muted)", opacity: 0.75 }}>{hint}</span>
+      <span style={{ fontSize: 9, color: "var(--muted)", opacity: 0.75 }}>{measured ? hint : "no tool calls in this run"}</span>
     </div>
   );
 }
